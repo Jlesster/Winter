@@ -1,0 +1,6 @@
+option(
+  'ts_grammars',
+  type: 'array',
+  value: ['lua', 'c', 'cpp', 'java', 'rust'],
+  description: 'tree-sitter grammars to build and link',
+)

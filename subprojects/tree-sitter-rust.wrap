@@ -1,0 +1,9 @@
+[wrap-git]
+url = https://github.com/tree-sitter/tree-sitter-rust.git
+revision = v0.24.2
+depth = 1
+directory = tree-sitter-rust
+patch_directory = ts-grammar
+
+[provide]
+dependency_names = tree-sitter-rust

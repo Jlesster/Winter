@@ -1,9 +1,23 @@
+#include <asm-generic/ioctls.h>
+#include <sys/stat.h>
+#include <algorithm>
+#include <csignal>
+#include <format>
+#include <ios>
+#include <iterator>
 #include <trux/core.hpp>
+#include "buffer.hpp"
 #include "core.hpp"
+#include "motion.hpp"
+#include "piece.hpp"
+#include "syntax.hpp"
+#include "utf8.hpp"
 
 #include <cctype>
-#include <cstdarg>
+#include <climits>
 #include <ctime>
+#include <fstream>
+#include <map>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -16,17 +30,6 @@
 #include <unistd.h>
 #include <cstddef>
 #include <cstdlib>
-#include <trux/terminal/ansi.hpp>
-
-struct ERow {
-    int idx;
-    int size;
-    int real_size;
-    char* chars;
-    char* render;
-    unsigned char* highlight;
-    int hl_open_comment;
-};
 
 enum EditorKey {
     BACKSPACE = 127,
@@ -39,62 +42,38 @@ enum EditorKey {
     DELETE,
     HOME,
     END,
+    NONE,
 };
 
 // data
-struct EditorSyntax {
-    const char* filetype;
-    const char** filematch;
-    const char** keywords;
-    const char* singleline_comment_start;
-    const char* multiline_comment_start;
-    const char* multiline_comment_end;
-    int flags;
-};
-
 struct EditorConfig {
-    bool dirty;
-    int cx, cy;
-    int rx;
-    int row_offset;
-    int col_offset;
-    int term_rows;
-    int term_cols;
-    int num_rows;
-    int dirt_amount;
-    ERow* row;
-    char* filename;
-    char status_message[80];
-    time_t status_message_time;
-    termios orig_termios;
-    EditorSyntax* syntax;
+    bool eol = true;
+    int cx, cy = 0;
+    int rx = 0;
+    int want_rx = 0;
+    int row_offset = 0;
+    int col_offset = 0;
+    int term_rows = 0;
+    int term_cols = 0;
+    std::string orig{};
+    PieceTable pt{};
+    Syntax syntax{};
+    int num_rows() const { return static_cast<int>(pt.line_count()); }
+    std::string filename = "";
+    std::string status_message = "";
+    time_t status_message_time = 0;
+    termios orig_termios{};
     EditorMode mode = EditorMode::NORMAL;
 };
 
 EditorConfig E;
 
 // filetypes
-const char* C_HL_EXTENSIONS[] = {".c", ".h", ".cpp", ".hpp", nullptr};
-const char* C_HL_KEYWORDS[] = {
-    "switch", "if",    "while",     "for",     "break",   "continue",
-    "return", "else",  "struct",    "union",   "typedef", "static",
-    "enum",   "class", "case",      "int|",    "long|",   "double|",
-    "float|", "char|", "unsigned|", "signed|", "void|",   nullptr};
-
-struct EditorSyntax HLDB[] = {
-    {"c",
-     C_HL_EXTENSIONS,
-     C_HL_KEYWORDS,
-     "//",
-     "/*",
-     "*/",
-     HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS},
-};
-#define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
-
 void editor_refresh_screen();
-char* editor_prompt(const char* prompt, void (*callback)(char*, int));
-void editor_set_status_message(const char* fmt, ...);
+std::string editor_prompt(const std::string_view prompt,
+                          void (*callback)(std::string, int));
+template <typename... Args>
+void editor_set_status_message(std::format_string<Args...> fmt, Args&&... args);
 
 // terminal
 void die(const char* s) {
@@ -102,6 +81,17 @@ void die(const char* s) {
     write(STDOUT_FILENO, "\x1b[H", 3);
     perror(s);
     exit(1);
+}
+
+static volatile sig_atomic_t g_resized = 0;
+static void on_winch(int) { g_resized = 1; }
+
+void install_winch_handler() {
+    struct sigaction sa{};
+    sa.sa_handler = on_winch;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if(sigaction(SIGWINCH, &sa, nullptr) == -1) die("sigaction");
 }
 
 void editor_quit() {
@@ -131,47 +121,68 @@ void enable_raw_mode() {
 }
 
 int editor_read_key() {
+    static int pushed = -1;
+    if(pushed != -1) {
+        const int k = pushed;
+        pushed = -1;
+        return k;
+    }
     int nread;
     char c;
     while((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+        if(g_resized) return NONE;
         if(nread == -1 && errno != EAGAIN) die("read");
     }
-    if(c == '\x1b') {
-        char seq[3];
-        if(read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
-        if(read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
-        if(seq[0] == '[') {
-            if(seq[1] >= '0' && seq[1] <= '9') {
-                if(read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
-                if(seq[2] == '~') {
-                    switch(seq[1]) {
-                        case '1': return HOME;
-                        case '3': return DELETE;
-                        case '4': return END;
-                        case '5': return PAGE_UP;
-                        case '6': return PAGE_DOWN;
-                        case '7': return HOME;
-                        case '8': return END;
-                    }
-                }
-            } else {
-                switch(seq[1]) {
-                    case 'A': return ARROW_UP;
-                    case 'B': return ARROW_DOWN;
-                    case 'C': return ARROW_RIGHT;
-                    case 'D': return ARROW_LEFT;
-                    case 'F': return HOME;
-                    case 'H': return END;
-                }
-            }
-        } else if(seq[0] == '0') {
-            switch(seq[1]) {
+    if(c != '\x1b') return static_cast<unsigned char>(c);
+    char b;
+    if(read(STDIN_FILENO, &b, 1) != 1) return '\x1b';
+    if(b == 'O') {
+        if(read(STDIN_FILENO, &b, 1) != 1) return '\x1b';
+        switch(b) {
+            case 'A': return ARROW_UP;
+            case 'B': return ARROW_DOWN;
+            case 'C': return ARROW_RIGHT;
+            case 'D': return ARROW_LEFT;
+            case 'H': return HOME;
+            case 'F': return END;
+        }
+        return NONE;
+    }
+    if(b != '[') {
+        pushed = static_cast<unsigned char>(b);
+        return '\x1b';
+    }
+    int param = 0;
+    bool first = true;
+    for(int i = 0; i < 16; ++i) {
+        if(read(STDIN_FILENO, &b, 1) != 1) return '\x1b';
+        if(b >= '0' && b <= '9') {
+            if(first) param = param * 10 + (b - '0');
+        } else if(b == ';') {
+            first = false;
+        } else if(b >= 0x40 && b <= 0x7E) {
+            switch(b) {
+                case 'A': return ARROW_UP;
+                case 'B': return ARROW_DOWN;
+                case 'C': return ARROW_RIGHT;
+                case 'D': return ARROW_LEFT;
                 case 'H': return HOME;
                 case 'F': return END;
+                case '~':
+                    switch(param) {
+                        case 1:
+                        case 7: return HOME;
+                        case 3: return DELETE;
+                        case 4:
+                        case 8: return END;
+                        case 5: return PAGE_UP;
+                        case 6: return PAGE_DOWN;
+                    }
             }
+            return NONE;
         }
-        return '\x1b';
-    } else return c;
+    }
+    return NONE;
 }
 
 int get_cursor_position(int* rows, int* cols) {
@@ -189,6 +200,14 @@ int get_cursor_position(int* rows, int* cols) {
     return 0;
 }
 
+int query_window_size(int* rows, int* cols) {
+    winsize ws;
+    if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) return -1;
+    *rows = ws.ws_row;
+    *cols = ws.ws_col;
+    return 0;
+}
+
 int get_window_size(int* rows, int* cols) {
     winsize ws;
     if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
@@ -201,239 +220,368 @@ int get_window_size(int* rows, int* cols) {
     }
 }
 
-// row operation
-int editor_row_cx_to_rx(ERow* row, int cx) {
+// row helpers
+
+size_t line_len(size_t y) { return E.pt.line_end(y) - E.pt.line_start(y); }
+bool is_ctl(char32_t cp) { return cp < 0x20 || (cp >= 0x7F && cp < 0xA0); }
+
+int cell_width(char32_t cp, int rx) {
+    if(cp == '\t') return WINTER_TAB_STOP - (rx % WINTER_TAB_STOP);
+    if(is_ctl(cp)) return 1;
+    return utf8_width(cp);
+}
+
+int snap_cx(std::string_view line, int cx) {
+    if(cx <= 0) return 0;
+    if(cx >= static_cast<int>(line.size()))
+        return static_cast<int>(line.size());
+    return static_cast<int>(utf8_prev(line, utf8_next(line, cx)));
+}
+
+int cx_to_rx(std::string_view line, int cx) {
     int rx = 0;
-    int j;
-    for(j = 0; j < cx; j++) {
-        if(row->chars[j] == '\t')
-            rx += (WINTER_TAB_STOP - 1) - (rx % WINTER_TAB_STOP);
-        rx++;
+    for(int j = 0;
+        j < static_cast<int>(line.size()) && static_cast<int>(j) < cx;) {
+        const Decoded d = utf8_decode(line, j);
+        rx += cell_width(d.cp, rx);
+        j += d.len;
     }
     return rx;
 }
 
-int editor_row_rx_to_cx(ERow* row, int rx) {
-    int cursor_rx = 0;
-    int cx;
-    for(cx = 0; cx < row->size; cx++) {
-        if(row->chars[cx] == '\t')
-            cursor_rx += (WINTER_TAB_STOP - 1) - (cursor_rx % WINTER_TAB_STOP);
-        cursor_rx++;
-        if(cursor_rx > rx) return cx;
+int rx_to_cx(std::string_view line, int rx) {
+    int cur = 0;
+    size_t i = 0;
+    while(i < line.size()) {
+        const Decoded d = utf8_decode(line, i);
+        cur += cell_width(d.cp, cur);
+        if(cur > rx) return static_cast<int>(i);
+        i += d.len;
     }
-    return cx;
+    return static_cast<int>(i);
 }
 
-void editor_update_row(ERow* row) {
-    int tabs = 0;
-    int j;
-    for(j = 0; j < row->size; j++) {
-        if(row->chars[j] == '\t') tabs++;
+Screen scr;
+bool g_scroll = false;
+
+int text_width(std::string_view s) {
+    int w = 0;
+    for(size_t i = 0; i < s.size();) {
+        const Decoded d = utf8_decode(s, i);
+        w += cell_width(d.cp, w);
+        i += d.len;
     }
-    free(row->render);
-    row->render = static_cast<char*>(
-        malloc(row->size + tabs * (WINTER_TAB_STOP - 1) + 1));
-    int idx = 0;
-    for(j = 0; j < row->size; j++) {
-        if(row->chars[j] == '\t') {
-            row->render[idx++] = ' ';
-            while(idx % WINTER_TAB_STOP != 0) row->render[idx++] = ' ';
-        } else {
-            row->render[idx++] = row->chars[j];
+    return w;
+}
+
+int put_text(int x, int y, std::string_view s, int limit, Style st) {
+    for(size_t i = 0; i < s.size();) {
+        const Decoded d = utf8_decode(s, i);
+        i += d.len;
+        const int w = cell_width(d.cp, 0);
+        if(w == 0) {
+            if(x > 0) scr.at(x - 1, y).mark = d.cp;
+            continue;
         }
+        if(x + w > limit) break;
+        scr.at(x, y) = Cell{d.cp, static_cast<uint8_t>(w), st};
+        if(w == 2) scr.at(x + 1, y) = Cell{U'\0', 0, st};
+        x += w;
     }
-    row->render[idx] = '\0';
-    row->real_size = idx;
+    return x;
 }
 
-void editor_insert_row(int at, const char* s, size_t len) {
-    if(at < 0 || at > E.num_rows) return;
-    E.row = static_cast<ERow*>(realloc(E.row, sizeof(ERow) * (E.num_rows + 1)));
-    memmove(&E.row[at + 1], &E.row[at], sizeof(ERow) * (E.num_rows - at));
-    for(int j = at + 1; j <= E.num_rows; j++) E.row[j].idx++;
-    E.row[at].idx = at;
-    E.row[at].size = len;
-    E.row[at].chars = static_cast<char*>(malloc(len + 1));
-    memcpy(E.row[at].chars, s, len);
-    E.row[at].chars[len] = '\0';
-    E.row[at].real_size = 0;
-    E.row[at].render = nullptr;
-    E.row[at].highlight = nullptr;
-    E.row[at].hl_open_comment = 0;
-    editor_update_row(&E.row[at]);
-    E.num_rows++;
-    E.dirty = true;
+void put_line(int y, std::string_view line, int col_off, int cols,
+              const std::vector<Span>& spans = {}) {
+    const int end = col_off + cols;
+    int rx = 0;
+    int last = -1;
+    size_t si = 0;
+    for(size_t i = 0; i < line.size() && rx < end;) {
+        const size_t at = i;
+        const Decoded d = utf8_decode(line, i);
+        i += d.len;
+        while(si < spans.size() && spans[si].end <= at) ++si;
+        const Style st = (si < spans.size() && spans[si].start <= at)
+                             ? spans[si].st
+                             : Style{};
+        const char32_t cp = d.cp;
+        const int w = cell_width(cp, rx);
+        if(w == 0) {
+            if(last >= 0) scr.at(last, y).mark = cp;
+            continue;
+        }
+        const int next = rx + w;
+        if(next > col_off) {
+            const int x = rx - col_off;
+            if(cp == '\t' || rx < col_off || next > end) {
+                for(int k = std::max(rx, col_off); k < std::min(next, end); k++)
+                    scr.at(k - col_off, y) = Cell{};
+                last = -1;
+            } else if(is_ctl(cp)) {
+                const char shown =
+                    (cp <= 26) ? static_cast<char>('@' + cp) : '?';
+                scr.at(x, y) = Cell{static_cast<char32_t>(shown),
+                                    1,
+                                    Style{.attrs = ATTR_REVERSE}};
+                last = -1;
+            } else {
+                scr.at(x, y) = Cell{cp, static_cast<uint8_t>(w), st};
+                if(w == 2) scr.at(x + 1, y) = Cell{u'\0', 0, st};
+                last = x;
+            }
+        }
+        rx = next;
+    }
 }
 
-void editor_free_row(ERow* row) {
-    free(row->render);
-    free(row->chars);
-    free(row->highlight);
+// cursor offset modes
+
+size_t cursor_offset() { return E.pt.from_linecol(E.cy, E.cx); }
+
+void set_cursor_offset(size_t pos) {
+    const LineCol lc = E.pt.to_linecol(pos);
+    E.cy = static_cast<int>(lc.line);
+    E.cx = static_cast<int>(lc.col);
 }
 
-void editor_delete_row(int at) {
-    if(at < 0 || at >= E.num_rows) return;
-    editor_free_row(&E.row[at]);
-    memmove(&E.row[at], &E.row[at + 1], sizeof(ERow) * (E.num_rows - at - 1));
-    for(int j = at; j < E.num_rows - 1; j++) E.row[j].idx--;
-    E.num_rows--;
-    E.dirty = true;
-    E.dirt_amount++;
+void set_mode(EditorMode m) {
+    if(E.mode == m) return;
+    if(E.mode == INSERT) E.pt.end_group();
+    if(m == INSERT) E.pt.begin_group();
+    E.mode = m;
 }
 
-void editor_row_insert_char(ERow* row, int at, int c) {
-    if(at < 0 || at > row->size) at = row->size;
-    row->chars = static_cast<char*>(realloc(row->chars, row->size + 2));
-    memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
-    row->size++;
-    row->chars[at] = c;
-    editor_update_row(row);
-}
-
-void editor_row_append_string(ERow* row, char* s, size_t len) {
-    row->chars = static_cast<char*>(realloc(row->chars, row->size + len + 1));
-    memcpy(&row->chars[row->size], s, len);
-    row->size += len;
-    row->chars[row->size] = '\0';
-    editor_update_row(row);
-    E.dirty = true;
-    E.dirt_amount++;
-}
-
-void editor_row_delete_char(ERow* row, int at) {
-    if(at < 0 || at > row->size) return;
-    memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
-    row->size--;
-    editor_update_row(row);
-    E.dirty = true;
-    E.dirt_amount++;
-}
+// edits
 
 void editor_insert_char(int c) {
-    if(E.cy == E.num_rows) { editor_insert_row(E.num_rows, "", 0); }
-    editor_row_insert_char(&E.row[E.cy], E.cx, c);
+    const char ch = static_cast<char>(c);
+    E.pt.insert(cursor_offset(), std::string_view(&ch, 1));
     E.cx++;
 }
 
-void editor_insert_newline() {
-    if(E.cx == 0) {
-        editor_insert_row(E.cy, "", 0);
-    } else {
-        ERow* row = &E.row[E.cy];
-        editor_insert_row(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
-        row = &E.row[E.cy];
-        row->size = E.cx;
-        row->chars[row->size] = '\0';
-        editor_update_row(row);
+void editor_insert_tab() {
+#if WINTER_EXPAND_TAB
+    const int rx = cx_to_rx(E.pt.line_text(E.cy), E.cx);
+    const int n = WINTER_SHIFT_WIDTH - (rx % WINTER_SHIFT_WIDTH);
+    E.pt.insert(cursor_offset(), std::string(static_cast<size_t>(n), ' '));
+    E.cx += n;
+#else
+    editor_insert_char('\t');
+#endif
+}
+
+static const std::string kIndentUnit =
+    WINTER_EXPAND_TAB ? std::string(WINTER_SHIFT_WIDTH, ' ')
+                      : std::string("\t");
+
+static char closer_for(char c) {
+    switch(c) {
+        case '(': return ')';
+        case '[': return ']';
+        case '{': return '}';
+        case '<': return '>';
+        default: return 0;
     }
+}
+
+static bool is_closer(char c) {
+    return c == ')' || c == ']' || c == '}' || c == '>';
+}
+static bool is_quote(char c) { return c == '"' || c == '\'' || c == '`'; }
+static bool is_word(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+static std::string_view leading_ws(std::string_view line) {
+    size_t i = 0;
+    while(i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    return line.substr(0, i);
+}
+
+static bool is_empty_pair(char prev, char next) {
+    if(!next) return false;
+    return closer_for(prev) == next || (is_quote(prev) && prev == next);
+}
+
+void editor_type_char(int c) {
+    const char ch = static_cast<char>(c);
+    const std::string line = E.pt.line_text(E.cy);
+    const size_t cx = static_cast<size_t>(E.cx);
+    const char prev = cx > 0 ? line[cx - 1] : 0;
+    const char next = cx < line.size() ? line[cx] : 0;
+    if((is_closer(ch) || is_quote(ch)) && next == ch) {
+        E.cx++;
+        return;
+    }
+    if(is_closer(ch)) {
+        if(line.find_first_not_of(" \t") >= cx) {
+            size_t drop = 0;
+            if(prev == '\t') drop = 1;
+            else
+                while(drop < kIndentUnit.size() && drop < cx &&
+                      line[cx - 1 - drop] == ' ')
+                    ++drop;
+            if(drop) {
+                E.pt.remove(cursor_offset() - drop, drop);
+                E.cx -= static_cast<int>(drop);
+            }
+        }
+        editor_insert_char(c);
+        return;
+    }
+    const bool room = next == 0 || next == ' ' || next == '\t' ||
+                      is_closer(next) || next == ',' || next == ';';
+    if(const char cl = closer_for(ch)) {
+        E.pt.insert(cursor_offset(),
+                    room ? std::string{ch, cl} : std::string{ch});
+        E.cx++;
+        return;
+    }
+    if(is_quote(ch)) {
+        const bool apostrophe = ch == '\'' && is_word(prev);
+        const bool pair = room && !apostrophe && prev != ch;
+        if(pair) {
+            E.pt.insert(cursor_offset(), std::string{ch, ch});
+            E.cx++;
+        } else editor_insert_char(c);
+        return;
+    }
+    editor_insert_char(c);
+}
+
+void editor_insert_newline() {
+    const std::string line = E.pt.line_text(E.cy);
+    const size_t cx = static_cast<size_t>(E.cx);
+    const std::string_view before = std::string_view(line).substr(0, cx);
+    const std::string_view after = std::string_view(line).substr(cx);
+    const std::string indent(leading_ws(before));
+    const size_t last = before.find_last_not_of(" \t");
+    const char prev = last == std::string_view::npos ? 0 : before[last];
+    if(last == std::string_view::npos && cx > 0) {
+        E.pt.remove(cursor_offset() - cx, cx);
+        E.cx = 0;
+    }
+    std::string ins = "\n" + indent;
+    size_t new_cx = indent.size();
+    if(const char cl = closer_for(prev)) {
+        ins += kIndentUnit;
+        new_cx += kIndentUnit.size();
+        if(after.starts_with(cl)) ins += "\n" + indent;
+    }
+    E.pt.insert(cursor_offset(), ins);
     E.cy++;
-    E.cx = 0;
+    E.cx = static_cast<int>(new_cx);
+}
+
+static std::string indent_below(std::string_view line) {
+    std::string indent(leading_ws(line));
+    const size_t last = line.find_last_not_of(" \t");
+    if(last != std::string_view::npos && closer_for(line[last]))
+        indent += kIndentUnit;
+    return indent;
+}
+
+void editor_open_below() {
+    const std::string indent = indent_below(E.pt.line_text(E.cy));
+    E.pt.insert(E.pt.line_end(E.cy), "\n" + indent);
+    E.cy++;
+    E.cx = static_cast<int>(indent.size());
+}
+
+void editor_open_above() {
+    const std::string indent(leading_ws(E.pt.line_text(E.cy)));
+    E.pt.insert(E.pt.line_start(E.cy), indent + "\n");
+    E.cx = static_cast<int>(indent.size());
 }
 
 void editor_delete_char() {
-    if(E.cy == E.num_rows) return;
-    if(E.cx == 0 && E.cy == 0) return;
-    ERow* row = &E.row[E.cy];
+    const size_t pos = cursor_offset();
+    if(pos == 0) return;
     if(E.cx > 0) {
-        editor_row_delete_char(row, E.cx - 1);
-        E.cx--;
+        const std::string line = E.pt.line_text(E.cy);
+        const char next = E.cx < static_cast<int>(line.size()) ? line[E.cx] : 0;
+        if(is_empty_pair(line[E.cx - 1], next)) {
+            E.pt.remove(pos - 1, 2);
+            E.cx--;
+            return;
+        }
+        const int from = static_cast<int>(utf8_prev(line, E.cx));
+        E.pt.remove(pos - (E.cx - from), E.cx - from);
+        E.cx = from;
     } else {
-        E.cx = E.row[E.cy - 1].size;
-        editor_row_append_string(&E.row[E.cy - 1], row->chars, row->size);
-        editor_delete_row(E.cy);
+        const int prev_len = static_cast<int>(line_len(E.cy - 1));
+        E.pt.remove(pos - 1, 1);
         E.cy--;
+        E.cx = prev_len;
+    }
+}
+
+void editor_delete_forward() {
+    const std::string line = E.pt.line_text(E.cy);
+    const size_t pos = cursor_offset();
+    if(E.cx < static_cast<int>(line.size())) {
+        const int to = static_cast<int>(utf8_next(line, E.cx));
+        E.pt.remove(pos, static_cast<size_t>(to - E.cx));
+    } else if(E.cy < E.num_rows() - 1) {
+        E.pt.remove(pos, 1);
     }
 }
 
 // file io
-char* editor_rows_to_string(int* buf_len) {
-    int total_len = 0;
-    int j;
-    for(j = 0; j < E.num_rows; j++) total_len += E.row[j].size + 1;
-    *buf_len = total_len;
-    char* buf = static_cast<char*>(malloc(total_len));
-    char* p = buf;
-    for(j = 0; j < E.num_rows; j++) {
-        memcpy(p, E.row[j].chars, E.row[j].size);
-        p += E.row[j].size;
-        *p = '\n';
-        p++;
-    }
-    return buf;
-}
 
-void editor_open(char* filename) {
-    free(E.filename);
-    E.filename = strdup(filename);
-    FILE* file_pointer = fopen(filename, "r");
-    if(!file_pointer) die("fopen");
-    char* line = nullptr;
-    size_t line_cap = 0;
-    ssize_t line_len;
-    while((line_len = getline(&line, &line_cap, file_pointer)) != -1) {
-        while(line_len > 0 &&
-              (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
-            line_len--;
-        editor_insert_row(E.num_rows, line, line_len);
-    }
-    free(line);
-    fclose(file_pointer);
-    E.dirty = false;
-    E.dirt_amount = 0;
+void editor_open(const std::string& filename) {
+    E.filename = filename;
+    std::ifstream in(filename, std::ios::binary);
+    if(!in) die("fopen");
+    E.orig.assign(std::istreambuf_iterator<char>(in),
+                  std::istreambuf_iterator<char>());
+    E.eol = E.orig.empty() || E.orig.back() == '\n';
+    std::string_view view = E.orig;
+    if(!E.orig.empty() && E.orig.back() == '\n') view.remove_suffix(1);
+    E.pt = PieceTable(view);
+    if(E.syntax.attach(filename)) E.syntax.parse(E.pt, E.eol);
 }
 
 // find
 
-void editor_find_callback(char* query, int key) {
+void editor_find_callback(std::string query, int key) {
     static int last_match = -1;
-    static char* saved_query = nullptr;
-    static int saved_highlight_line;
-    static char* saved_highlight = nullptr;
+    static std::string saved_query = "";
     int direction = 1;
-    if(saved_highlight) {
-        memcpy(E.row[saved_highlight_line].highlight,
-               saved_highlight,
-               E.row[saved_highlight_line].real_size);
-        free(saved_highlight);
-        saved_highlight = nullptr;
-    }
     if(E.mode == EditorMode::NORMAL && (key == 'n' || key == 'N')) {
-        if(!saved_query) {
+        if(saved_query == "") {
             editor_set_status_message("No previous search");
             return;
         }
         query = saved_query;
         direction = (key == 'N') ? -1 : 1;
     } else if(key == '\r') {
-        free(saved_query);
-        saved_query = strdup(query);
+        saved_query = query;
         return;
     } else {
         last_match = -1;
         if(key == '\x1b' || query[0] == '\0') return;
     }
     if(last_match == -1) direction = 1;
+    if(last_match >= E.num_rows()) last_match = -1;
     int current = last_match;
     int i;
-    for(i = 0; i < E.num_rows; i++) {
+    for(i = 0; i < E.num_rows(); i++) {
         current += direction;
-        if(current == -1) current = E.num_rows - 1;
-        else if(current == E.num_rows) current = 0;
-        ERow* row = &E.row[current];
-        char* match = strstr(row->render, query);
-        if(match) {
+        if(current == -1) current = E.num_rows() - 1;
+        else if(current == E.num_rows()) current = 0;
+        const std::string line = E.pt.line_text(current);
+        size_t match_pos = line.find(query);
+        if(match_pos != std::string::npos) {
             last_match = current;
             E.cy = current;
-            E.cx = editor_row_rx_to_cx(row, match - row->render);
-            E.row_offset = E.num_rows;
-            saved_highlight_line = current;
-            saved_highlight = static_cast<char*>(malloc(row->real_size));
-            memcpy(saved_highlight, row->highlight, row->real_size);
+            E.cx = static_cast<int>(match_pos);
+            E.row_offset = E.num_rows();
             return;
         }
     }
-    editor_set_status_message("Pattern not found: %s", query);
+    editor_set_status_message("Pattern not found: {}", query);
 }
 
 void editor_find() {
@@ -441,40 +589,25 @@ void editor_find() {
     int saved_cy = E.cy;
     int saved_col_offset = E.col_offset;
     int saved_row_offset = E.row_offset;
-    char* query =
-        editor_prompt("Search: %s (ESC to cancel)", editor_find_callback);
-    E.mode = EditorMode::NORMAL;
-    if(query) {
-        free(query);
-    } else {
-        E.cx = saved_cx;
-        E.cy = saved_cy;
-        E.col_offset = saved_col_offset;
-        E.row_offset = saved_row_offset;
-    }
+    std::string query = editor_prompt("Search: ", editor_find_callback);
+    set_mode(EditorMode::NORMAL);
+    E.cx = saved_cx;
+    E.cy = saved_cy;
+    E.col_offset = saved_col_offset;
+    E.row_offset = saved_row_offset;
 }
 
 // double buffer
 struct Abuf {
-    char* b;
-    int len;
+    std::string b;
 };
-#define ABUF_INIT {nullptr, 0}
+#define ABUF_INIT {"", 0}
 
-void ab_append(Abuf* ab, const char* s, int len) {
-    char* new_buf = static_cast<char*>(realloc(ab->b, ab->len + len));
-    if(new_buf == nullptr) return;
-    memcpy(&new_buf[ab->len], s, len);
-    ab->b = new_buf;
-    ab->len += len;
-}
-
-void ab_free(Abuf* ab) { free(ab->b); }
+void ab_append(Abuf* ab, const std::string_view s) { ab->b.append(s); }
 
 // output
 void editor_scroll() {
-    E.rx = 0;
-    if(E.cy < E.num_rows) { E.rx = editor_row_cx_to_rx(&E.row[E.cy], E.cx); }
+    E.rx = cx_to_rx(E.pt.line_text(E.cy), E.cx);
     if(E.cy < E.row_offset) { E.row_offset = E.cy; }
     if(E.cy >= E.row_offset + E.term_rows) {
         E.row_offset = E.cy - E.term_rows + 1;
@@ -485,63 +618,44 @@ void editor_scroll() {
     }
 }
 
-void editor_draw_rows(Abuf* ab) {
-    int y;
-    for(y = 0; y < E.term_rows; ++y) {
-        // xy from top left
-        int file_row = y + E.row_offset;
-        if(file_row >= E.num_rows) {
-            if(E.num_rows == 0 && y == 0) {
-                char welcome[80];
-                int welcome_len = snprintf(welcome,
-                                           sizeof(welcome),
-                                           "Winter editor -- version %s",
-                                           WINTER_VERSION);
-                if(welcome_len > E.term_cols) welcome_len = E.term_cols;
-                int padding = (E.term_cols - welcome_len) / 2;
-                if(padding) {
-                    ab_append(ab, " ", 1);
-                    padding--;
-                }
-                while(padding--) { ab_append(ab, " ", 1); }
-                ab_append(ab, welcome, welcome_len);
-            } else {
-                ab_append(ab, "~", 1);
-            }
+void editor_draw_rows() {
+    const int total = E.num_rows();
+    const int last = std::min(total, E.row_offset + E.term_rows);  // exclusive
+    size_t base = 0;
+    std::string view_text;
+    if(E.row_offset < last) {
+        base = E.pt.line_start(static_cast<size_t>(E.row_offset));
+        const size_t end = E.pt.line_end(static_cast<size_t>(last - 1));
+        view_text = E.pt.text(base, end - base);
+    }
+    size_t pos = 0;
+    for(int y = 0; y < E.term_rows; ++y) {
+        const int file_row = y + E.row_offset;
+        if(E.pt.size() == 0 && y == 0) {
+            const std::string welcome =
+                std::format("Winter Editor -- version {}", WINTER_VERSION);
+            const int pad =
+                std::max(0, (E.term_cols - text_width(welcome)) / 2);
+            put_text(pad, y, welcome, E.term_cols, Style{});
+        } else if(file_row >= total) {
+            put_text(0, y, "~", E.term_cols, Style{});
         } else {
-            int len = E.row[file_row].real_size - E.col_offset;
-            if(len < 0) len = 0;
-            if(len > E.term_cols) len = E.term_cols;
-            char* c = &E.row[file_row].render[E.col_offset];
-            int current_color = -1;
-            int j;
-            for(j = 0; j < len; j++) {
-                if(iscntrl(c[j])) {
-                    char sym = (c[j] <= 26) ? '@' + c[j] : '?';
-                    ab_append(ab, "\x1b[7m", 4);
-                    ab_append(ab, &sym, 1);
-                    ab_append(ab, "\x1b[m", 3);
-                    if(current_color != -1) {
-                        char buf[16];
-                        int char_len = snprintf(
-                            buf, sizeof(buf), "\x1b[%dm", current_color);
-                        ab_append(ab, buf, char_len);
-                    }
-                } else {
-                    ab_append(ab, &c[j], 1);
-                }
-            }
-            ab_append(ab, "\x1b[39m", 5);
+            const size_t nl = view_text.find('\n', pos);
+            const size_t len =
+                (nl == std::string::npos ? view_text.size() : nl) - pos;
+            const std::string_view line(view_text.data() + pos, len);
+            const auto& spans = E.syntax.line_spans(base + pos, len);
+            put_line(y, line, E.col_offset, E.term_cols, spans);
+            pos += len + 1;
         }
-        ab_append(ab, "\x1b[K", 3);
-        ab_append(ab, "\r\n", 2);
     }
 }
 
-void editor_draw_status_bar(Abuf* ab) {
-    ab_append(ab, "\x1b[7m", 4);
-    char status[80], rstatus[80];
-    const char* mode;
+void editor_draw_status_bar() {
+    const int y = E.term_rows;
+    const Style bar{.attrs = ATTR_REVERSE};
+    for(int x = 0; x < E.term_cols; ++x) scr.at(x, y) = Cell{U' ', 1, bar};
+    std::string_view mode = "NORMAL";
     switch(E.mode) {
         case INSERT: mode = "INSERT"; break;
         case SEARCH: mode = "SEARCH"; break;
@@ -549,193 +663,387 @@ void editor_draw_status_bar(Abuf* ab) {
         case VISUAL: mode = "VISUAL"; break;
         case COMMAND: mode = "COMMAND"; break;
     }
-    int len = snprintf(status,
-                       sizeof(status),
-                       "%.20s/%s - %d lines %s",
-                       E.filename ? E.filename : "[No Name]",
-                       E.syntax ? E.syntax->filetype : "No FT",
-                       E.num_rows,
-                       E.dirty ? "[+]" : "");
-    int rlen = snprintf(
-        rstatus, sizeof(rstatus), "%.20s - %d/%d", mode, E.cy + 1, E.num_rows);
-    if(len > E.term_cols) len = E.term_cols;
-    ab_append(ab, status, len);
-    while(len < E.term_cols) {
-        if(E.term_cols - len == rlen) {
-            ab_append(ab, rstatus, rlen);
-            break;
-        } else {
-            ab_append(ab, " ", 1);
-            len++;
-        }
-    }
-    ab_append(ab, "\x1b[m", 3);
-    ab_append(ab, "\r\n", 2);
+    std::string status =
+        std::format("{:.20}/ - {} lines {}",
+                    E.filename.empty() ? "[No Name]" : E.filename,
+                    E.num_rows(),
+                    E.pt.modified() ? "[+]" : "");
+    std::string rstatus =
+        std::format("{:.20} - {}/{}", mode, E.cy + 1, E.num_rows());
+    const int left_end = put_text(0, y, status, E.term_cols, bar);
+    const int rw = text_width(rstatus);
+    if(E.term_cols - rw >= left_end)
+        put_text(E.term_cols - rw, y, rstatus, E.term_cols, bar);
 }
 
-void editor_draw_message_bar(Abuf* ab) {
-    ab_append(ab, "\x1b[K", 3);
-    int msg_len = strlen(E.status_message);
-    if(msg_len > E.term_cols) msg_len = E.term_cols;
-    if(msg_len && time(nullptr) - E.status_message_time < 5)
-        ab_append(ab, E.status_message, msg_len);
+void editor_draw_message_bar() {
+    if(!E.status_message.empty() && time(nullptr) - E.status_message_time < 5)
+        put_text(0, E.term_rows + 1, E.status_message, E.term_cols, Style{});
+}
+
+void editor_handle_resize() {
+    g_resized = 0;
+    int rows, cols;
+    if(query_window_size(&rows, &cols) == -1) return;
+    rows = std::max(rows, 3);
+    cols = std::max(cols, 1);
+    E.term_rows = rows - 2;
+    E.term_cols = cols;
+    scr.resize(cols, rows);
+    if(g_scroll) scr.set_scroll_rows(E.term_rows);
 }
 
 void editor_refresh_screen() {
+    if(g_resized) editor_handle_resize();
+    E.syntax.update(E.pt, E.eol);
     editor_scroll();
-    Abuf ab = ABUF_INIT;
-    ab_append(&ab, "\x1b[?25l", 6);
-    ab_append(&ab, "\x1b[H", 3);
-    editor_draw_rows(&ab);
-    editor_draw_status_bar(&ab);
-    editor_draw_message_bar(&ab);
-    char buf[32];
-    snprintf(buf,
-             sizeof(buf),
-             "\x1b[%d;%dH",
-             (E.cy - E.row_offset) + 1,
-             (E.rx - E.col_offset) + 1);
-    ab_append(&ab, buf, strlen(buf));
-    ab_append(&ab, "\x1b[?25h", 6);
-    write(STDOUT_FILENO, ab.b, ab.len);
-    ab_free(&ab);
+    scr.clear();
+    editor_draw_rows();
+    editor_draw_status_bar();
+    editor_draw_message_bar();
+    scr.cursor(E.rx - E.col_offset, E.cy - E.row_offset);
+    scr.flush();
 }
 
 // pack this eventually
-void editor_set_status_message(const char* fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(E.status_message, sizeof(E.status_message), fmt, ap);
-    va_end(ap);
+template <typename... Args>
+void editor_set_status_message(std::format_string<Args...> fmt,
+                               Args&&... args) {
+    E.status_message = std::format(fmt, std::forward<Args>(args)...);
     E.status_message_time = time(nullptr);
 }
 
 // input
-char* editor_prompt(const char* prompt, void (*callback)(char*, int)) {
-    size_t buf_size = 128;
-    char* buf = static_cast<char*>(malloc(buf_size));
-    size_t buf_len = 0;
-    buf[0] = '\0';
+std::string editor_prompt(std::string_view prompt,
+                          void (*callback)(std::string, int)) {
+    std::string buf;
     while(1) {
-        editor_set_status_message(prompt, buf);
+        E.status_message = std::format("{}{}", prompt, buf);
+        E.status_message_time = time(nullptr);
         editor_refresh_screen();
         int c = editor_read_key();
+        if(c == NONE) continue;
         if(c == DELETE || c == CTRL_KEY('h') || c == BACKSPACE) {
-            if(buf_len != 0) buf[--buf_len] = '\0';
+            if(!buf.empty()) buf.pop_back();
         } else if(c == '\x1b') {
             editor_set_status_message("");
-            if(callback) callback(buf, c);
-            free(buf);
-            return nullptr;
+            if(callback) callback(buf.c_str(), c);
+            return "";
         } else if(c == '\r') {
-            if(buf_len != 0) {
+            if(!buf.empty()) {
                 editor_set_status_message("");
                 if(callback) callback(buf, c);
                 return buf;
             }
         } else if(!iscntrl(c) && c < 128) {
-            if(buf_len == buf_size - 1) {
-                buf_size *= 2;
-                buf = static_cast<char*>(realloc(buf, buf_size));
-            }
-            buf[buf_len++] = c;
-            buf[buf_len] = '\0';
+            buf.push_back(static_cast<char>(c));
         }
         if(callback) callback(buf, c);
     }
 }
 
+void move_vertical(int dir, int count);
+
 void editor_move_cursor(int key) {
-    ERow* row = (E.cy >= E.num_rows) ? nullptr : &E.row[E.cy];
+    if(key == ARROW_UP || key == 'k') return move_vertical(-1, 1);
+    if(key == ARROW_DOWN || key == 'j') return move_vertical(+1, 1);
+    const int last = E.num_rows() - 1;
+    std::string line = E.pt.line_text(E.cy);
     switch(key) {
         case 'h':
         case ARROW_LEFT:
-            if(E.cx != 0) {
-                E.cx--;
+            if(E.cx > 0) {
+                E.cx = static_cast<int>(utf8_prev(line, E.cx));
             } else if(E.cy > 0) {
                 E.cy--;
-                E.cx = E.row[E.cy].size;
+                E.cx = static_cast<int>(line_len(E.cy));
             }
             break;
         case 'l':
         case ARROW_RIGHT:
-            if(row && E.cx < row->size) {
-                E.cx++;
-            } else if(row && E.cx == row->size) {
+            if(E.cx < static_cast<int>(line.size())) {
+                E.cx = static_cast<int>(utf8_next(line, E.cx));
+            } else if(E.cy < last) {
                 E.cy++;
                 E.cx = 0;
             }
             break;
         case 'k':
         case ARROW_UP:
-            if(E.cy != 0) E.cy--;
+            if(E.cy > 0) E.cy--;
             break;
         case 'j':
         case ARROW_DOWN:
-            if(E.cy < E.num_rows) E.cy++;
+            if(E.cy < last) E.cy++;
             break;
     }
-    row = (E.cy >= E.num_rows) ? nullptr : &E.row[E.cy];
-    int row_len = row ? row->size : 0;
-    if(E.cx > row_len) { E.cx = row_len; }
+    line = E.pt.line_text(E.cy);
+    E.cx = snap_cx(line, std::min(E.cx, static_cast<int>(line.size())));
+    E.want_rx = cx_to_rx(line, E.cx);
+}
+
+static bool write_all(int fd, std::string_view s) {
+    while(!s.empty()) {
+        const ssize_t n = ::write(fd, s.data(), s.size());
+        if(n < 0) {
+            if(errno == EINTR) continue;
+            return false;
+        }
+        s.remove_prefix(static_cast<size_t>(n));
+    }
+    return true;
+}
+
+int editor_write_file(const std::string& path) {
+    const std::string tmp = path + ".winter.tmp";
+    const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if(fd == -1) return errno;
+    struct stat st;
+    if(stat(path.c_str(), &st) == 0) fchmod(fd, st.st_mode & 07777);
+    int err = 0;
+    E.pt.for_each_chunk(0, E.pt.size(), [&](std::string_view chunk) {
+        if(!err && !write_all(fd, chunk)) err = errno;
+    });
+    if(!err && E.eol && (E.pt.size() > 0 || !E.orig.empty()) &&
+       !write_all(fd, "\n"))
+        err = errno;
+    if(!err && fsync(fd) == -1) err = errno;
+    if(close(fd) == -1 && !err) err = errno;
+    if(!err && rename(tmp.c_str(), path.c_str()) == -1) err = errno;
+    if(err) unlink(tmp.c_str());
+    return err;
 }
 
 void editor_save() {
-    if(E.filename == nullptr) {
-        E.filename = editor_prompt("Save as: %s", nullptr);
-        if(E.filename == nullptr) {
-            editor_set_status_message("Save aborted");
+    if(E.filename == "") {
+        E.filename = editor_prompt("Save As: ", nullptr);
+        if(E.filename == "") {
+            editor_set_status_message("Save Aborted");
             return;
         }
     }
-    int len;
-    char* buf = editor_rows_to_string(&len);
-    int fd = open(E.filename, O_RDWR | O_CREAT, 0644);
-    if(fd != -1) {
-        if(ftruncate(fd, len) != -1) {
-            if(write(fd, buf, len) == len) {
-                close(fd);
-                free(buf);
-                E.dirty = false;
-                E.dirt_amount = 0;
-                editor_set_status_message("%d bytes writen to disk", len);
-                return;
-            }
-        }
-        close(fd);
+    const size_t len = E.pt.size() + (E.eol ? 1 : 0);
+    if(const int err = editor_write_file(E.filename)) {
+        editor_set_status_message("Can't save! IO error: {}", strerror(err));
+        return;
     }
-    free(buf);
-    editor_set_status_message("Can't Save! ~UnU~ I/O erro: %s",
-                              strerror(errno));
+    E.pt.mark_saved();
+    editor_set_status_message("{} bytes written to disk", len);
 }
 
-void editor_command_palette(const char* cmd) {
-    if(strcmp(cmd, "q") == 0 || strcmp(cmd, "quit") == 0) {
-        if(E.dirty) {
+void editor_command_palette(std::string_view cmd) {
+    while(cmd.starts_with(' ')) cmd.remove_prefix(1);
+    while(cmd.ends_with(' ')) cmd.remove_suffix(1);
+    if(cmd == "q" || cmd == "quit") {
+        if(E.pt.modified()) {
             editor_set_status_message(
-                "[WARNING]!! File has unsaved changes, q! | quit! "
-                "to quit without saving.");
+                "[WARNING]!! File has unsaved changes, q! | quit! to quit "
+                "without saving.");
             return;
         }
         editor_quit();
-    } else if(strcmp(cmd, "q!") == 0 || strcmp(cmd, "quit!") == 0) {
+    } else if(cmd == "q!" || cmd == "quit!") {
         editor_quit();
-    } else if(strcmp(cmd, "w") == 0 || strcmp(cmd, "write") == 0) {
+    } else if(cmd == "w" || cmd == "write") {
         editor_save();
-    } else if(strcmp(cmd, "wq") == 0) {
+    } else if(cmd == "wq" || cmd == "x") {
         editor_save();
-        if(!E.dirty) editor_quit();
+        if(!E.pt.modified()) editor_quit();
     } else {
-        editor_set_status_message("Unknown Command: %s", cmd);
+        editor_set_status_message("Unknown Command: {}", cmd);
     }
 }
 
 void editor_command_prompt() {
-    char* cmd = editor_prompt(":%s", nullptr);
-    E.mode = EditorMode::NORMAL;
-    if(cmd == nullptr) return;
+    std::string cmd = editor_prompt(":", nullptr);
+    set_mode(EditorMode::NORMAL);
+    if(cmd == "") return;
     editor_command_palette(cmd);
-    free(cmd);
+    cmd.clear();
+}
+
+static void update_want() { E.want_rx = cx_to_rx(E.pt.line_text(E.cy), E.cx); }
+
+void move_vertical(int dir, int count) {
+    const int target =
+        std::clamp(E.cy + dir * std::max(count, 1), 0, E.num_rows() - 1);
+    if(target == E.cy) return;
+    E.cy = target;
+    const std::string line = E.pt.line_text(E.cy);
+    const int size = static_cast<int>(line.size());
+    int cx = E.want_rx == INT_MAX ? size : rx_to_cx(line, E.want_rx);
+    if(cx >= size && size > 0) cx = static_cast<int>(utf8_prev(line, size));
+    E.cx = cx;
+}
+
+static void apply_motion(const Target& t) {
+    if(!t.ok) return;
+    set_cursor_offset(t.pos);
+    if(t.to_eol) E.want_rx = INT_MAX;
+    else update_want();
+}
+
+static size_t utf8_seq_len(char lead) {
+    const auto b = static_cast<unsigned char>(lead);
+    return b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : b >= 0xC0 ? 2 : 1;
+}
+
+struct FindMemory {
+    bool valid = false;
+    motion::Find kind = motion::Find::f;
+    std::string ch;
+};
+static FindMemory last_find;
+
+struct NormalState {
+    int count = 0;
+    std::string keys;
+    bool want_char = false;
+    motion::Find find = motion::Find::f;
+    std::string arg;
+    bool shown = false;
+
+    void reset() {
+        count = 0;
+        keys.clear();
+        want_char = false;
+        arg.clear();
+        if(shown) E.status_message.clear();
+        shown = false;
+    }
+};
+static NormalState N;
+
+static const std::map<std::string, motion::Fn> kMotions = {
+    {"h", motion::left},
+    {"l", motion::right},
+    {"0", motion::to_line_start},
+    {"^", motion::to_first_nonblank},
+    {"$", motion::to_line_end},
+    {"w", motion::next_word},
+    {"W", motion::next_WORD},
+    {"b", motion::prev_word},
+    {"B", motion::prev_WORD},
+    {"e", motion::end_word},
+    {"E", motion::end_WORD},
+    {"gg", motion::to_file_start},
+    {"G", motion::to_file_end},
+    {"{", motion::para_back},
+    {"}", motion::para_fwd},
+    {"%", motion::match_pair},
+};
+
+using CmdFn = void (*)(int count);
+static const std::map<std::string, CmdFn> kCommands = {
+    {"j", +[](int n) { move_vertical(+1, n); }},
+    {"k", +[](int n) { move_vertical(-1, n); }},
+};
+
+template <class M>
+static bool has_longer(const M& m, const std::string& keys) {
+    const auto it = m.lower_bound(keys);
+    return it != m.end() && it->first.starts_with(keys);
+}
+
+static void show_pending() {
+    editor_set_status_message(
+        "{}{}", N.count ? std::to_string(N.count) : std::string(), N.keys);
+    N.shown = true;
+}
+
+static void do_find(motion::Find k, const std::string& ch, int count,
+                    bool repeat) {
+    apply_motion(
+        motion::find_char(E.pt, cursor_offset(), count, k, ch, repeat));
+}
+
+bool normal_feed(int c) {
+    if(c == '\x1b') {
+        N.reset();
+        return true;
+    }
+    if(c >= 0x100) {
+        N.reset();
+        return false;
+    }
+    if(N.want_char) {
+        if(N.arg.empty() && c < 32) {
+            N.reset();
+            return true;
+        }
+        N.arg += static_cast<char>(c);
+        if(N.arg.size() < utf8_seq_len(N.arg[0])) return true;
+        last_find = {true, N.find, N.arg};
+        do_find(N.find, N.arg, N.count, false);
+        N.reset();
+        return true;
+    }
+    if(N.keys.empty() &&
+       ((c >= '1' && c <= '9') || (c == '0' && N.count > 0))) {
+        N.count = std::min(N.count * 10 + (c - '0'), 1000000);
+        show_pending();
+        return true;
+    }
+    N.keys += static_cast<char>(c);
+    if(const auto m = kMotions.find(N.keys); m != kMotions.end()) {
+        apply_motion(m->second(E.pt, cursor_offset(), N.count));
+        N.reset();
+        return true;
+    }
+    if(const auto m = kCommands.find(N.keys); m != kCommands.end()) {
+        m->second(N.count);
+        N.reset();
+        return true;
+    }
+    if(N.keys.size() == 1) {
+        switch(c) {
+            case 'f':
+                N.find = motion::Find::f;
+                N.want_char = true;
+                break;
+            case 'F':
+                N.find = motion::Find::F;
+                N.want_char = true;
+                break;
+            case 't':
+                N.find = motion::Find::t;
+                N.want_char = true;
+                break;
+            case 'T':
+                N.find = motion::Find::T;
+                N.want_char = true;
+                break;
+            case ';':
+            case ',':
+                if(last_find.valid) {
+                    const auto k = c == ',' ? motion::flip(last_find.kind)
+                                            : last_find.kind;
+                    do_find(k, last_find.ch, N.count, true);
+                }
+                N.reset();
+                return true;
+            default: break;
+        }
+        if(N.want_char) {
+            show_pending();
+            return true;
+        }
+    }
+    if(has_longer(kMotions, N.keys) || has_longer(kCommands, N.keys)) {
+        show_pending();
+        return true;
+    }
+    if(N.keys.size() == 1) {
+        N.keys.clear();
+        return false;
+    }
+    N.reset();
+    return true;
+}
+
+static void enter_insert_at(int cx) {
+    E.cx = cx;
+    set_mode(EditorMode::INSERT);
 }
 
 void editor_process_key() {
@@ -748,11 +1056,12 @@ void editor_process_key() {
         return;
     }
     int c = editor_read_key();
+    if(c == NONE) return;
     switch(c) {
         case CTRL_KEY('q'):
-            if(E.dirty && quit_times > 0) {
+            if(E.pt.modified() && quit_times > 0) {
                 editor_set_status_message(
-                    "[WARNING]!! File has unsaved changes, press CTRL-Q %d "
+                    "[WARNING]!! File has unsaved changes, press CTRL-Q {} "
                     "more times to quit.",
                     quit_times);
                 quit_times--;
@@ -767,7 +1076,7 @@ void editor_process_key() {
 
         case HOME: E.cx = 0; break;
         case END:
-            if(E.cy < E.num_rows) E.cx = E.row[E.cy].size;
+            if(E.cy < E.num_rows()) E.cx = static_cast<int>(line_len(E.cy));
             break;
 
         case PAGE_UP:
@@ -776,7 +1085,7 @@ void editor_process_key() {
                 E.cy = E.row_offset;
             } else if(c == PAGE_DOWN || c == 'G') {
                 E.cy = E.row_offset + E.term_rows - 1;
-                if(E.cy > E.num_rows) E.cy = E.num_rows;
+                if(E.cy > E.num_rows() - 1) E.cy = E.num_rows() - 1;
             }
             int times = E.term_rows;
             while(times--) {
@@ -790,33 +1099,96 @@ void editor_process_key() {
         case ARROW_RIGHT: editor_move_cursor(c); break;
 
         case CTRL_KEY('l'):
-        case '\x1b': E.mode = EditorMode::NORMAL; break;
+        case '\x1b': {
+            const bool was_insert = E.mode == EditorMode::INSERT;
+            set_mode(EditorMode::NORMAL);
+            if(was_insert && E.cx > 0)
+                E.cx = static_cast<int>(utf8_prev(E.pt.line_text(E.cy), E.cx));
+            update_want();
+        } break;
     }
     switch(E.mode) {
         case INSERT:
             switch(c) {
                 case '\r': editor_insert_newline(); break;
                 case BACKSPACE: editor_delete_char(); break;
+                case DELETE: editor_delete_forward(); break;
+                case ARROW_UP:
+                case ARROW_DOWN:
+                case ARROW_LEFT:
+                case ARROW_RIGHT:
+                case HOME:
+                case END:
+                case PAGE_UP:
+                case PAGE_DOWN:
+                    E.pt.end_group();
+                    E.pt.begin_group();
+                    break;
                 default:
-                    if((c >= 32 && c < 127) || c == '\t') editor_insert_char(c);
+                    if(c >= 32 && c < 127) editor_type_char(c);
+                    else if(c == '\t') editor_insert_tab();
+                    else if(c >= 0x80 && c < 0x100) editor_insert_char(c);
                     break;
             }
             break;
         case NORMAL:
+            if(normal_feed(c)) break;
             switch(c) {
-                case 'h': editor_move_cursor(c); break;
-                case 'j': editor_move_cursor(c); break;
-                case 'k': editor_move_cursor(c); break;
-                case 'l': editor_move_cursor(c); break;
-
+                    // search functions
                 case 'n':
-                case 'N': editor_find_callback(nullptr, c); break;
+                case 'N':
+                    editor_find_callback("", c);
+                    break;
 
-                case '/': E.mode = EditorMode::SEARCH; break;
-                case 'v': E.mode = EditorMode::VISUAL; break;
-                case 'i': E.mode = EditorMode::INSERT; break;
-                case ':': E.mode = EditorMode::COMMAND; break;
+                    // insert/insert first char of line
+                case 'i': set_mode(EditorMode::INSERT); break;
+                case 'I': {
+                    const std::string line = E.pt.line_text(E.cy);
+                    size_t i = 0;
+                    while(i < line.size() &&
+                          (line[i] == ' ' || line[i] == '\t'))
+                        ++i;
+                    enter_insert_at(static_cast<int>(i));
+                } break;
+
+                    // after curs/eol
+                case 'a': {
+                    const std::string line = E.pt.line_text(E.cy);
+                    const int size = static_cast<int>(line.size());
+                    enter_insert_at(
+                        E.cx < size ? static_cast<int>(utf8_next(line, E.cx))
+                                    : E.cx);
+                } break;
+                case 'A':
+                    enter_insert_at(static_cast<int>(line_len(E.cy)));
+                    break;
+
+                    // new line u/d
+                case 'o':
+                    set_mode(EditorMode::INSERT);
+                    editor_open_below();
+                    break;
+                case 'O':
+                    set_mode(EditorMode::INSERT);
+                    editor_open_above();
+                    break;
+
+                    // undo
+                case 'u':
+                    if(auto at = E.pt.undo()) set_cursor_offset(*at);
+                    else editor_set_status_message("Already at oldest change");
+                    break;
+                case CTRL_KEY('r'):
+                    if(auto at = E.pt.redo()) set_cursor_offset(*at);
+                    else editor_set_status_message("Already at newest change");
+                    break;
+
+                    // modes
+                case '/': set_mode(EditorMode::SEARCH); break;
+                case 'v': set_mode(EditorMode::VISUAL); break;
+                case ':': set_mode(EditorMode::COMMAND); break;
             }
+            N.reset();
             break;
         case VISUAL: break;
         case COMMAND: break;
@@ -827,30 +1199,32 @@ void editor_process_key() {
 
 // init
 void init_editor() {
-    E.dirty = false;
     E.cx = 0;
     E.cy = 0;
     E.rx = 0;
-    E.num_rows = 0;
     E.row_offset = 0;
     E.col_offset = 0;
-    E.dirt_amount = 0;
-    E.row = nullptr;
-    E.filename = nullptr;
+    E.filename = "";
     E.status_message[0] = '\0';
     E.status_message_time = 0;
-    E.syntax = nullptr;
     if(get_window_size(&E.term_rows, &E.term_cols) == -1)
         die("get_window_size");
     E.term_rows -= 2;
+    scr.resize(E.term_cols, E.term_rows + 2);
+    const char* t = std::getenv("TERM");
+    g_scroll = !t || std::string_view(t) != "linux";
+    if(g_scroll) scr.set_scroll_rows(E.term_rows);
 }
 
 int main(int argc, char* argv[]) {
     enable_raw_mode();
     init_editor();
+    install_winch_handler();
     if(argc >= 2) { editor_open(argv[1]); }
     editor_set_status_message(
         "HELP: CTRL-S/:w = save | CTRL-Q/:q = quit | / = search");
+    if(auto s = E.syntax.summary(); !s.empty())
+        editor_set_status_message("{}", s);
     while(1) {
         editor_refresh_screen();
         editor_process_key();

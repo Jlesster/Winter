@@ -1,0 +1,9 @@
+[wrap-git]
+url = https://github.com/tree-sitter/tree-sitter.git
+revision = v0.26.13
+depth = 1
+directory = tree-sitter
+patch_directory = tree-sitter
+
+[provide]
+dependency_names = tree-sitter

@@ -1,0 +1,9 @@
+[wrap-git]
+url = https://github.com/tree-sitter-grammars/tree-sitter-lua.git
+revision = v0.5.0
+depth = 1
+directory = tree-sitter-lua
+patch_directory = ts-grammar
+
+[provide]
+dependency_names = tree-sitter-lua
