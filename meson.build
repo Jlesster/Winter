@@ -5,7 +5,7 @@ project(
   default_options: [
     'cpp_std=c++23',
     'warning_level=3',
-    'builldtype=debugoptimized',
+    'buildtype=debugoptimized',
   ],
 )
 
@@ -30,14 +30,30 @@ configure_file(
 
 add_project_arguments('-DWINTER_TS_LANGS(X)=' + ' '.join(lang_syms), language: 'cpp')
 
-deps = [dependency('trux'), ts_dep] + lang_deps
+deps = [
+  dependency('lua5.4'),
+  dependency('trux'),
+  ts_dep,
+] + lang_deps
 
 sources = files(
   'src/buffer.cpp',
+  'src/columns.cpp',
+  'src/command.cpp',
+  'src/edit.cpp',
+  'src/editor.cpp',
+  'src/file.cpp',
+  'src/input.cpp',
+  'src/lua.cpp',
   'src/main.cpp',
   'src/motion.cpp',
+  'src/normal.cpp',
   'src/piece.cpp',
+  'src/prompt.cpp',
+  'src/render.cpp',
+  'src/search.cpp',
   'src/syntax.cpp',
+  'src/terminal.cpp',
 )
 
 incls = include_directories('.')
