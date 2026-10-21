@@ -2,13 +2,13 @@
 
 #include <algorithm>
 #include <climits>
-#include <map>
 #include <string>
 
 #include "columns.hpp"
 #include "editor.hpp"
 #include "keys.hpp"
 #include "motion.hpp"
+#include "registry.hpp"
 #include "utf8.hpp"
 
 void editor_move_cursor(int key) {
@@ -49,9 +49,6 @@ void editor_move_cursor(int key) {
     E.want_rx = cx_to_rx(line, E.cx);
 }
 
-// <normal-keys>
-// normal mode input: [count] motion, multi-key chords, f/t arguments
-
 void update_want() { E.want_rx = cx_to_rx(E.pt.line_text(E.cy), E.cx); }
 
 // j / k keep a goal column, so passing over a short line doesn't lose it
@@ -68,114 +65,71 @@ void move_vertical(int dir, int count) {
     E.cx = cx;
 }
 
-static void apply_motion(const Target& t) {
+void apply_motion(const Target& t) {
     if(!t.ok) return;  // vim beeps, we just stay put
     set_cursor_offset(t.pos);
     if(t.to_eol) E.want_rx = INT_MAX;
     else update_want();
 }
 
-static size_t utf8_seq_len(char lead) {
+namespace {
+
+size_t utf8_seq_len(char lead) {
     const auto b = static_cast<unsigned char>(lead);
     return b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : b >= 0xC0 ? 2 : 1;
 }
 
-struct FindMemory {
-    bool valid = false;
-    motion::Find kind = motion::Find::f;
-    std::string ch;
-};
-
-static FindMemory last_find;
-
 struct NormalState {
     int count = 0;           // 0 = nothing typed yet
     std::string keys;        // chord typed so far: "g", "gg", ...
-    bool want_char = false;  // next key is the target of f/F/t/T
-    motion::Find find = motion::Find::f;
-    std::string arg;     // that target's bytes (UTF-8 arrives 1 byte/key)
-    bool shown = false;  // pending input is on the status line
+    bool want_char = false;  // waiting for the char argument of `action`
+    std::string action;      // the wants_char action that is waiting
+    std::string arg;         // that char's bytes (UTF-8 arrives 1 byte/key)
+    bool shown = false;      // pending input is on the status line
 
     void reset() {
         count = 0;
         keys.clear();
         want_char = false;
+        action.clear();
         arg.clear();
         if(shown) E.status_message.clear();
         shown = false;
     }
 };
+NormalState N;
 
-static NormalState N;
-
-// motions that only need the text
-static const std::map<std::string, motion::Fn> kMotions = {
-    {"h", motion::left},
-    {"l", motion::right},
-    {"0", motion::to_line_start},
-    {"^", motion::to_first_nonblank},
-    {"$", motion::to_line_end},
-    {"w", motion::next_word},
-    {"W", motion::next_WORD},
-    {"b", motion::prev_word},
-    {"B", motion::prev_WORD},
-    {"e", motion::end_word},
-    {"E", motion::end_WORD},
-    {"gg", motion::to_file_start},
-    {"G", motion::to_file_end},
-    {"{", motion::para_back},
-    {"}", motion::para_fwd},
-    {"%", motion::match_pair},
-};
-
-// commands that need editor state (the next step adds d, c, y, p, x here)
-using CmdFn = void (*)(int count);
-
-static const std::map<std::string, CmdFn> kCommands = {
-    {"j", +[](int n) { move_vertical(+1, n); }},
-    {"k", +[](int n) { move_vertical(-1, n); }},
-};
-
-template <class M>
-static bool has_longer(const M& m, const std::string& keys) {
-    const auto it = m.lower_bound(keys);
-    return it != m.end() && it->first.starts_with(keys);
-}
-
-static void show_pending() {
+void show_pending() {
     editor_set_status_message(
         "{}{}", N.count ? std::to_string(N.count) : std::string(), N.keys);
     N.shown = true;
 }
 
-static void do_find(motion::Find k, const std::string& ch, int count,
-                    bool repeat) {
-    apply_motion(
-        motion::find_char(E.pt, cursor_offset(), count, k, ch, repeat));
-}
+}  // namespace
 
-// returns true if the key was consumed here
-bool normal_feed(int c) {
-    if(c == '\x1b') {
+void normal_reset() { N.reset(); }
+
+// Every normal-mode key lands here. What a key *does* is looked up in the
+// registry: keys -> action name -> behaviour.
+void normal_feed(int c) {
+    if(c == '\x1b' || c >= 0x100) {  // Esc, arrows, page keys cancel a chord
         N.reset();
-        return true;
-    }
-    if(c >= 0x100) {  // arrows, page keys: not ours, but they cancel a chord
-        N.reset();
-        return false;
+        return;
     }
 
-    if(N.want_char) {                  // second half of f/F/t/T
+    if(N.want_char) {  // second half of f/t/r...: collect one UTF-8 character
         if(N.arg.empty() && c < 32) {  // <CR>, <Tab>... cancel it
             N.reset();
-            return true;
+            return;
         }
         N.arg += static_cast<char>(c);
-        if(N.arg.size() < utf8_seq_len(N.arg[0])) return true;
-        last_find = {true, N.find, N.arg};
-        do_find(N.find, N.arg, N.count, false);
-        N.reset();
-        return true;
+        if(N.arg.size() < utf8_seq_len(N.arg[0])) return;
+        Ctx ctx{N.count, N.arg};
+        const std::string action = N.action;
+        N.reset();  // reset first, so the action can set its own status message
+        if(!registry().run_action(action, ctx))
+            editor_set_status_message("No such action: {}", action);
+        return;
     }
 
     // a count: 1-9 starts one, 0 only continues one (bare 0 is a motion)
@@ -183,68 +137,35 @@ bool normal_feed(int c) {
        ((c >= '1' && c <= '9') || (c == '0' && N.count > 0))) {
         N.count = std::min(N.count * 10 + (c - '0'), 1000000);
         show_pending();
-        return true;
+        return;
     }
 
     N.keys += static_cast<char>(c);
-
-    if(const auto m = kMotions.find(N.keys); m != kMotions.end()) {
-        apply_motion(m->second(E.pt, cursor_offset(), N.count));
-        N.reset();
-        return true;
-    }
-    if(const auto m = kCommands.find(N.keys); m != kCommands.end()) {
-        m->second(N.count);
-        N.reset();
-        return true;
-    }
-    if(N.keys.size() == 1) {
-        switch(c) {
-            case 'f':
-                N.find = motion::Find::f;
-                N.want_char = true;
-                break;
-            case 'F':
-                N.find = motion::Find::F;
-                N.want_char = true;
-                break;
-            case 't':
-                N.find = motion::Find::t;
-                N.want_char = true;
-                break;
-            case 'T':
-                N.find = motion::Find::T;
-                N.want_char = true;
-                break;
-            case ';':
-            case ',':
-                if(last_find.valid) {
-                    const auto k = c == ',' ? motion::flip(last_find.kind)
-                                            : last_find.kind;
-                    do_find(k, last_find.ch, N.count, true);
-                }
-                N.reset();
-                return true;
-            default: break;
-        }
-        if(N.want_char) {
+    const Hit hit = registry().lookup(EditorMode::NORMAL, N.keys);
+    switch(hit.kind) {
+        case Lookup::None:  // not bound to anything: swallow it
+            N.reset();
+            return;
+        case Lookup::Prefix:  // "g" is the start of "gg": wait for more
             show_pending();
-            return true;
-        }
+            return;
+        case Lookup::Exact:
+            // also the start of a longer chord ("<space>" vs "<space>f"):
+            // wait. There is no timeout yet, so Esc cancels.
+            if(hit.longer) {
+                show_pending();
+                return;
+            }
+            if(registry().wants_char(hit.action)) {
+                N.action = hit.action;
+                N.want_char = true;
+                show_pending();
+                return;
+            }
+            Ctx ctx{N.count, {}};
+            N.reset();
+            if(!registry().run_action(hit.action, ctx))
+                editor_set_status_message("No such action: {}", hit.action);
+            return;
     }
-
-    // "g" alone is the start of "gg", so wait for the next key
-    if(has_longer(kMotions, N.keys) || has_longer(kCommands, N.keys)) {
-        show_pending();
-        return true;
-    }
-
-    if(N.keys.size() == 1) {  // not a chord at all: let the old switch have it,
-        N.keys.clear();       // and keep the count for it to read
-        return false;
-    }
-    N.reset();  // "gz": a dead chord, swallow it
-    return true;
 }
-
-void normal_reset() { N.reset(); }

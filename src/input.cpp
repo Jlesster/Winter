@@ -9,21 +9,13 @@
 #include "file.hpp"
 #include "keys.hpp"
 #include "normal.hpp"
+#include "options.hpp"
 #include "search.hpp"
 #include "terminal.hpp"
 #include "utf8.hpp"
 
-namespace {
-
-static void enter_insert_at(int cx) {
-    E.cx = cx;
-    set_mode(EditorMode::INSERT);
-}
-
-}  // namespace
-
 void editor_process_key() {
-    static int quit_times = WINTER_QUIT_TIMES;
+    static int quit_presses = 0;
     if(E.mode == EditorMode::COMMAND) {
         editor_command_prompt();
         return;
@@ -35,12 +27,12 @@ void editor_process_key() {
     if(c == NONE) return;
     switch(c) {
         case CTRL_KEY('q'):
-            if(E.pt.modified() && quit_times > 0) {
+            if(E.pt.modified() && quit_presses < opts.quit_times) {
                 editor_set_status_message(
                     "[WARNING]!! File has unsaved changes, press CTRL-Q {} "
                     "more times to quit.",
-                    quit_times);
-                quit_times--;
+                    opts.quit_times - quit_presses);
+                quit_presses++;
                 return;
             }
             editor_quit();
@@ -77,7 +69,8 @@ void editor_process_key() {
             const bool was_insert = E.mode == EditorMode::INSERT;
             set_mode(EditorMode::NORMAL);
             if(was_insert && E.cx > 0)
-                E.cx = static_cast<int>(utf8_prev(E.pt.line_text(E.cy), E.cx));
+                E.cx = static_cast<int>(
+                    utf8_prev(E.pt.line_text(E.cy), E.cx));
             update_want();
         } break;
     }
@@ -106,61 +99,11 @@ void editor_process_key() {
             }
             break;
         case NORMAL:
-            if(normal_feed(c)) break;
-            switch(c) {
-                case 'n':
-                case 'N': editor_find_callback("", c); break;
-
-                case '/': set_mode(EditorMode::SEARCH); break;
-                case 'v': set_mode(EditorMode::VISUAL); break;
-                case 'i': set_mode(EditorMode::INSERT); break;
-
-                case 'a': {  // insert *after* the char under the cursor
-                    const std::string line = E.pt.line_text(E.cy);
-                    const int size = static_cast<int>(line.size());
-                    enter_insert_at(
-                        E.cx < size ? static_cast<int>(utf8_next(line, E.cx))
-                                    : E.cx);  // empty line: stay put
-                } break;
-
-                case 'A':  // append at the very end of the line
-                    enter_insert_at(static_cast<int>(line_len(E.cy)));
-                    break;
-
-                case 'I': {  // insert at the first non-blank
-                    const std::string line = E.pt.line_text(E.cy);
-                    size_t i = 0;
-                    while(i < line.size() &&
-                          (line[i] == ' ' || line[i] == '\t'))
-                        ++i;
-                    enter_insert_at(static_cast<int>(i));
-                } break;
-
-                case 'o':
-                    set_mode(EditorMode::INSERT);  // first: the new line joins
-                    editor_open_below();           // the insert's undo group
-                    break;
-                case 'O':
-                    set_mode(EditorMode::INSERT);
-                    editor_open_above();
-                    break;
-                case ':': set_mode(EditorMode::COMMAND); break;
-
-                case 'u':
-                    if(auto at = E.pt.undo()) set_cursor_offset(*at);
-                    else editor_set_status_message("Already at oldest change");
-                    break;
-
-                case CTRL_KEY('r'):
-                    if(auto at = E.pt.redo()) set_cursor_offset(*at);
-                    else editor_set_status_message("Already at newest change");
-                    break;
-            }
-            normal_reset();
+            normal_feed(c);  // keys -> registry -> action: see builtin_*.cpp
             break;
         case VISUAL: break;
         case COMMAND: break;
         case SEARCH: break;
     }
-    quit_times = WINTER_QUIT_TIMES;
+    quit_presses = 0;
 }

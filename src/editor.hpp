@@ -1,4 +1,6 @@
 #pragma once
+// The editor's one piece of global state. Next step: split it into
+// Editor + Buffer + View so Lua can hand out handles.
 
 #include <ctime>
 #include <format>
@@ -9,11 +11,12 @@
 #include "piece.hpp"
 #include "syntax.hpp"
 
+// data
 struct EditorConfig {
     bool eol = true;
     int cx, cy = 0;
     int rx = 0;
-    int want_rx = 0;
+    int want_rx = 0;  // goal column for j/k (INT_MAX = stick to line end)
     int row_offset = 0;
     int col_offset = 0;
     int term_rows = 0;
@@ -33,6 +36,7 @@ extern EditorConfig E;
 size_t line_len(size_t y);
 size_t cursor_offset();
 void set_cursor_offset(size_t pos);
+const char* mode_name(EditorMode m);
 void set_mode(EditorMode m);
 
 template <typename... Args>

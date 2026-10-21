@@ -13,6 +13,8 @@
 #include "prompt.hpp"
 #include "terminal.hpp"
 
+// file io
+
 void editor_open(const std::string& filename) {
     E.filename = filename;
     std::ifstream in(filename, std::ios::binary);

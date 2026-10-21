@@ -8,7 +8,10 @@
 #include "columns.hpp"
 #include "core.hpp"
 #include "editor.hpp"
+#include "options.hpp"
 #include "utf8.hpp"
+
+// edits
 
 void editor_insert_char(int c) {
     const char ch = static_cast<char>(c);
@@ -17,21 +20,23 @@ void editor_insert_char(int c) {
 }
 
 void editor_insert_tab() {
-#if WINTER_EXPAND_TAB
+    if(!opts.expand_tab) return editor_insert_char('\t');
+    // pad to the next shift-width column, not a fixed 4 spaces
     const int rx = cx_to_rx(E.pt.line_text(E.cy), E.cx);
-    const int n = WINTER_SHIFT_WIDTH - (rx % WINTER_SHIFT_WIDTH);
+    const int n = opts.shift_width - (rx % opts.shift_width);
     E.pt.insert(cursor_offset(), std::string(static_cast<size_t>(n), ' '));
     E.cx += n;
-#else
-    editor_insert_char('\t');
-#endif
 }
 
 namespace {
 
-static const std::string kIndentUnit =
-    WINTER_EXPAND_TAB ? std::string(WINTER_SHIFT_WIDTH, ' ')
-                      : std::string("\t");
+// auto indent / auto pairs
+
+// one indent level, per the current options
+std::string indent_unit() {
+    return opts.expand_tab ? std::string(static_cast<size_t>(opts.shift_width), ' ')
+                           : std::string("\t");
+}
 
 static char closer_for(char c) {
     switch(c) {
@@ -56,6 +61,7 @@ static std::string_view leading_ws(std::string_view line) {
     return line.substr(0, i);
 }
 
+// is `prev` immediately followed by the character that auto-pairing added?
 static bool is_empty_pair(char prev, char next) {
     if(!next) return false;
     return closer_for(prev) == next || (is_quote(prev) && prev == next);
@@ -73,6 +79,7 @@ void editor_insert_newline() {
     const size_t last = before.find_last_not_of(" \t");
     const char prev = last == std::string_view::npos ? 0 : before[last];
 
+    // cursor sat in pure whitespace: don't leave trailing whitespace behind
     if(last == std::string_view::npos && cx > 0) {
         E.pt.remove(cursor_offset() - cx, cx);
         E.cx = 0;
@@ -81,8 +88,10 @@ void editor_insert_newline() {
     std::string ins = "\n" + indent;
     size_t new_cx = indent.size();
     if(const char cl = closer_for(prev)) {
-        ins += kIndentUnit;
-        new_cx += kIndentUnit.size();
+        const std::string unit = indent_unit();
+        ins += unit;
+        new_cx += unit.size();
+        // {|} -> split onto three lines, cursor on the middle one
         if(after.starts_with(cl)) ins += "\n" + indent;
     }
     E.pt.insert(cursor_offset(), ins);
@@ -90,6 +99,7 @@ void editor_insert_newline() {
     E.cx = static_cast<int>(new_cx);
 }
 
+// typing a printable ascii char in insert mode
 void editor_type_char(int c) {
     const char ch = static_cast<char>(c);
     const std::string line = E.pt.line_text(E.cy);
@@ -97,17 +107,19 @@ void editor_type_char(int c) {
     const char prev = cx > 0 ? line[cx - 1] : 0;
     const char next = cx < line.size() ? line[cx] : 0;
 
+    // typing over a closer we (or the user) already put there
     if((is_closer(ch) || is_quote(ch)) && next == ch) {
         E.cx++;
         return;
     }
 
+    // electric dedent: a closer on a whitespace-only line pulls back one level
     if(is_closer(ch)) {
         if(line.find_first_not_of(" \t") >= cx) {
             size_t drop = 0;
             if(prev == '\t') drop = 1;
             else
-                while(drop < kIndentUnit.size() && drop < cx &&
+                while(drop < static_cast<size_t>(opts.shift_width) && drop < cx &&
                       line[cx - 1 - drop] == ' ')
                     ++drop;
             if(drop) {
@@ -119,6 +131,7 @@ void editor_type_char(int c) {
         return;
     }
 
+    // only pair when what follows can't be part of the thing we're opening
     const bool room = next == 0 || next == ' ' || next == '\t' ||
                       is_closer(next) || next == ',' || next == ';';
     if(const char cl = closer_for(ch)) {
@@ -128,7 +141,7 @@ void editor_type_char(int c) {
         return;
     }
     if(is_quote(ch)) {
-        const bool apostrophe = ch == '\'' && is_word(prev);
+        const bool apostrophe = ch == '\'' && is_word(prev);  // don't, it's
         const bool pair = room && !apostrophe && prev != ch;
         if(pair) {
             E.pt.insert(cursor_offset(), std::string{ch, ch});
@@ -141,11 +154,15 @@ void editor_type_char(int c) {
 
 namespace {
 
+// o / O: open a fresh line below / above the cursor line
+
+// indentation for a line opened *below* `line`: same as it, one deeper if
+// it ends in an opener
 static std::string indent_below(std::string_view line) {
     std::string indent(leading_ws(line));
     const size_t last = line.find_last_not_of(" \t");
     if(last != std::string_view::npos && closer_for(line[last]))
-        indent += kIndentUnit;
+        indent += indent_unit();
     return indent;
 }
 
@@ -161,6 +178,7 @@ void editor_open_below() {
 void editor_open_above() {
     const std::string indent(leading_ws(E.pt.line_text(E.cy)));
     E.pt.insert(E.pt.line_start(E.cy), indent + "\n");
+    // the new line took this line's index; the old text moved down one
     E.cx = static_cast<int>(indent.size());
 }
 
@@ -169,8 +187,9 @@ void editor_delete_char() {
     if(pos == 0) return;
     if(E.cx > 0) {
         const std::string line = E.pt.line_text(E.cy);
-        const char next = E.cx < static_cast<int>(line.size()) ? line[E.cx] : 0;
-        if(is_empty_pair(line[E.cx - 1], next)) {
+        const char next =
+            E.cx < static_cast<int>(line.size()) ? line[E.cx] : 0;
+        if(is_empty_pair(line[E.cx - 1], next)) {  // (|) -> |
             E.pt.remove(pos - 1, 2);
             E.cx--;
             return;

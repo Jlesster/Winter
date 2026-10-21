@@ -1,12 +1,13 @@
 #include "columns.hpp"
 
 #include "core.hpp"
+#include "options.hpp"
 #include "utf8.hpp"
 
 bool is_ctl(char32_t cp) { return cp < 0x20 || (cp >= 0x7F && cp < 0xA0); }
 
 int cell_width(char32_t cp, int rx) {
-    if(cp == '\t') return WINTER_TAB_STOP - (rx % WINTER_TAB_STOP);
+    if(cp == '\t') return opts.tab_stop - (rx % opts.tab_stop);
     if(is_ctl(cp)) return 1;
     return utf8_width(cp);
 }

@@ -1,3 +1,5 @@
 .cache/
 builddir/
 subprojects/tree-*/
+notes.md
+test.c

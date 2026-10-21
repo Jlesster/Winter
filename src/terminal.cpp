@@ -12,20 +12,22 @@
 #include <trux/core.hpp>
 
 #include "keys.hpp"
+#include "options.hpp"
 
 namespace {
 termios g_orig{};
 TermCaps g_caps{};
 volatile sig_atomic_t g_resized = 0;
 
-void on_winch(int) { g_resized = 1; }
+void on_winch(int) { g_resized = 1; }  // only touch the flag in here
 
-int get_cursor_position(int* rows, int* cols);
+int get_cursor_position(int* rows, int* cols);  // below
 
 }  // namespace
 
 const TermCaps& term_caps() { return g_caps; }
 
+// terminal
 [[noreturn]] void die(const char* s) {
     write(STDOUT_FILENO, "\x1b[2J", 4);
     write(STDOUT_FILENO, "\x1b[H", 3);
@@ -37,7 +39,7 @@ void install_winch_handler() {
     struct sigaction sa{};
     sa.sa_handler = on_winch;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = 0;  // deliberately no SA_RESTART
     if(sigaction(SIGWINCH, &sa, nullptr) == -1) die("sigaction");
 }
 
@@ -52,10 +54,9 @@ void editor_quit() {
 }
 
 void disable_raw_mode() {
-    if(g_caps.cursor_shapes &&
-       write(STDOUT_FILENO, "\x1b[0 q", 5) != 5) { /* best effort */
-    }
-    if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig) == -1) die("tcsetattr");
+    if(g_caps.cursor_shapes && write(STDOUT_FILENO, "\x1b[0 q", 5) != 5) { /* best effort */ }
+    if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig) == -1)
+        die("tcsetattr");
 }
 
 void enable_raw_mode() {
@@ -87,7 +88,7 @@ int editor_read_key() {
     int nread;
     char c;
     while((nread = read(STDIN_FILENO, &c, 1)) != 1) {
-        if(g_resized) return NONE;
+        if(g_resized) return NONE;  // wake up so the main loop can redraw
         if(nread == -1 && errno != EAGAIN && errno != EINTR) die("read");
     }
     if(c != '\x1b') return static_cast<unsigned char>(c);
@@ -142,6 +143,7 @@ int editor_read_key() {
     return NONE;
 }
 
+
 namespace {
 int get_cursor_position(int* rows, int* cols) {
     char buf[32];
@@ -161,7 +163,8 @@ int get_cursor_position(int* rows, int* cols) {
 
 int query_window_size(int* rows, int* cols) {
     winsize ws;
-    if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) return -1;
+    if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0)
+        return -1;
     *rows = ws.ws_row;
     *cols = ws.ws_col;
     return 0;
@@ -183,14 +186,14 @@ namespace {
 
 static int cursor_style_for(EditorMode m) {
     switch(m) {
-        case EditorMode::INSERT: return WINTER_CURSOR_INSERT;
-        case EditorMode::VISUAL: return WINTER_CURSOR_VISUAL;
-        default: return WINTER_CURSOR_NORMAL;
+        case EditorMode::INSERT: return opts.cursor_insert;
+        case EditorMode::VISUAL: return opts.cursor_visual;
+        default:                 return opts.cursor_normal;
     }
 }
 
 static void set_cursor_style(int style) {
-    static int current = -1;
+    static int current = -1;  // what the terminal has right now
     if(style == current) return;
     current = style;
     char buf[16];
