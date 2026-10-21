@@ -8,14 +8,17 @@
 #include <vector>
 
 struct Options {
-    int tab_stop = 4;       // display width of a '\t'
-    int shift_width = 4;    // one indent level
-    bool expand_tab = true; // Tab key / indents use spaces
-    int quit_times = 3;     // extra Ctrl-Q presses needed with unsaved changes
+    int tab_stop = 4;        // display width of a '\t'
+    int shift_width = 4;     // one indent level
+    bool expand_tab = true;  // Tab key / indents use spaces
+    int quit_times = 3;      // extra Ctrl-Q presses needed with unsaved changes
     // DECSCUSR: 1/2 block, 3/4 underline, 5/6 bar (odd = blinking)
     int cursor_normal = 2;
     int cursor_insert = 6;
     int cursor_visual = 4;
+    bool number = false;           // line num
+    bool relative_number = false;  // relative line num
+    int number_width = 4;          // gutter width
 };
 
 extern Options opts;

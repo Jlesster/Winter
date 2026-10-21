@@ -47,6 +47,7 @@ sources = files(
   'src/editor.cpp',
   'src/events.cpp',
   'src/file.cpp',
+  'src/gutter.cpp',
   'src/input.cpp',
   'src/lua.cpp',
   'src/main.cpp',

@@ -8,6 +8,7 @@
 #include "buffer.hpp"
 #include "columns.hpp"
 #include "editor.hpp"
+#include "gutter.hpp"
 #include "terminal.hpp"
 #include "utf8.hpp"
 
@@ -32,7 +33,7 @@ int put_text(int x, int y, std::string_view s, int limit, Style st) {
     return x;
 }
 
-void put_line(int y, std::string_view line, int col_off, int cols,
+void put_line(int y, std::string_view line, int col_off, int cols, int x0,
               const std::vector<Span>& spans = {}) {
     const int end = col_off + cols;
     int rx = 0;
@@ -54,10 +55,10 @@ void put_line(int y, std::string_view line, int col_off, int cols,
         }
         const int next = rx + w;
         if(next > col_off) {
-            const int x = rx - col_off;
+            const int x = x0 + rx - col_off;
             if(cp == '\t' || rx < col_off || next > end) {
                 for(int k = std::max(rx, col_off); k < std::min(next, end); k++)
-                    scr.at(k - col_off, y) = Cell{};
+                    scr.at(x0 + k - col_off, y) = Cell{};
                 last = -1;
             } else if(is_ctl(cp)) {
                 const char shown =
@@ -77,6 +78,11 @@ void put_line(int y, std::string_view line, int col_off, int cols,
 }
 
 // output
+int gutter() {
+    return std::min(gutter_width(E.num_rows()), std::max(E.term_cols - 1, 0));
+}
+int text_cols() { return std::max(E.term_cols - gutter(), 1); }
+
 void editor_scroll() {
     E.rx = cx_to_rx(E.pt.line_text(E.cy), E.cx);
     if(E.cy < E.row_offset) { E.row_offset = E.cy; }
@@ -84,8 +90,8 @@ void editor_scroll() {
         E.row_offset = E.cy - E.term_rows + 1;
     }
     if(E.rx < E.col_offset) { E.col_offset = E.rx; }
-    if(E.rx >= E.col_offset + E.term_cols) {
-        E.col_offset = E.rx - E.term_cols + 1;
+    if(E.rx >= E.col_offset + text_cols()) {
+        E.col_offset = E.rx - text_cols() + 1;
     }
 }
 
@@ -99,6 +105,7 @@ void editor_draw_rows() {
         const size_t end = E.pt.line_end(static_cast<size_t>(last - 1));
         view_text = E.pt.text(base, end - base);
     }
+    const int g = gutter();
     size_t pos = 0;
     for(int y = 0; y < E.term_rows; ++y) {
         const int file_row = y + E.row_offset;
@@ -116,7 +123,15 @@ void editor_draw_rows() {
                 (nl == std::string::npos ? view_text.size() : nl) - pos;
             const std::string_view line(view_text.data() + pos, len);
             const auto& spans = E.syntax.line_spans(base + pos, len);
-            put_line(y, line, E.col_offset, E.term_cols, spans);
+            if(g > 0) {
+                const auto attr = file_row == E.cy ? ATTR_BOLD : ATTR_DIM;
+                put_text(0,
+                         y,
+                         gutter_label(file_row, E.cy, g),
+                         g,
+                         Style{.attrs = static_cast<uint16_t>(attr)});
+            }
+            put_line(y, line, E.col_offset, text_cols(), g, spans);
             pos += len + 1;
         }
     }
@@ -175,7 +190,7 @@ void editor_refresh_screen() {
     editor_draw_rows();
     editor_draw_status_bar();
     editor_draw_message_bar();
-    scr.cursor(E.rx - E.col_offset, E.cy - E.row_offset);
+    scr.cursor(gutter() + E.rx - E.col_offset, E.cy - E.row_offset);
     set_cursor_for_mode(E.mode);
     scr.flush();
 }
