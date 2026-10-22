@@ -14,17 +14,12 @@
 #include "terminal.hpp"
 #include "utf8.hpp"
 
-void editor_process_key() {
-    static int quit_presses = 0;
-    if(E.mode == EditorMode::COMMAND) {
-        editor_command_prompt();
-        return;
-    } else if(E.mode == EditorMode::SEARCH) {
-        editor_find();
-        return;
-    }
-    int c = editor_read_key();
-    if(c == NONE) return;
+static int quit_presses = 0;
+
+void editor_handle_key(int c) {
+    const EditorMode before = E.mode;
+    const uint64_t rev_before = E.pt.revision();
+
     switch(c) {
         case CTRL_KEY('q'):
             if(E.pt.modified() && quit_presses < opts.quit_times) {
@@ -69,8 +64,7 @@ void editor_process_key() {
             const bool was_insert = E.mode == EditorMode::INSERT;
             set_mode(EditorMode::NORMAL);
             if(was_insert && E.cx > 0)
-                E.cx = static_cast<int>(
-                    utf8_prev(E.pt.line_text(E.cy), E.cx));
+                E.cx = static_cast<int>(utf8_prev(E.pt.line_text(E.cy), E.cx));
             update_want();
         } break;
     }
@@ -101,9 +95,23 @@ void editor_process_key() {
         case NORMAL:
             normal_feed(c);  // keys -> registry -> action: see builtin_*.cpp
             break;
-        case VISUAL: break;
+        case VISUAL: normal_feed(c); break;
         case COMMAND: break;
         case SEARCH: break;
     }
     quit_presses = 0;
+    dot_after_key(c, before, rev_before);
+}
+
+void editor_process_key() {
+    if(E.mode == EditorMode::COMMAND) {
+        editor_command_prompt();
+        return;
+    } else if(E.mode == EditorMode::SEARCH) {
+        editor_find();
+        return;
+    }
+    const int c = editor_read_key();
+    if(c == NONE) return;
+    editor_handle_key(c);
 }

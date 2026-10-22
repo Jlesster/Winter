@@ -1,6 +1,7 @@
 #include "render.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <ctime>
 #include <string_view>
 #include <vector>
@@ -9,6 +10,8 @@
 #include "columns.hpp"
 #include "editor.hpp"
 #include "gutter.hpp"
+#include "normal.hpp"
+#include "options.hpp"
 #include "terminal.hpp"
 #include "utf8.hpp"
 
@@ -34,7 +37,8 @@ int put_text(int x, int y, std::string_view s, int limit, Style st) {
 }
 
 void put_line(int y, std::string_view line, int col_off, int cols, int x0,
-              const std::vector<Span>& spans = {}) {
+              const std::vector<Span>& spans = {}, size_t sel_lo = 0,
+              size_t sel_hi = 0) {
     const int end = col_off + cols;
     int rx = 0;
     int last = -1;
@@ -44,9 +48,10 @@ void put_line(int y, std::string_view line, int col_off, int cols, int x0,
         const Decoded d = utf8_decode(line, i);
         i += d.len;
         while(si < spans.size() && spans[si].end <= at) ++si;
-        const Style st = (si < spans.size() && spans[si].start <= at)
-                             ? spans[si].st
-                             : Style{};
+        Style st = (si < spans.size() && spans[si].start <= at) ? spans[si].st
+                                                                : Style{};
+        if(at >= sel_lo && at < sel_hi)
+            st.attrs = static_cast<uint16_t>(st.attrs | ATTR_REVERSE);
         const char32_t cp = d.cp;
         const int w = cell_width(cp, rx);
         if(w == 0) {
@@ -58,7 +63,7 @@ void put_line(int y, std::string_view line, int col_off, int cols, int x0,
             const int x = x0 + rx - col_off;
             if(cp == '\t' || rx < col_off || next > end) {
                 for(int k = std::max(rx, col_off); k < std::min(next, end); k++)
-                    scr.at(x0 + k - col_off, y) = Cell{};
+                    scr.at(x0 + k - col_off, y) = Cell{U' ', 1, st};
                 last = -1;
             } else if(is_ctl(cp)) {
                 const char shown =
@@ -107,6 +112,8 @@ void editor_draw_rows() {
     }
     const int g = gutter();
     size_t pos = 0;
+    const bool vis = E.mode == VISUAL;
+    const Range sel = vis ? visual_range() : Range{};
     for(int y = 0; y < E.term_rows; ++y) {
         const int file_row = y + E.row_offset;
         if(E.pt.size() == 0 && y == 0) {
@@ -131,7 +138,16 @@ void editor_draw_rows() {
                          g,
                          Style{.attrs = static_cast<uint16_t>(attr)});
             }
-            put_line(y, line, E.col_offset, text_cols(), g, spans);
+            const size_t ls = base + pos;
+            size_t lo = 0, hi = 0;
+            if(vis && sel.end > ls && sel.start <= ls + len) {
+                lo = std::max(sel.start, ls) - ls;
+                hi = std::min(sel.end, ls + len) - ls;
+                if(len == 0)
+                    put_text(
+                        g, y, " ", E.term_cols, Style{.attrs = ATTR_REVERSE});
+            }
+            put_line(y, line, E.col_offset, text_cols(), g, spans, lo, hi);
             pos += len + 1;
         }
     }
@@ -146,8 +162,9 @@ void editor_draw_status_bar() {
         case INSERT: mode = "INSERT"; break;
         case SEARCH: mode = "SEARCH"; break;
         case NORMAL: mode = "NORMAL"; break;
-        case VISUAL: mode = "VISUAL"; break;
+        case VISUAL: mode = E.v_line ? "V-LINE" : "VISUAL"; break;
         case COMMAND: mode = "COMMAND"; break;
+        case OPPEND: break;
     }
     std::string status =
         std::format("{:.20}/ - {} lines {}",
@@ -190,7 +207,14 @@ void editor_refresh_screen() {
     editor_draw_rows();
     editor_draw_status_bar();
     editor_draw_message_bar();
-    scr.cursor(gutter() + E.rx - E.col_offset, E.cy - E.row_offset);
+    const int sx = gutter() + E.rx - E.col_offset;
+    const int sy = E.cy - E.row_offset;
+    scr.cursor(sx, sy);
     set_cursor_for_mode(E.mode);
+    uint32_t col = 0xFFFFFFFF;
+    if(opts.cursor_inverse && sx >= 0 && sx < scr.width() && sy >= 0 &&
+       sy < scr.height())
+        col = scr.at(sx, sy).style.fg;
+    set_cursor_color(col);
     scr.flush();
 }

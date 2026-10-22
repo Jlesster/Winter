@@ -77,8 +77,10 @@ std::string parse_keys(std::string_view s) {
             if(close != std::string_view::npos && close - i <= 6) {
                 std::string name(s.substr(i + 1, close - i - 1));
                 std::string low = name;
-                std::transform(low.begin(), low.end(), low.begin(),
-                               [](unsigned char c) { return std::tolower(c); });
+                std::transform(
+                    low.begin(), low.end(), low.begin(), [](unsigned char c) {
+                        return std::tolower(c);
+                    });
                 char c = 0;
                 if(low.size() == 3 && low[0] == 'c' && low[1] == '-')
                     c = static_cast<char>(low[2] & 0x1f);
@@ -98,4 +100,22 @@ std::string parse_keys(std::string_view s) {
         out += s[i];  // plain key (or a '<' that isn't a known name)
     }
     return out;
+}
+
+void Registry::add_operator(std::string name, Operator fn) {
+    ops_[std::move(name)] = std::move(fn);
+}
+
+const Operator* Registry::op(std::string_view name) const {
+    const auto it = ops_.find(name);
+    return it == ops_.end() ? nullptr : &it->second;
+}
+
+void Registry::add_object(std::string name, ObjectFn fn) {
+    objects_[std::move(name)] = fn;
+}
+
+ObjectFn Registry::object(std::string_view name) const {
+    const auto it = objects_.find(name);
+    return it == objects_.end() ? nullptr : it->second;
 }

@@ -11,9 +11,18 @@
 #include "core.hpp"
 #include "motion.hpp"
 
+struct Range {
+    size_t start = 0, end = 0;
+    bool linewise = false;
+};
+using Operator = std::function<void(const Range&)>;
+using ObjectFn = std::optional<Range> (*)(const PieceTable&, size_t pos,
+                                          int count);
+
 struct Ctx {
-    int count = 0;    // 0 = no count typed
-    std::string arg;  // the character typed after a wants_char action (f, t, r...)
+    int count = 0;  // 0 = no count typed
+    std::string
+        arg;  // the character typed after a wants_char action (f, t, r...)
 };
 using Action = std::function<void(Ctx&)>;
 
@@ -21,11 +30,12 @@ enum class Lookup { None, Prefix, Exact };
 struct Hit {
     Lookup kind = Lookup::None;
     std::string action;  // valid for Exact
-    bool longer = false; // a longer chord shares this prefix (wait for more keys)
+    bool longer =
+        false;  // a longer chord shares this prefix (wait for more keys)
 };
 
 class Registry {
-  public:
+public:
     // ---- actions: name -> behaviour ("edit.undo", "mode.insert", ...)
     void add_action(std::string name, Action fn, bool wants_char = false);
     bool run_action(std::string_view name, Ctx& ctx) const;  // false: unknown
@@ -42,14 +52,22 @@ class Registry {
     bool unmap(EditorMode m, std::string_view keys);
     Hit lookup(EditorMode m, std::string_view keys) const;
 
-  private:
+    void add_operator(std::string name, Operator fn);
+    const Operator* op(std::string_view name) const;
+    void add_object(std::string name, ObjectFn fn);
+    ObjectFn object(std::string_view name) const;
+
+private:
     struct Entry {
         Action fn;
         bool wants_char = false;
     };
     std::map<std::string, Entry, std::less<>> actions_;
     std::map<std::string, motion::Fn, std::less<>> motions_;
-    std::map<EditorMode, std::map<std::string, std::string, std::less<>>> keymaps_;
+    std::map<EditorMode, std::map<std::string, std::string, std::less<>>>
+        keymaps_;
+    std::map<std::string, Operator, std::less<>> ops_;
+    std::map<std::string, ObjectFn, std::less<>> objects_;
 };
 
 Registry& registry();

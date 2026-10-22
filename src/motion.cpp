@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstddef>
 
+#include "piece.hpp"
 #include "utf8.hpp"
 
 namespace motion {
@@ -37,7 +40,8 @@ size_t back(const PieceTable& t, size_t p) {
 
 // p sits on an empty line (vim counts those as a word)
 bool empty_line_at(const PieceTable& t, size_t p) {
-    return (p == t.size() || t.at(p) == '\n') && (p == 0 || t.at(p - 1) == '\n');
+    return (p == t.size() || t.at(p) == '\n') &&
+           (p == 0 || t.at(p - 1) == '\n');
 }
 
 size_t last_pos(const PieceTable& t) {
@@ -158,6 +162,40 @@ Target paragraph(const PieceTable& t, size_t p, int count, int dir) {
 
 }  // namespace
 
+Target line_n(const PieceTable& t, size_t p, int count) {
+    const size_t l =
+        std::min(t.line_of(p) + static_cast<size_t>(std::max(count, 1)) - 1,
+                 t.line_count() - 1);
+    return {t.line_start(l), MKind::Linewise, true, false};
+}
+
+Target down(const PieceTable& t, size_t p, int count) {
+    const size_t l = t.line_of(p), last = t.line_count() - 1;
+    if(l == last) return fail(p);
+    return {t.line_start(
+                std::min(l + static_cast<size_t>(std::max(count, 1)), last)),
+            MKind::Linewise,
+            true,
+            false};
+}
+
+Target up(const PieceTable& t, size_t p, int count) {
+    const size_t l = t.line_of(p);
+    if(l == 0) return fail(p);
+    return {
+        t.line_start(l - std::min(l, static_cast<size_t>(std::max(count, 1)))),
+        MKind::Linewise,
+        true,
+        false};
+}
+
+Target right_op(const PieceTable& t, size_t p, int count) {
+    const size_t e = t.line_end(t.line_of(p));
+    size_t q = p;
+    for(int n = std::max(count, 1); n > 0 && q < e; --n) q = fwd(t, q);
+    return {std::min(q, e), MKind::Exclusive, true, false};
+}
+
 size_t clamp_normal(const PieceTable& t, size_t p) {
     p = std::min(p, t.size());
     const size_t l = t.line_of(p);
@@ -202,27 +240,45 @@ Target to_line_end(const PieceTable& t, size_t p, int count) {
     return {last_char_of(t, line), MKind::Inclusive, true, true};
 }
 
-Target next_word(const PieceTable& t, size_t p, int n) { return fwd_word(t, p, n, false); }
-Target next_WORD(const PieceTable& t, size_t p, int n) { return fwd_word(t, p, n, true); }
-Target prev_word(const PieceTable& t, size_t p, int n) { return back_word(t, p, n, false); }
-Target prev_WORD(const PieceTable& t, size_t p, int n) { return back_word(t, p, n, true); }
-Target end_word(const PieceTable& t, size_t p, int n) { return end_of_word(t, p, n, false); }
-Target end_WORD(const PieceTable& t, size_t p, int n) { return end_of_word(t, p, n, true); }
+Target next_word(const PieceTable& t, size_t p, int n) {
+    return fwd_word(t, p, n, false);
+}
+Target next_WORD(const PieceTable& t, size_t p, int n) {
+    return fwd_word(t, p, n, true);
+}
+Target prev_word(const PieceTable& t, size_t p, int n) {
+    return back_word(t, p, n, false);
+}
+Target prev_WORD(const PieceTable& t, size_t p, int n) {
+    return back_word(t, p, n, true);
+}
+Target end_word(const PieceTable& t, size_t p, int n) {
+    return end_of_word(t, p, n, false);
+}
+Target end_WORD(const PieceTable& t, size_t p, int n) {
+    return end_of_word(t, p, n, true);
+}
 
 Target to_file_start(const PieceTable& t, size_t, int count) {
     const size_t last = t.line_count() - 1;
-    const size_t line = count > 0 ? std::min(static_cast<size_t>(count - 1), last) : 0;
+    const size_t line =
+        count > 0 ? std::min(static_cast<size_t>(count - 1), last) : 0;
     return {first_nonblank_of(t, line), MKind::Linewise, true, false};
 }
 
 Target to_file_end(const PieceTable& t, size_t, int count) {
     const size_t last = t.line_count() - 1;
-    const size_t line = count > 0 ? std::min(static_cast<size_t>(count - 1), last) : last;
+    const size_t line =
+        count > 0 ? std::min(static_cast<size_t>(count - 1), last) : last;
     return {first_nonblank_of(t, line), MKind::Linewise, true, false};
 }
 
-Target para_back(const PieceTable& t, size_t p, int n) { return paragraph(t, p, n, -1); }
-Target para_fwd(const PieceTable& t, size_t p, int n) { return paragraph(t, p, n, +1); }
+Target para_back(const PieceTable& t, size_t p, int n) {
+    return paragraph(t, p, n, -1);
+}
+Target para_fwd(const PieceTable& t, size_t p, int n) {
+    return paragraph(t, p, n, +1);
+}
 
 Target match_pair(const PieceTable& t, size_t p, int) {
     constexpr std::string_view kPairs = "()[]{}";
@@ -283,10 +339,18 @@ Target find_char(const PieceTable& t, size_t p, int count, Find kind,
         bool found = false;
         if(forward) {
             for(size_t r = fwd(t, from); r < e; r = fwd(t, r))
-                if(matches(r)) { from = r; found = true; break; }
+                if(matches(r)) {
+                    from = r;
+                    found = true;
+                    break;
+                }
         } else if(from > s) {
             for(size_t r = back(t, from);; r = back(t, r)) {
-                if(matches(r)) { from = r; found = true; break; }
+                if(matches(r)) {
+                    from = r;
+                    found = true;
+                    break;
+                }
                 if(r <= s) break;
             }
         }

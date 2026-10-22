@@ -243,7 +243,9 @@ std::optional<size_t> PieceTable::undo() {
     TextEdit r;
     r.reset = true;
     log_edit(r);
-    return std::min(rev.edits.front().pos, size());
+    size_t first = size();
+    for(const auto& e : rev.edits) first = std::min(first, e.pos);
+    return std::min(first, size());
 }
 
 std::optional<size_t> PieceTable::redo() {

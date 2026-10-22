@@ -103,7 +103,10 @@ int opt_index(lua_State* L) {
         if(v) {
             if(*v == "true") lua_pushboolean(L, 1);
             else if(*v == "false") lua_pushboolean(L, 0);
-            else lua_pushinteger(L, std::atoll(v->c_str()));
+            else if(!v->empty() &&
+                    std::isdigit(static_cast<unsigned char>(v->front())))
+                lua_pushinteger(L, std::atoll(v->c_str()));
+            else lua_pushstring(L, v->c_str());
             return 1;
         }
     }

@@ -2,6 +2,7 @@
 // The editor's one piece of global state. Next step: split it into
 // Editor + Buffer + View so Lua can hand out handles.
 
+#include <cstddef>
 #include <ctime>
 #include <format>
 #include <string>
@@ -29,6 +30,8 @@ struct EditorConfig {
     std::string status_message = "";
     time_t status_message_time = 0;
     EditorMode mode = EditorMode::NORMAL;
+    size_t v_anchor = 0;
+    bool v_line = false;
 };
 
 extern EditorConfig E;

@@ -1,11 +1,13 @@
 #pragma once
 // Raw mode, key input, terminal size, SIGWINCH and cursor shape.
 
+#include <cstdint>
 #include "core.hpp"
 
 struct TermCaps {
     bool scroll_region = false;  // DECSTBM scroll optimisation
-    bool cursor_shapes = false;  // DECSCUSR (neither exists on the linux console)
+    bool cursor_shapes =
+        false;  // DECSCUSR (neither exists on the linux console)
 };
 const TermCaps& term_caps();  // valid after enable_raw_mode()
 
@@ -22,4 +24,5 @@ void install_winch_handler();
 bool resize_pending();
 void resize_ack();
 
+void set_cursor_color(uint32_t rgb);
 void set_cursor_for_mode(EditorMode m);  // no-op without DECSCUSR

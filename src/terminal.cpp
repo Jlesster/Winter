@@ -54,9 +54,10 @@ void editor_quit() {
 }
 
 void disable_raw_mode() {
-    if(g_caps.cursor_shapes && write(STDOUT_FILENO, "\x1b[0 q", 5) != 5) { /* best effort */ }
-    if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig) == -1)
-        die("tcsetattr");
+    if(g_caps.cursor_shapes &&
+       write(STDOUT_FILENO, "\x1b[0 q", 5) != 5) { /* best effort */
+    }
+    if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig) == -1) die("tcsetattr");
 }
 
 void enable_raw_mode() {
@@ -143,7 +144,6 @@ int editor_read_key() {
     return NONE;
 }
 
-
 namespace {
 int get_cursor_position(int* rows, int* cols) {
     char buf[32];
@@ -163,8 +163,7 @@ int get_cursor_position(int* rows, int* cols) {
 
 int query_window_size(int* rows, int* cols) {
     winsize ws;
-    if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0)
-        return -1;
+    if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) return -1;
     *rows = ws.ws_row;
     *cols = ws.ws_col;
     return 0;
@@ -184,11 +183,17 @@ int get_window_size(int* rows, int* cols) {
 
 namespace {
 
+static int decscursr(const CursorStyle& c) {
+    if(c.shape == CursorShape::Default) return 0;
+    const int steady = 2 * static_cast<int>(c.shape);
+    return c.blink ? steady - 1 : steady;
+}
+
 static int cursor_style_for(EditorMode m) {
     switch(m) {
-        case EditorMode::INSERT: return opts.cursor_insert;
-        case EditorMode::VISUAL: return opts.cursor_visual;
-        default:                 return opts.cursor_normal;
+        case EditorMode::INSERT: return decscursr(opts.cursor_insert);
+        case EditorMode::VISUAL: return decscursr(opts.cursor_visual);
+        default: return decscursr(opts.cursor_normal);
     }
 }
 
@@ -202,6 +207,20 @@ static void set_cursor_style(int style) {
 }
 
 }  // namespace
+
+void set_cursor_color(uint32_t rgb) {
+    if(!g_caps.cursor_shapes) return;
+    static uint32_t current = 0xFFFFFFFF;
+    if(rgb == current) return;
+    current = rgb;
+    char buf[32];
+    const int n =
+        rgb == 0xFFFFFFFF
+            ? std::snprintf(buf, sizeof buf, "\x1b]112\x1b\\")
+            : std::snprintf(
+                  buf, sizeof buf, "\x1b]12;#%06x\x1b\\", rgb & 0xFFFFFFFF);
+    if(n > 0 && write(STDOUT_FILENO, buf, static_cast<size_t>(n)) != n) return;
+}
 
 void set_cursor_for_mode(EditorMode m) {
     if(g_caps.cursor_shapes) set_cursor_style(cursor_style_for(m));

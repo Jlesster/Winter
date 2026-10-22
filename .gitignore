@@ -3,3 +3,5 @@ builddir/
 subprojects/tree-*/
 notes.md
 test.c
+winter_src.tar.gz
+.gitignore

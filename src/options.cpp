@@ -2,33 +2,52 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
 #include <format>
+#include <optional>
 #include <sstream>
+#include <string_view>
 
 Options opts;
 
 namespace {
 
+enum class Kind { Int, Bool, CursorSpec };
+
 struct Opt {
     const char* name;
     const char* alias;  // "" = none
-    bool is_bool;
+    Kind kind;
     void* ptr;   // int* or bool*
     int lo, hi;  // allowed range for ints
 };
 
 Opt kTable[] = {
-    {"tabstop", "ts", false, &opts.tab_stop, 1, 16},
-    {"shiftwidth", "sw", false, &opts.shift_width, 1, 16},
-    {"expandtab", "et", true, &opts.expand_tab, 0, 1},
-    {"quit_times", "", false, &opts.quit_times, 0, 99},
-    {"cursor_normal", "", false, &opts.cursor_normal, 0, 6},
-    {"cursor_insert", "", false, &opts.cursor_insert, 0, 6},
-    {"cursor_visual", "", false, &opts.cursor_visual, 0, 6},
-    {"number", "nu", true, &opts.number, 0, 1},
-    {"relativenumber", "rnu", true, &opts.relative_number, 0, 1},
-    {"numberwidth", "nuw", false, &opts.number_width, 1, 10},
+    {"tabstop", "ts", Kind::Int, &opts.tab_stop, 1, 16},
+    {"shiftwidth", "sw", Kind::Int, &opts.shift_width, 1, 16},
+    {"expandtab", "et", Kind::Bool, &opts.expand_tab, 0, 1},
+    {"quit_times", "", Kind::Int, &opts.quit_times, 0, 99},
+    {"cursor", "", Kind::CursorSpec, nullptr, 0, 0},
+    {"cursor_inverse", "", Kind::Bool, &opts.cursor_inverse, 0, 1},
+    {"number", "nu", Kind::Bool, &opts.number, 0, 1},
+    {"relativenumber", "rnu", Kind::Bool, &opts.relative_number, 0, 1},
+    {"numberwidth", "nuw", Kind::Int, &opts.number_width, 1, 10},
 };
+
+std::optional<CursorStyle> parse_cursor(std::string_view v) {
+    CursorStyle c;
+    if(v.ends_with("-blink")) {
+        c.blink = true;
+        v.remove_suffix(6);
+    }
+    if(v == "default") c.shape = CursorShape::Default;
+    else if(v == "block") c.shape = CursorShape::Block;
+    else if(v == "underline") c.shape = CursorShape::Underline;
+    else if(v == "bar" || v == "beam") c.shape = CursorShape::Bar;
+    else return std::nullopt;
+    if(c.shape == CursorShape::Default && c.blink) return std::nullopt;
+    return c;
+}
 
 Opt* find(std::string_view name) {
     for(Opt& o : kTable)
@@ -42,8 +61,63 @@ std::optional<bool> parse_bool(std::string_view v) {
     return std::nullopt;
 }
 
+std::string show_cursor(const CursorStyle& c) {
+    static constexpr const char* names[] = {
+        "default", "block", "underline", "bar"};
+    return std::string(names[static_cast<int>(c.shape)]) +
+           (c.blink ? "-blink" : "");
+}
+
+struct CursorSet {
+    CursorStyle n, v, i;
+};
+
+std::string_view trim(std::string_view s) {
+    while(!s.empty() && std::isspace(static_cast<unsigned char>(s.front())))
+        s.remove_prefix(1);
+    while(!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
+        s.remove_suffix(1);
+    return s;
+}
+
+std::optional<CursorSet> parse_cursor_spec(std::string_view spec) {
+    CursorSet out{opts.cursor_normal, opts.cursor_visual, opts.cursor_insert};
+    std::string low(spec);
+    std::ranges::transform(low, low.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    std::string_view rest = low;
+    while(!rest.empty()) {
+        const size_t semi = rest.find(';');
+        const std::string_view entry = trim(rest.substr(0, semi));
+        rest = semi == std::string_view::npos ? std::string_view{}
+                                              : rest.substr(semi + 1);
+        if(entry.empty()) continue;
+        const size_t colon = entry.find(':');
+        if(colon == std::string_view::npos) return std::nullopt;
+        const std::string_view mode = trim(entry.substr(0, colon));
+        const auto style = parse_cursor(trim(entry.substr(colon + 1)));
+        if(!style) return std::nullopt;
+        if(mode == "n") out.n = *style;
+        else if(mode == "v") out.v = *style;
+        else if(mode == "i") out.i = *style;
+        else return std::nullopt;
+    }
+    return out;
+}
+
+std::string show_cursor_spec() {
+    return "n:" + show_cursor(opts.cursor_normal) +
+           ";v:" + show_cursor(opts.cursor_visual) +
+           ";i:" + show_cursor(opts.cursor_insert);
+}
+
 std::string show(const Opt& o) {
-    if(o.is_bool) return *static_cast<bool*>(o.ptr) ? "true" : "false";
+    switch(o.kind) {
+        case Kind::Bool: return *static_cast<bool*>(o.ptr) ? "true" : "false";
+        case Kind::CursorSpec: return show_cursor_spec();
+        case Kind::Int: break;
+    }
     return std::to_string(*static_cast<int*>(o.ptr));
 }
 
@@ -52,10 +126,18 @@ std::string show(const Opt& o) {
 OptResult set_option(std::string_view name, std::string_view value) {
     Opt* o = find(name);
     if(!o) return OptResult::Unknown;
-    if(o->is_bool) {
+    if(o->kind == Kind::Bool) {
         const auto b = parse_bool(value);
         if(!b) return OptResult::BadValue;
         *static_cast<bool*>(o->ptr) = *b;
+        return OptResult::Ok;
+    }
+    if(o->kind == Kind::CursorSpec) {
+        const auto c = parse_cursor_spec(value);
+        if(!c) return OptResult::BadValue;
+        opts.cursor_normal = c->n;
+        opts.cursor_visual = c->v;
+        opts.cursor_insert = c->i;
         return OptResult::Ok;
     }
     int n = 0;
@@ -89,7 +171,7 @@ std::string apply_set_command(std::string_view args) {
         if(t.ends_with('!')) {  // number
             t.remove_suffix(1);
             Opt* o = find(t);
-            if(o && o->is_bool) {
+            if(o && o->kind == Kind::Bool) {
                 bool* b = static_cast<bool*>(o->ptr);
                 *b = !*b;
             } else {
@@ -116,8 +198,9 @@ std::string apply_set_command(std::string_view args) {
                   // it)
             const Opt* o = find(t);
             const Opt* neg = t.starts_with("no") ? find(t.substr(2)) : nullptr;
-            if(o && o->is_bool) set_option(t, "true");
-            else if(neg && neg->is_bool) set_option(t.substr(2), "false");
+            if(o && o->kind == Kind::Bool) set_option(t, "true");
+            else if(neg && neg->kind == Kind::Bool)
+                set_option(t.substr(2), "false");
             else if(o) msgs.push_back(std::format("{}={}", t, show(*o)));
             else msgs.push_back(std::format("Unknown option: {}", t));
         }

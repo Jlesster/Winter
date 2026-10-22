@@ -2,10 +2,23 @@
 // Runtime options. These replaced the WINTER_* #defines so `:set` (and soon
 // Lua) can change them while the editor runs.
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+enum class CursorShape : uint8_t {
+    Default = 0,
+    Block = 1,
+    Underline = 2,
+    Bar = 3
+};
+
+struct CursorStyle {
+    CursorShape shape = CursorShape::Block;
+    bool blink = false;
+};
 
 struct Options {
     int tab_stop = 4;        // display width of a '\t'
@@ -13,9 +26,10 @@ struct Options {
     bool expand_tab = true;  // Tab key / indents use spaces
     int quit_times = 3;      // extra Ctrl-Q presses needed with unsaved changes
     // DECSCUSR: 1/2 block, 3/4 underline, 5/6 bar (odd = blinking)
-    int cursor_normal = 2;
-    int cursor_insert = 6;
-    int cursor_visual = 4;
+    CursorStyle cursor_normal{CursorShape::Block, false};
+    CursorStyle cursor_insert{CursorShape::Bar, false};
+    CursorStyle cursor_visual{CursorShape::Underline, false};
+    bool cursor_inverse = false;   // semantic cursor coloring
     bool number = false;           // line num
     bool relative_number = false;  // relative line num
     int number_width = 4;          // gutter width

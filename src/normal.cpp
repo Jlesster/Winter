@@ -3,9 +3,12 @@
 #include <algorithm>
 #include <climits>
 #include <string>
+#include <vector>
 
 #include "columns.hpp"
+#include "core.hpp"
 #include "editor.hpp"
+#include "input.hpp"
 #include "keys.hpp"
 #include "motion.hpp"
 #include "registry.hpp"
@@ -60,7 +63,8 @@ void move_vertical(int dir, int count) {
     const std::string line = E.pt.line_text(E.cy);
     const int size = static_cast<int>(line.size());
     int cx = E.want_rx == INT_MAX ? size : rx_to_cx(line, E.want_rx);
-    if(cx >= size && size > 0)  // normal mode: stop on the last char
+    if(E.mode != VISUAL && cx >= size &&
+       size > 0)  // normal mode: stop on the last char
         cx = static_cast<int>(utf8_prev(line, size));
     E.cx = cx;
 }
@@ -86,9 +90,13 @@ struct NormalState {
     std::string action;      // the wants_char action that is waiting
     std::string arg;         // that char's bytes (UTF-8 arrives 1 byte/key)
     bool shown = false;      // pending input is on the status line
+    std::string op;
+    int op_count = 0;
 
     void reset() {
         count = 0;
+        op_count = 0;
+        op.clear();
         keys.clear();
         want_char = false;
         action.clear();
@@ -99,15 +107,97 @@ struct NormalState {
 };
 NormalState N;
 
+struct DotState {
+    std::vector<int> last;
+    std::vector<int> cur;
+    bool in_insert = false;
+    bool replaying = false;
+    bool skip = false;
+};
+DotState D;
+
+bool normal_pending() {
+    return N.count || !N.keys.empty() || N.want_char || !N.op.empty();
+}
+
 void show_pending() {
     editor_set_status_message(
         "{}{}", N.count ? std::to_string(N.count) : std::string(), N.keys);
     N.shown = true;
 }
 
+void dispatch(const std::string& action, Ctx ctx) {
+    if(N.op.empty()) {
+        N.reset();
+        if(!registry().run_action(action, ctx))
+            editor_set_status_message("No such action: {}", action);
+        return;
+    }
+    const std::string op = N.op;
+    const int count = (N.op_count | ctx.count)
+                          ? std::max(N.op_count, 1) * std::max(ctx.count, 1)
+                          : 0;
+    N.reset();
+    run_operator(op, action, count, ctx.arg);
+}
+
 }  // namespace
 
+void dot_supress() { D.skip = true; }
+
+void dot_after_key(int c, EditorMode before, uint64_t rev_before) {
+    if(D.replaying) return;
+    if(before == INSERT) {
+        if(!D.in_insert) return;
+        if(c >= 0x100) {
+            D.in_insert = false;
+            D.cur.clear();
+            return;
+        }
+        D.cur.push_back(c);
+        if(E.mode != INSERT) {
+            D.last = std::move(D.cur);
+            D.cur.clear();
+            D.in_insert = false;
+        }
+        return;
+    }
+    if(before != NORMAL) return;
+    if(c == '\x1b') {
+        D.cur.clear();
+        return;
+    }
+    D.cur.push_back(c);
+    if(normal_pending()) return;
+    const bool changed = E.pt.revision() != rev_before || E.mode == INSERT;
+    if(D.skip || !changed) {
+        D.skip = false;
+        D.cur.clear();
+        return;
+    }
+    if(E.mode == INSERT) {
+        D.in_insert = true;
+        return;
+    }
+    D.last = std::move(D.cur);
+    D.cur.clear();
+}
+
+void dot_replay() {
+    if(D.last.empty()) return;
+    const std::vector<int> keys = D.last;
+    D.replaying = true;
+    for(int k : keys) editor_handle_key(k);
+    D.replaying = false;
+    D.skip = true;
+}
+
 void normal_reset() { N.reset(); }
+
+void normal_begin_operator(std::string_view name, int count) {
+    N.op = name;
+    N.op_count = count;
+}
 
 // Every normal-mode key lands here. What a key *does* is looked up in the
 // registry: keys -> action name -> behaviour.
@@ -124,11 +214,8 @@ void normal_feed(int c) {
         }
         N.arg += static_cast<char>(c);
         if(N.arg.size() < utf8_seq_len(N.arg[0])) return;
-        Ctx ctx{N.count, N.arg};
         const std::string action = N.action;
-        N.reset();  // reset first, so the action can set its own status message
-        if(!registry().run_action(action, ctx))
-            editor_set_status_message("No such action: {}", action);
+        dispatch(action, Ctx{N.count, N.arg});
         return;
     }
 
@@ -141,7 +228,9 @@ void normal_feed(int c) {
     }
 
     N.keys += static_cast<char>(c);
-    const Hit hit = registry().lookup(EditorMode::NORMAL, N.keys);
+    const EditorMode map_mode =
+        E.mode == VISUAL ? VISUAL : (N.op.empty() ? NORMAL : OPPEND);
+    const Hit hit = registry().lookup(map_mode, N.keys);
     switch(hit.kind) {
         case Lookup::None:  // not bound to anything: swallow it
             N.reset();
@@ -162,10 +251,7 @@ void normal_feed(int c) {
                 show_pending();
                 return;
             }
-            Ctx ctx{N.count, {}};
-            N.reset();
-            if(!registry().run_action(hit.action, ctx))
-                editor_set_status_message("No such action: {}", hit.action);
+            dispatch(hit.action, Ctx{N.count, {}});
             return;
     }
 }

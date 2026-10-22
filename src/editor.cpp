@@ -1,5 +1,9 @@
 #include "editor.hpp"
+#include <cstddef>
+#include <set>
+#include "core.hpp"
 #include "events.hpp"
+#include "motion.hpp"
 
 EditorConfig E;
 
@@ -22,14 +26,19 @@ const char* mode_name(EditorMode m) {
         case INSERT: return "insert";
         case NORMAL: return "normal";
         case VISUAL: return "visual";
-        case COMMAND: return "command";
         case SEARCH: return "search";
+        case COMMAND: return "command";
+        case OPPEND: return "operator";
     }
     return "?";
 }
 
 void set_mode(EditorMode m) {
     if(E.mode == m) return;
+    if(E.mode == VISUAL && m == NORMAL) {
+        const size_t p = motion::clamp_normal(E.pt, cursor_offset());
+        set_cursor_offset(p);
+    }
     if(E.mode == INSERT) E.pt.end_group();
     if(m == INSERT) E.pt.begin_group();
     const EditorMode old = E.mode;
