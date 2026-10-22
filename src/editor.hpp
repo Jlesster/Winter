@@ -5,16 +5,30 @@
 #include <cstddef>
 #include <ctime>
 #include <format>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core.hpp"
 #include "piece.hpp"
 #include "syntax.hpp"
 
 // data
-struct EditorConfig {
+struct Buffer {
+    PieceTable pt{};
+    Syntax syntax{};
+    std::string filename{};
+    std::string original{};
     bool eol = true;
+    int cx = 0;
+    int cy = 0;
+    int want_rx = 0;
+    int row_offset = 0;
+    int col_offset = 0;
+};
+
+struct EditorConfig {
     int cx, cy = 0;
     int rx = 0;
     int want_rx = 0;  // goal column for j/k (INT_MAX = stick to line end)
@@ -22,16 +36,16 @@ struct EditorConfig {
     int col_offset = 0;
     int term_rows = 0;
     int term_cols = 0;
-    std::string orig{};
-    PieceTable pt{};
-    Syntax syntax{};
-    int num_rows() const { return static_cast<int>(pt.line_count()); }
-    std::string filename = "";
+    int num_rows() const { return static_cast<int>(buf().pt.line_count()); }
     std::string status_message = "";
     time_t status_message_time = 0;
     EditorMode mode = EditorMode::NORMAL;
+    size_t cur = 0;
     size_t v_anchor = 0;
     bool v_line = false;
+    Buffer* alt = nullptr;
+    Buffer& buf() const { return *buffers[cur]; }
+    std::vector<std::unique_ptr<Buffer>> buffers;
 };
 
 extern EditorConfig E;
