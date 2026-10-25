@@ -25,8 +25,10 @@ struct LineCol {
 struct TextEdit {
     size_t start = 0, old_end = 0, new_end = 0;
     LineCol start_pt{}, old_end_pt{}, new_end_pt{};
+    size_t start_u16 = 0, old_end_u16 = 0, new_end_u16 = 0;
     bool reset = false;
 };
+TextEdit merge_edits(const TextEdit& a, const TextEdit& b);
 
 class PieceTable {
 public:
@@ -82,6 +84,10 @@ public:
 
     uint64_t revision() const { return _rev; }
     std::vector<TextEdit> drain_edits() { return std::exchange(_journal, {}); }
+
+    void lsp_track(bool on, bool utf16 = false);
+    std::optional<TextEdit> take_lsp_edit();
+    bool lsp_dirty() const { return _lsp_pending.has_value(); }
 
     size_t piece_count() const { return count_nodes(_root); }
     size_t arena_size() const { return _n.size(); }
@@ -142,6 +148,12 @@ private:
     size_t nth_lf(Id t, size_t k) const;
     void log_edit(const TextEdit& e);
 
+    void note_lsp(const TextEdit& e);
+    size_t u16_range(size_t pos, size_t n) const;
+    size_t u16_col(LineCol p) const {
+        return u16_range(line_start(p.line), p.col);
+    }
+
     const std::vector<size_t>& lf_index(Src s) const {
         return s == Src::Orig ? _orig_lf : _add_lf;
     }
@@ -163,5 +175,8 @@ private:
     size_t _saved_head = 0;
     size_t _max_hist = 0;
     std::vector<TextEdit> _journal{};
+    bool _lsp_on = false;
+    bool _lsp_u16 = false;
+    std::optional<TextEdit> _lsp_pending{};
     static constexpr size_t kJournalCap = 1024;
 };

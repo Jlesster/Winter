@@ -1,6 +1,9 @@
 #include <string>
 
+#include "buflist.hpp"
 #include "builtin.hpp"
+#include "command.hpp"
+#include "diag.hpp"
 #include "edit.hpp"
 #include "editor.hpp"
 #include "motion.hpp"
@@ -41,7 +44,7 @@ void register_builtin_actions() {
     bind(
         "mode.append",
         [](Ctx&) {  // after the char under the cursor
-            const std::string line = E.pt.line_text(E.cy);
+            const std::string line = E.buf().pt.line_text(E.cy);
             const int size = static_cast<int>(line.size());
             enter_insert_at(E.cx < size
                                 ? static_cast<int>(utf8_next(line, E.cx))
@@ -57,7 +60,7 @@ void register_builtin_actions() {
     bind(
         "mode.insert_bol",
         [](Ctx&) {  // first non-blank
-            const std::string line = E.pt.line_text(E.cy);
+            const std::string line = E.buf().pt.line_text(E.cy);
             size_t i = 0;
             while(i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
             enter_insert_at(static_cast<int>(i));
@@ -111,6 +114,59 @@ void register_builtin_actions() {
     bind("mode.command", [](Ctx&) { set_mode(COMMAND); }, ":");
     bind("mode.search", [](Ctx&) { set_mode(SEARCH); }, "/");
 
+    // buffer control
+    bind(
+        "buffer.next",
+        [](Ctx& c) {
+            dot_supress();
+            buffer_cycle(std::max(c.count, 1));
+        },
+        "]b");
+    bind(
+        "buffer.prev",
+        [](Ctx& c) {
+            dot_supress();
+            buffer_cycle(std::max(c.count, 1));
+        },
+        "[b");
+    bind(
+        "buffer.next",
+        [](Ctx& c) {
+            dot_supress();
+            buffer_cycle(std::max(c.count, 1));
+        },
+        "<S-l>");
+    bind(
+        "buffer.prev",
+        [](Ctx& c) {
+            dot_supress();
+            buffer_cycle(std::max(c.count, 1));
+        },
+        "<S-l>");
+    bind(
+        "buffer.alt",
+        [](Ctx& c) {
+            dot_supress();
+            buffer_cycle(std::max(c.count, 1));
+        },
+        "<C-^>");
+
+    // lsp control
+    bind(
+        "diag.next",
+        [](Ctx& c) {
+            dot_supress();
+            diag_jump(+1, c.count);
+        },
+        "]d");
+    bind(
+        "diag.prev",
+        [](Ctx& c) {
+            dot_supress();
+            diag_jump(-1, c.count);
+        },
+        "[d");
+
     bind("search.next", [](Ctx&) { editor_find_callback("", 'n'); }, "n");
     bind("search.prev", [](Ctx&) { editor_find_callback("", 'N'); }, "N");
 
@@ -118,8 +174,8 @@ void register_builtin_actions() {
         "edit.undo",
         [](Ctx&) {
             dot_supress();
-            if(auto at = E.pt.undo()) {
-                set_cursor_offset(motion::clamp_normal(E.pt, *at));
+            if(auto at = E.buf().pt.undo()) {
+                set_cursor_offset(motion::clamp_normal(E.buf().pt, *at));
                 update_want();
             } else editor_set_status_message("Already at oldest change");
         },
@@ -128,17 +184,27 @@ void register_builtin_actions() {
         "edit.redo",
         [](Ctx&) {
             dot_supress();
-            if(auto at = E.pt.redo()) {
-                set_cursor_offset(motion::clamp_normal(E.pt, *at));
+            if(auto at = E.buf().pt.redo()) {
+                set_cursor_offset(motion::clamp_normal(E.buf().pt, *at));
                 update_want();
             } else editor_set_status_message("Already at newest change");
         },
         "<C-r>");
     bind("edit.dot", [](Ctx& c) { dot_replay(); }, ".");
+
+    bind_visual(
+        "visual.command",
+        [](Ctx&) {
+            set_mode(NORMAL);
+            E.cmd_prefill = std::string(kVisualRange);
+            set_mode(COMMAND);
+        },
+        ":");
 }
 
 void register_builtins() {
     register_builtin_motions();
     register_builtin_actions();
     register_builtin_operators();
+    register_builtin_commands();
 }

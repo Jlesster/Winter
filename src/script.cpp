@@ -1,6 +1,7 @@
 #include "script.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -13,6 +14,9 @@
 #include "core.hpp"
 #include "editor.hpp"
 #include "events.hpp"
+#include "json.hpp"
+#include "lsp_config.hpp"
+#include "lua_json.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
 #include "options.hpp"
@@ -237,7 +241,7 @@ int l_cursor(lua_State* L) {
 void place_cursor(lua_Integer line, lua_Integer col) {
     E.cy = static_cast<int>(
         std::clamp<lua_Integer>(line - 1, 0, E.num_rows() - 1));
-    const std::string text = E.pt.line_text(E.cy);
+    const std::string text = E.buf().pt.line_text(E.cy);
     const int size = static_cast<int>(text.size());
     int cx = snap_cx(
         text, static_cast<int>(std::clamp<lua_Integer>(col - 1, 0, size)));
@@ -260,7 +264,7 @@ int l_line(lua_State* L) {
         lua_pushnil(L);
         return 1;
     }
-    const std::string text = E.pt.line_text(static_cast<size_t>(n - 1));
+    const std::string text = E.buf().pt.line_text(static_cast<size_t>(n - 1));
     lua_pushlstring(L, text.data(), text.size());
     return 1;
 }
@@ -272,8 +276,9 @@ int l_line_count(lua_State* L) {
 
 void insert_text(std::string_view text) {
     std::unique_ptr<PieceTable::Group> group;
-    if(E.mode != INSERT) group = std::make_unique<PieceTable::Group>(E.pt);
-    E.pt.insert(cursor_offset(), text);
+    if(E.mode != INSERT)
+        group = std::make_unique<PieceTable::Group>(E.buf().pt);
+    E.buf().pt.insert(cursor_offset(), text);
     const auto newlines = std::count(text.begin(), text.end(), '\n');
     if(newlines == 0) {
         E.cx += static_cast<int>(text.size());
@@ -282,7 +287,7 @@ void insert_text(std::string_view text) {
         E.cx = static_cast<int>(text.size() - (text.rfind('\n') + 1));
     }
     if(E.mode != INSERT)
-        set_cursor_offset(motion::clamp_normal(E.pt, cursor_offset()));
+        set_cursor_offset(motion::clamp_normal(E.buf().pt, cursor_offset()));
     update_want();
 }
 
@@ -299,7 +304,7 @@ int l_mode(lua_State* L) {
 }
 
 int l_filename(lua_State* L) {
-    lua_pushlstring(L, E.filename.data(), E.filename.size());
+    lua_pushlstring(L, E.buf().filename.data(), E.buf().filename.size());
     return 1;
 }
 
@@ -326,6 +331,28 @@ int l_print(lua_State* L) {
     return 0;
 }
 
+int l_lsp(lua_State* L) {
+    size_t n = 0;
+    const char* name = luaL_checklstring(L, 1, &n);
+    if(!lua_isnoneornil(L, 2)) luaL_checktype(L, 2, LUA_TTABLE);
+    bool ok = true;
+    {
+        Json opts = Json::obj();
+        std::string err;
+        if(!lua_isnoneornil(L, 2)) lua_to_json(L, 2, opts, err);
+        if(err.empty())
+            err = lsp_configure(std::string_view(name, n), std::move(opts));
+        if(!err.empty()) {
+            err = std::format("winter.lsp(\"{}\"): {}", name, err);
+            luaL_where(L, 1);
+            lua_pushlstring(L, err.data(), err.size());
+            lua_concat(L, 2);
+            ok = false;
+        }
+    }
+    return ok ? 0 : lua_error(L);
+}
+
 const luaL_Reg kApi[] = {{"map", l_map},
                          {"unmap", l_unmap},
                          {"action", l_action},
@@ -342,6 +369,7 @@ const luaL_Reg kApi[] = {{"map", l_map},
                          {"filename", l_filename},
                          {"status", l_status},
                          {"command", l_command},
+                         {"lsp", l_lsp},
                          {nullptr, nullptr}};
 
 }  // namespace

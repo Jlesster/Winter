@@ -5,12 +5,13 @@
 #include <cstdint>
 #include <cstdlib>
 #include <format>
-#include <initializer_list>
 #include <optional>
 #include <regex>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include "options.hpp"
+#include "parser.hpp"
 #include "piece.hpp"
 
 #define X(n) extern "C" const TSLanguage* tree_sitter_##n();
@@ -44,6 +45,18 @@ constexpr ExtEntry kExts[] = {
     {".rs", "rust"},
 };
 
+constexpr ExtEntry kNames[] = {
+    {"Makefile", "make"},
+    {"GNUmakefile", "make"},
+    {"CMakeLists.txt", "cmake"},
+    {"meson.build", "meson"},
+    {"meson.options", "meson"},
+    {"PKGBUILD", "bash"},
+    {".bashrc", "bash"},
+    {".bash_profile", "bash"},
+    {".zshrc", "bash"},
+};
+
 struct ReadCtx {
     const PieceTable* pt;
     bool nl;
@@ -62,6 +75,11 @@ std::string_view query_src(std::string_view n) {
     for(const auto& q : kQueries)
         if(q.name == n) return q.src;
     return {};
+}
+
+std::string query_text(std::string_view n) {
+    if(const auto s = query_src(n); !s.empty()) return std::string(s);
+    return parser_query(n);
 }
 
 constexpr uint32_t MAUVE = 0xcba6f7, GREEN = 0xa6e3a1, PEACH = 0xfab387,
@@ -117,6 +135,28 @@ std::optional<Style> theme_for(std::string_view cap) {
     return std::nullopt;
 }
 
+constexpr uint32_t kRainbow[] = {RED, PEACH, YELLOW, GREEN, SKY, BLUE, MAUVE};
+
+bool is_generic(std::string_view t) {
+    return t == "template_argument_list" || t == "template_parameter_list" ||
+           t == "type_arguments" || t == "type_parameters";
+}
+
+void paint(std::vector<Span>& v, size_t x, uint32_t fg) {
+    auto it = std::ranges::upper_bound(v, x, {}, &Span::start);
+    if(it != v.begin() && std::prev(it)->end > x) {
+        const Span p = *std::prev(it);
+        it = v.erase(std::prev(it));
+        Style st = p.st;
+        st.fg = fg;
+        if(p.start < x) it = std::next(v.insert(it, Span{p.start, x, p.st}));
+        it = std::next(v.insert(it, Span{x, x + 1, st}));
+        if(x + 1 < p.end) v.insert(it, Span{x + 1, p.end, p.st});
+        return;
+    }
+    v.insert(it, Span{x, x + 1, Style{.fg = fg}});
+}
+
 std::string lua_to_ecma(std::string_view p) {
     std::string o;
     for(size_t i = 0; i < p.size(); ++i) {
@@ -166,22 +206,51 @@ Syntax::~Syntax() {
     ts_parser_delete(_parser);
 }
 
-bool Syntax::attach(std::string_view filename) {
-    const auto dot = filename.rfind('.');
-    if(dot == std::string_view::npos) return false;
-    const auto ext = filename.substr(dot);
-    for(const auto& e : kExts) {
-        if(e.ext != ext) continue;
-        for(const auto& l : kLangs) {
-            if(l.name != e.lang) continue;
-            if(!ts_parser_set_language(_parser, l.fn())) return false;
-            drop_tree();
-            _name = l.name;
-            load_query(l.fn(), l.name);
-            return true;
-        }
+std::string_view Syntax::detect(std::string_view path) {
+    const auto base = path.substr(path.rfind('/') + 1);
+    for(const auto& n : kNames)
+        if(n.ext == base) return n.lang;
+    std::string ext;
+    if(const auto dot = base.rfind('.');
+       dot != std::string_view::npos && dot != 0) {
+        ext = std::string(base.substr(dot));
+        for(char& c : ext)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for(const auto& e : kExts)
+            if(e.ext == ext) return e.lang;
     }
-    return false;
+    if(const auto l = parser_lang_for_file(base); !l.empty()) return l;
+    return ext.empty() ? std::string_view{} : parser_lang_for_ext(ext);
+}
+
+void Syntax::detach() {
+    drop_tree();
+    _span_cache.clear();
+    _name = {};
+    _seen_rev = ~0ULL;
+}
+
+bool Syntax::attach(std::string_view filename) {
+    detach();
+    const std::string_view lang = detect(filename);
+    if(lang.empty()) return false;
+    const TSLanguage* tl = nullptr;
+    for(const auto& l : kLangs)
+        if(l.name == lang) {
+            tl = l.fn();
+            break;
+        }
+    if(!tl) tl = parser_load(lang);
+    if(!tl) return false;
+    if(!ts_parser_set_language(_parser, tl)) {
+        _err = std::format("{}: grammar ABI not supported by this tree-sitter",
+                           lang);
+        return false;
+    }
+    drop_tree();
+    _name = lang;
+    load_query(tl, lang);
+    return true;
 }
 
 void Syntax::parse(const PieceTable& pt, bool trailing_nl) {
@@ -217,9 +286,9 @@ bool Syntax::load_query(const TSLanguage* lang, std::string_view name) {
         return ts_query_new(
             lang, src.data(), static_cast<uint32_t>(src.size()), &off, &et);
     };
-    std::string own(query_src(name)), full;
+    std::string own = query_text(name), full;
     for(const auto& [from, base] : kInherits)
-        if(from == name) { full = std::string(query_src(base)) + "\n"; }
+        if(from == name) { full = query_text(base) + "\n"; }
     full += own;
     uint32_t off = 0;
     TSQueryError et{};
@@ -386,7 +455,7 @@ void Syntax::cache_apply_edit(const TextEdit& e) {
     }
 }
 
-const std::vector<Span>& Syntax::line_spans(size_t ls, size_t len) {
+const std::vector<Span>& Syntax::base_spans(size_t ls, size_t len) {
     static const std::vector<Span> none;
     if(!_tree || !_query || len == 0) return none;
     if(const auto it = _span_cache.find(ls);
@@ -397,6 +466,76 @@ const std::vector<Span>& Syntax::line_spans(size_t ls, size_t len) {
         ls, CacheLine{len, compute_spans(ls, len)});
     (void)inserted;
     return it->second.spans;
+}
+
+void Syntax::rb_emit(size_t s, size_t e, size_t depth) {
+    if(s < e && s >= _rb_lo && s < _rb_hi)
+        _rb.push_back({s, static_cast<uint32_t>(depth)});
+}
+
+void Syntax::rb_walk(TSTreeCursor& c, size_t d, bool generic) {
+    if(!ts_tree_cursor_goto_first_child(&c)) return;
+    std::string st;
+    do {
+        const TSNode n = ts_tree_cursor_current_node(&c);
+        const size_t s = ts_node_start_byte(n), e = ts_node_end_byte(n);
+        if(s >= _rb_hi) break;
+        if(ts_node_is_named(n)) {
+            if(e > _rb_lo)
+                rb_walk(c, d + st.size(), is_generic(ts_node_type(n)));
+            continue;
+        }
+        const char* t = ts_node_type(n);
+        if(!t[0] || t[1]) continue;
+        switch(t[0]) {
+            case '<':
+                if(!generic) break;
+                [[fallthrough]];
+            case '(':
+            case '[':
+            case '{':
+                rb_emit(s, e, d + st.size());
+                st.push_back(t[0]);
+                break;
+            case ')':
+            case ']':
+            case '}':
+            case '>': {
+                const char o = t[0] == ')'   ? '('
+                               : t[0] == ']' ? '['
+                               : t[0] == '}' ? '{'
+                                             : '<';
+                if(st.empty() || st.back() != o) break;
+                st.pop_back();
+                rb_emit(s, e, d + st.size());
+                break;
+            }
+            default: break;
+        }
+    } while(ts_tree_cursor_goto_next_sibling(&c));
+    ts_tree_cursor_goto_parent(&c);
+}
+
+void Syntax::rainbow_prepare(size_t lo, size_t hi) {
+    _rb.clear();
+    if(!_tree || !opts.rainbow) return;
+    _rb_lo = lo;
+    _rb_hi = hi;
+    TSTreeCursor c = ts_tree_cursor_new(ts_tree_root_node(_tree));
+    rb_walk(c, 0, false);
+    ts_tree_cursor_delete(&c);
+}
+
+const std::vector<Span>& Syntax::line_spans(size_t ls, size_t len) {
+    const std::vector<Span>& base = base_spans(ls, len);
+    if(_rb.empty() || len == 0) return base;
+    auto it = std::ranges::lower_bound(_rb, ls, {}, &Delim::byte);
+    if(it == _rb.end() || it->byte >= ls + len) return base;
+    _merged = base;
+    for(; it != _rb.end() && it->byte < ls + len; ++it)
+        paint(
+            _merged, it->byte - ls, kRainbow[it->depth % std::size(kRainbow)]);
+    return _merged;
 }
 
 std::vector<Span> Syntax::compute_spans(size_t ls, size_t len) {

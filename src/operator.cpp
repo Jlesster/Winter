@@ -127,7 +127,7 @@ std::optional<Range> word_obj(const PieceTable& t, size_t p, int count) {
 
 // register text for a range; linewise text always ends in '\n'
 std::string grab(const Range& r) {
-    std::string s = E.pt.text(r.start, r.end - r.start);
+    std::string s = E.buf().pt.text(r.start, r.end - r.start);
     if(r.linewise && (s.empty() || s.back() != '\n')) s += '\n';
     return s;
 }
@@ -140,11 +140,11 @@ size_t cut(const Range& r) {
     unnamed = {grab(r), r.linewise};
     size_t a = r.start, n = r.end - r.start;
     // last line has no '\n' after it, so take the one before it instead
-    if(r.linewise && (n == 0 || E.pt.at(r.end - 1) != '\n') && a > 0) {
+    if(r.linewise && (n == 0 || E.buf().pt.at(r.end - 1) != '\n') && a > 0) {
         --a;
         ++n;
     }
-    E.pt.remove(a, n);
+    E.buf().pt.remove(a, n);
     return a;
 }
 
@@ -181,30 +181,30 @@ Range resolve(const PieceTable& t, size_t from, Target tg, bool word_motion) {
 }
 
 void shift(const Range& r, int dir) {  // > and <
-    const size_t l0 = E.pt.line_of(r.start);
-    const size_t l1 = E.pt.line_of(r.end > r.start ? r.end - 1 : r.start);
+    const size_t l0 = E.buf().pt.line_of(r.start);
+    const size_t l1 = E.buf().pt.line_of(r.end > r.start ? r.end - 1 : r.start);
     const std::string unit = indent_unit();
     for(size_t l = l1 + 1;
         l-- > l0;) {  // bottom-up keeps earlier offsets valid
-        const size_t s = E.pt.line_start(l), e = E.pt.line_end(l);
+        const size_t s = E.buf().pt.line_start(l), e = E.buf().pt.line_end(l);
         if(dir > 0) {
-            if(e > s) E.pt.insert(s, unit);  // vim skips empty lines
+            if(e > s) E.buf().pt.insert(s, unit);  // vim skips empty lines
         } else {
             size_t n = 0;
-            if(s < e && E.pt.at(s) == '\t') n = 1;
+            if(s < e && E.buf().pt.at(s) == '\t') n = 1;
             else
                 while(n < static_cast<size_t>(opts.shift_width) && s + n < e &&
-                      E.pt.at(s + n) == ' ')
+                      E.buf().pt.at(s + n) == ' ')
                     ++n;
-            if(n) E.pt.remove(s, n);
+            if(n) E.buf().pt.remove(s, n);
         }
     }
-    apply_motion(motion::to_first_nonblank(E.pt, E.pt.line_start(l0), 0));
+    apply_motion(motion::to_first_nonblank(E.buf().pt, E.buf().pt.line_start(l0), 0));
 }
 
 void paste(bool after, int count) {  // p and P
     if(unnamed.text.empty()) return;
-    PieceTable::Group g(E.pt);
+    PieceTable::Group g(E.buf().pt);
     std::string s;
     for(int i = std::max(count, 1); i > 0; --i) s += unnamed.text;
 
@@ -212,8 +212,8 @@ void paste(bool after, int count) {  // p and P
         size_t at;
         bool lead_nl = false;
         if(!after) {
-            at = E.pt.line_start(E.cy);
-        } else if(const size_t e = E.pt.line_end(E.cy); e == E.pt.size()) {
+            at = E.buf().pt.line_start(E.cy);
+        } else if(const size_t e = E.buf().pt.line_end(E.cy); e == E.buf().pt.size()) {
             // last line has no '\n' to step over: move it to the paste's front
             at = e;
             lead_nl = true;
@@ -222,19 +222,19 @@ void paste(bool after, int count) {  // p and P
         } else {
             at = e + 1;
         }
-        E.pt.insert(at, s);
+        E.buf().pt.insert(at, s);
         apply_motion(
-            motion::to_first_nonblank(E.pt, at + (lead_nl ? 1 : 0), 0));
+            motion::to_first_nonblank(E.buf().pt, at + (lead_nl ? 1 : 0), 0));
     } else {
         size_t at = cursor_offset();
         if(after)
-            at = motion::right_op(E.pt, at, 1)
+            at = motion::right_op(E.buf().pt, at, 1)
                      .pos;  // 1 char right (or stay on empty line)
-        E.pt.insert(at, s);
+        E.buf().pt.insert(at, s);
         // multi-line: cursor at its start. single-line: on its last char.
         set_cursor_offset(s.find('\n') != std::string::npos
                               ? at
-                              : motion::left(E.pt, at + s.size(), 1).pos);
+                              : motion::left(E.buf().pt, at + s.size(), 1).pos);
         update_want();
     }
 }
@@ -266,17 +266,17 @@ std::optional<Pair> surround_pair(std::string_view k) {
 
 void surround(const Range& r, const Pair& p) {
     if(r.end <= r.start) return;
-    PieceTable::Group g(E.pt);
+    PieceTable::Group g(E.buf().pt);
     if(!r.linewise) {
-        E.pt.insert(r.end, p.close);
-        E.pt.insert(r.start, p.open);
+        E.buf().pt.insert(r.end, p.close);
+        E.buf().pt.insert(r.start, p.open);
         set_cursor_offset(r.start);
         update_want();
         return;
     }
-    const size_t l0 = E.pt.line_of(r.start);
-    const size_t l1 = E.pt.line_of(r.end - 1);
-    const std::string first = E.pt.line_text(l0);
+    const size_t l0 = E.buf().pt.line_of(r.start);
+    const size_t l1 = E.buf().pt.line_of(r.end - 1);
+    const std::string first = E.buf().pt.line_text(l0);
     const std::string indent =
         first.substr(0,
                      first.find_first_not_of(" \t") == std::string::npos
@@ -287,15 +287,15 @@ void surround(const Range& r, const Pair& p) {
         const auto b = s.find_last_not_of(' ');
         return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
     };
-    if(E.pt.at(r.end - 1) == '\n')
-        E.pt.insert(r.end, indent + trim(p.close) + "\n");
-    else E.pt.insert(r.end, "\n" + indent + trim(p.close));
+    if(E.buf().pt.at(r.end - 1) == '\n')
+        E.buf().pt.insert(r.end, indent + trim(p.close) + "\n");
+    else E.buf().pt.insert(r.end, "\n" + indent + trim(p.close));
     const std::string unit = indent_unit();
     for(size_t l = l1 + 1; l-- > l0;)
-        if(E.pt.line_end(l) > E.pt.line_start(l))
-            E.pt.insert(E.pt.line_start(l), unit);
-    E.pt.insert(r.start, indent + trim(p.open) + "\n");
-    apply_motion(motion::to_first_nonblank(E.pt, r.start, 0));
+        if(E.buf().pt.line_end(l) > E.buf().pt.line_start(l))
+            E.buf().pt.insert(E.buf().pt.line_start(l), unit);
+    E.buf().pt.insert(r.start, indent + trim(p.open) + "\n");
+    apply_motion(motion::to_first_nonblank(E.buf().pt, r.start, 0));
 }
 
 // i" / a" etc: pairs on the line are 1-2, 3-4, ... like vim
@@ -340,10 +340,10 @@ void bind_obj(const char* name, ObjectFn fn, const char* keys) {
     registry().map(OPPEND, parse_keys(keys), name);
     const std::string vname = std::string("visual.") + name;
     registry().add_action(vname, [fn](Ctx& c) {
-        const auto r = fn(E.pt, cursor_offset(), c.count);
+        const auto r = fn(E.buf().pt, cursor_offset(), c.count);
         if(!r || r->end <= r->start) return;
         size_t last = r->end - 1;
-        while(last > r->start && utf8_is_cont(E.pt.at(last))) --last;
+        while(last > r->start && utf8_is_cont(E.buf().pt.at(last))) --last;
         E.v_anchor = r->start;
         E.v_line = false;
         set_cursor_offset(last);
@@ -363,13 +363,13 @@ Range visual_range() {
     const size_t cur = cursor_offset();
     const size_t a = std::min(E.v_anchor, cur), b = std::max(E.v_anchor, cur);
     if(E.v_line)
-        return {E.pt.line_start(E.pt.line_of(a)),
-                std::min(E.pt.line_end(E.pt.line_of(b)) + 1, E.pt.size()),
+        return {E.buf().pt.line_start(E.buf().pt.line_of(a)),
+                std::min(E.buf().pt.line_end(E.buf().pt.line_of(b)) + 1, E.buf().pt.size()),
                 true};
     size_t end = b;
-    if(end < E.pt.size()) {
+    if(end < E.buf().pt.size()) {
         ++end;
-        while(end < E.pt.size() && utf8_is_cont(E.pt.at(end))) ++end;
+        while(end < E.buf().pt.size() && utf8_is_cont(E.buf().pt.at(end))) ++end;
     }
     return {a, end, false};
 }
@@ -377,7 +377,7 @@ Range visual_range() {
 void run_operator_on(std::string_view op, const Range& r) {
     const Operator* fn = registry().op(op);
     if(!fn) return;
-    PieceTable::Group g(E.pt);
+    PieceTable::Group g(E.buf().pt);
     (*fn)(r);
 }
 
@@ -389,24 +389,24 @@ void run_operator(std::string_view op, std::string_view what, int count,
     std::optional<Range> r;
 
     if(const ObjectFn obj = registry().object(what)) {
-        r = obj(E.pt, cur, count);
+        r = obj(E.buf().pt, cur, count);
     } else if(const motion::Fn mot = registry().motion(what)) {
         const bool word =
             what == "motion.word_next" || what == "motion.WORD_next";
         motion::Fn use = mot;
         // cw acts like ce when on a non-blank (vim quirk)
-        if(op == "op.change" && word && cur < E.pt.size() &&
-           !std::isspace(static_cast<unsigned char>(E.pt.at(cur))))
+        if(op == "op.change" && word && cur < E.buf().pt.size() &&
+           !std::isspace(static_cast<unsigned char>(E.buf().pt.at(cur))))
             use = registry().motion(what == "motion.word_next"
                                         ? "motion.word_end"
                                         : "motion.WORD_end");
-        const Target t = use(E.pt, cur, count, arg);
+        const Target t = use(E.buf().pt, cur, count, arg);
         if(!t.ok) return;
-        r = resolve(E.pt, cur, t, word);
+        r = resolve(E.buf().pt, cur, t, word);
     }
     if(!r) return;
 
-    PieceTable::Group g(E.pt);  // the whole operator is one undo step
+    PieceTable::Group g(E.buf().pt);  // the whole operator is one undo step
     (*fn)(*r);
 }
 
@@ -414,11 +414,11 @@ void register_builtin_operators() {
     bind_op(
         "op.delete",
         [](const Range& r) {
-            set_cursor_offset(std::min(cut(r), E.pt.size()));
+            set_cursor_offset(std::min(cut(r), E.buf().pt.size()));
             apply_motion(
                 r.linewise
-                    ? motion::to_first_nonblank(E.pt, cursor_offset(), 0)
-                    : Target{motion::clamp_normal(E.pt, cursor_offset())});
+                    ? motion::to_first_nonblank(E.buf().pt, cursor_offset(), 0)
+                    : Target{motion::clamp_normal(E.buf().pt, cursor_offset())});
         },
         "d");
 
@@ -435,15 +435,15 @@ void register_builtin_operators() {
         "op.change",
         [](const Range& r) {
             if(r.linewise) {  // cc: wipe the text, keep the line and its indent
-                const std::string line = E.pt.line_text(E.pt.line_of(r.start));
+                const std::string line = E.buf().pt.line_text(E.buf().pt.line_of(r.start));
                 const size_t w = line.find_first_not_of(" \t");
                 const std::string indent =
                     line.substr(0, w == std::string::npos ? line.size() : w);
                 unnamed = {grab(r), true};
                 size_t b = r.end;
-                if(b > r.start && E.pt.at(b - 1) == '\n') --b;  // keep the '\n'
-                E.pt.remove(r.start, b - r.start);
-                E.pt.insert(r.start, indent);
+                if(b > r.start && E.buf().pt.at(b - 1) == '\n') --b;  // keep the '\n'
+                E.buf().pt.remove(r.start, b - r.start);
+                E.buf().pt.insert(r.start, indent);
                 set_cursor_offset(r.start + indent.size());
             } else {
                 set_cursor_offset(

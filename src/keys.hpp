@@ -11,5 +11,6 @@ enum EditorKey {
     DELETE,
     HOME,
     END,
+    CTRL_BACKSPACE,
     NONE,
 };

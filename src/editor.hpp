@@ -1,16 +1,14 @@
 #pragma once
-// The editor's one piece of global state. Next step: split it into
-// Editor + Buffer + View so Lua can hand out handles.
 
 #include <cstddef>
 #include <ctime>
 #include <format>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "core.hpp"
+#include "diag.hpp"
 #include "piece.hpp"
 #include "syntax.hpp"
 
@@ -18,9 +16,11 @@
 struct Buffer {
     PieceTable pt{};
     Syntax syntax{};
+    std::vector<Diag> diags{};
     std::string filename{};
-    std::string original{};
+    std::string orig{};
     bool eol = true;
+    bool nofile = false;
     int cx = 0;
     int cy = 0;
     int want_rx = 0;
@@ -38,11 +38,15 @@ struct EditorConfig {
     int term_cols = 0;
     int num_rows() const { return static_cast<int>(buf().pt.line_count()); }
     std::string status_message = "";
+    std::string cmd_prefill;
     time_t status_message_time = 0;
     EditorMode mode = EditorMode::NORMAL;
     size_t cur = 0;
+    size_t vm_first = 0;
+    size_t vm_last = 0;
     size_t v_anchor = 0;
     bool v_line = false;
+    bool vm_valid = false;
     Buffer* alt = nullptr;
     Buffer& buf() const { return *buffers[cur]; }
     std::vector<std::unique_ptr<Buffer>> buffers;
@@ -56,9 +60,12 @@ void set_cursor_offset(size_t pos);
 const char* mode_name(EditorMode m);
 void set_mode(EditorMode m);
 
+void editor_status_touched();
+
 template <typename... Args>
 void editor_set_status_message(std::format_string<Args...> fmt,
                                Args&&... args) {
     E.status_message = std::format(fmt, std::forward<Args>(args)...);
     E.status_message_time = time(nullptr);
+    editor_status_touched();
 }

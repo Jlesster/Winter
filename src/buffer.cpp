@@ -13,7 +13,8 @@ static void emit_sgr(std::string& out, const Style& s) {
     if(s.attrs & ATTR_BOLD) out += ";1";
     if(s.attrs & ATTR_DIM) out += ";2";
     if(s.attrs & ATTR_ITALIC) out += ";3";
-    if(s.attrs & ATTR_UNDERLINE) out += ";4";
+    if(s.attrs & ATTR_UNDERCURL) out += ";4:3";
+    else if(s.attrs & ATTR_UNDERLINE) out += ";4";
     if(s.attrs & ATTR_REVERSE) out += ";7";
     if(s.fg != 0xFFFFFFFF)
         std::format_to(std::back_inserter(out),
@@ -27,6 +28,12 @@ static void emit_sgr(std::string& out, const Style& s) {
                        (s.bg >> 16) & 0xFF,
                        (s.bg >> 8) & 0xFF,
                        s.bg & 0xFF);
+    if(s.ul != 0xFFFFFFFF)
+        std::format_to(std::back_inserter(out),
+                       ";58;2;{};{};{}",
+                       (s.ul >> 16) & 0xFF,
+                       (s.ul >> 8) & 0xFF,
+                       s.ul & 0xFF);
     out += 'm';
 }
 

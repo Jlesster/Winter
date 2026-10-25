@@ -224,7 +224,91 @@ void PieceTable::record_insert(size_t pos, size_t add_off, size_t len) {
     rev.edits.push_back({pos, {}, {Piece{Src::Add, add_off, len}}});
 }
 
+namespace {
+size_t u16_units(std::string_view s) {
+    size_t n = 0;
+    for(const char ch : s) {
+        const auto b = static_cast<unsigned char>(ch);
+        if((b ^ 0xC0) != 0x80) ++n;
+        if(b >= 0xF0) ++n;
+    }
+    return n;
+}
+
+struct Pt {
+    size_t off, line, col, u16;
+};
+Pt pt_start(const TextEdit& e) {
+    return {e.start, e.start_pt.line, e.start_pt.col, e.start_u16};
+}
+Pt pt_old(const TextEdit& e) {
+    return {e.old_end, e.old_end_pt.line, e.old_end_pt.col, e.old_end_u16};
+}
+Pt pt_new(const TextEdit& e) {
+    return {e.new_end, e.new_end_pt.line, e.new_end_pt.col, e.new_end_u16};
+}
+
+Pt shift(const Pt& p, const Pt& from, const Pt& to) {
+    Pt r{p.off - from.off + to.off, 0, 0, 0};
+    if(p.line == from.line) {
+        r.line = to.line;
+        r.col = p.col - from.col + to.col;
+        r.u16 = p.u16 - from.u16 + to.u16;
+    } else {
+        r.line = p.line - from.line + to.line;
+        r.col = p.col;
+        r.u16 = p.u16;
+    }
+    return r;
+}
+
+}  // namespace
+
+TextEdit merge_edits(const TextEdit& a, const TextEdit& b) {
+    TextEdit c;
+    if(a.reset || b.reset) {
+        c.reset = true;
+        return c;
+    }
+    const Pt a_old = pt_old(a), a_new = pt_new(a), b_old = pt_old(b),
+             b_new = pt_new(b);
+    const Pt s = b.start < a.start ? pt_start(b) : pt_start(a);
+    const Pt oe = b_old.off > a_new.off ? shift(b_old, a_new, a_old) : a_old;
+    const Pt ne = b_old.off >= a_new.off ? b_new : shift(a_new, b_old, b_new);
+    c.start = s.off;
+    c.start_pt = {s.line, s.col};
+    c.start_u16 = s.u16;
+    c.old_end = oe.off;
+    c.old_end_pt = {oe.line, oe.col};
+    c.old_end_u16 = oe.u16;
+    c.new_end = ne.off;
+    c.new_end_pt = {ne.line, ne.col};
+    c.new_end_u16 = ne.u16;
+    return c;
+}
+
+void PieceTable::lsp_track(bool on, bool utf16) {
+    _lsp_on = on;
+    _lsp_u16 = on && utf16;
+    _lsp_pending.reset();
+}
+
+std::optional<TextEdit> PieceTable::take_lsp_edit() {
+    return std::exchange(_lsp_pending, std::nullopt);
+}
+
+void PieceTable::note_lsp(const TextEdit& e) {
+    _lsp_pending = _lsp_pending ? merge_edits(*_lsp_pending, e) : e;
+}
+
+size_t PieceTable::u16_range(size_t pos, size_t n) const {
+    size_t units = 0;
+    for_each_chunk(pos, n, [&](std::string_view s) { units += u16_units(s); });
+    return units;
+}
+
 void PieceTable::log_edit(const TextEdit& e) {
+    if(_lsp_on) note_lsp(e);
     if(!_journal.empty() && _journal.back().reset) return;
     if(e.reset || _journal.size() >= kJournalCap) {
         TextEdit r;
@@ -263,6 +347,7 @@ PieceTable& PieceTable::insert(size_t pos, std::string_view text) {
     if(text.empty()) return *this;
     pos = std::min(pos, size());
     const LineCol sp = to_linecol(pos);
+    const size_t su = _lsp_u16 ? u16_col(sp) : 0;
     Group g(*this);
     const size_t add_off = raw_insert(pos, text);
     record_insert(pos, add_off, text.size());
@@ -278,6 +363,12 @@ PieceTable& PieceTable::insert(size_t pos, std::string_view text) {
             static_cast<size_t>(std::count(text.begin(), text.end(), '\n'));
         te.new_end_pt = {sp.line + nls, text.size() - (last_nl + 1)};
     }
+    if(_lsp_u16) {
+        te.start_u16 = te.old_end_u16 = su;
+        te.new_end_u16 = last_nl == std::string_view::npos
+                             ? su + u16_units(text)
+                             : u16_units(text.substr(last_nl + 1));
+    }
     log_edit(te);
     return *this;
 }
@@ -287,6 +378,11 @@ PieceTable& PieceTable::remove(size_t pos, size_t n) {
     if(pos >= total || n == 0) return *this;
     n = std::min(n, total - pos);
     const LineCol sp = to_linecol(pos), ep = to_linecol(pos + n);
+    size_t su = 0, eu = 0;
+    if(_lsp_u16) {
+        su = u16_col(sp);
+        eu = ep.line == sp.line ? su + u16_range(pos, n) : u16_col(ep);
+    }
     Group g(*this);
     std::vector<Piece> removed;
     raw_remove(pos, n, &removed);
@@ -296,6 +392,8 @@ PieceTable& PieceTable::remove(size_t pos, size_t n) {
     te.old_end = pos + n;
     te.start_pt = te.new_end_pt = sp;
     te.old_end_pt = ep;
+    te.start_u16 = te.new_end_u16 = su;
+    te.old_end_u16 = eu;
     log_edit(te);
     Revision& rev = open_rev();
     if(!rev.edits.empty()) {

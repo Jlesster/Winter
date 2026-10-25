@@ -2,13 +2,11 @@
 #include <tree_sitter/api.h>
 #include <cstddef>
 #include <cstdint>
-#include <iterator>
 #include <map>
 #include <optional>
 #include <regex>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 #include "buffer.hpp"
 #include "piece.hpp"
@@ -20,12 +18,17 @@ public:
     Syntax(const Syntax&) = delete;
     Syntax& operator=(const Syntax&) = delete;
 
+    std::string_view lang() const { return _name; }
+
+    static std::string_view detect(std::string_view path);
     bool attach(std::string_view filename);
     void parse(const PieceTable& pt, bool trailing_nl);
     std::string summary() const;
 
     void update(PieceTable& pt, bool trailing_nl);
-    const std::vector<Span>& line_spans(size_t line_start, size_t line_len);
+    const std::vector<Span>& line_spans(size_t ls, size_t len);
+
+    void rainbow_prepare(size_t lo, size_t hi);
 
 private:
     struct Pred {
@@ -44,14 +47,23 @@ private:
         std::vector<Span> spans;
     };
 
+    struct Delim {
+        size_t byte;
+        uint32_t depth;
+    };
+
     void cache_erase_range(size_t lo, size_t hi);
     void cache_apply_edit(const TextEdit& e);
 
     void drop_tree();
+    void detach();
     bool load_query(const TSLanguage* lang, std::string_view name);
     void add_pred(uint32_t pattern,
                   const std::vector<const TSQueryPredicateStep*>& s);
     bool eval(const TSQueryMatch& m) const;
+    const std::vector<Span>& base_spans(size_t line_start, size_t line_len);
+    void rb_walk(TSTreeCursor& c, size_t d, bool generic);
+    void rb_emit(size_t s, size_t e, size_t depth);
     std::vector<Span> compute_spans(size_t ls, size_t len);
 
     bool _nl = true;
@@ -70,4 +82,7 @@ private:
     std::map<size_t, CacheLine> _span_cache;
     std::string _err;
     std::string_view _name{};
+    std::vector<Delim> _rb;
+    std::vector<Span> _merged;
+    size_t _rb_lo = 0, _rb_hi = 0;
 };

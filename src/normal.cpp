@@ -18,7 +18,7 @@ void editor_move_cursor(int key) {
     if(key == ARROW_UP || key == 'k') return move_vertical(-1, 1);
     if(key == ARROW_DOWN || key == 'j') return move_vertical(+1, 1);
     const int last = E.num_rows() - 1;
-    std::string line = E.pt.line_text(E.cy);
+    std::string line = E.buf().pt.line_text(E.cy);
     switch(key) {
         case 'h':
         case ARROW_LEFT:
@@ -47,12 +47,12 @@ void editor_move_cursor(int key) {
             if(E.cy < last) E.cy++;
             break;
     }
-    line = E.pt.line_text(E.cy);
+    line = E.buf().pt.line_text(E.cy);
     E.cx = snap_cx(line, std::min(E.cx, static_cast<int>(line.size())));
     E.want_rx = cx_to_rx(line, E.cx);
 }
 
-void update_want() { E.want_rx = cx_to_rx(E.pt.line_text(E.cy), E.cx); }
+void update_want() { E.want_rx = cx_to_rx(E.buf().pt.line_text(E.cy), E.cx); }
 
 // j / k keep a goal column, so passing over a short line doesn't lose it
 void move_vertical(int dir, int count) {
@@ -60,7 +60,7 @@ void move_vertical(int dir, int count) {
         std::clamp(E.cy + dir * std::max(count, 1), 0, E.num_rows() - 1);
     if(target == E.cy) return;
     E.cy = target;
-    const std::string line = E.pt.line_text(E.cy);
+    const std::string line = E.buf().pt.line_text(E.cy);
     const int size = static_cast<int>(line.size());
     int cx = E.want_rx == INT_MAX ? size : rx_to_cx(line, E.want_rx);
     if(E.mode != VISUAL && cx >= size &&
@@ -169,7 +169,7 @@ void dot_after_key(int c, EditorMode before, uint64_t rev_before) {
     }
     D.cur.push_back(c);
     if(normal_pending()) return;
-    const bool changed = E.pt.revision() != rev_before || E.mode == INSERT;
+    const bool changed = E.buf().pt.revision() != rev_before || E.mode == INSERT;
     if(D.skip || !changed) {
         D.skip = false;
         D.cur.clear();

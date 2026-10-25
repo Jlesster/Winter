@@ -38,7 +38,7 @@ void bind_op_motion(const char* name, Pure fn, const char* keys) {
 void bind_motion(const char* name, Pure fn, const char* keys) {
     registry().add_motion(name, wrap(fn));
     registry().add_action(name, [fn](Ctx& c) {
-        apply_motion(fn(E.pt, cursor_offset(), c.count));
+        apply_motion(fn(E.buf().pt, cursor_offset(), c.count));
     });
     map_shared(name, keys);
 }
@@ -62,7 +62,7 @@ void bind_find(const char* name, motion::Find kind, const char* keys) {
         [kind](Ctx& c) {
             last_find = {true, kind, c.arg};
             apply_motion(motion::find_char(
-                E.pt, cursor_offset(), c.count, kind, c.arg, false));
+                E.buf().pt, cursor_offset(), c.count, kind, c.arg, false));
         },
         keys,
         /*wants_char=*/true);
@@ -82,7 +82,7 @@ void bind_repeat(const char* name, bool reverse, const char* keys) {
             const auto k =
                 reverse ? motion::flip(last_find.kind) : last_find.kind;
             apply_motion(motion::find_char(
-                E.pt, cursor_offset(), c.count, k, last_find.ch, true));
+                E.buf().pt, cursor_offset(), c.count, k, last_find.ch, true));
         },
         keys);
     registry().add_motion(
@@ -121,13 +121,13 @@ void register_builtin_motions() {
     bind_motion("motion.match_pair", motion::match_pair, "%");
 
     registry().add_action("visual.right", [](Ctx& c) {
-        apply_motion(motion::right_op(E.pt, cursor_offset(), c.count));
+        apply_motion(motion::right_op(E.buf().pt, cursor_offset(), c.count));
     });
     registry().map(VISUAL, "l", "visual.right");
     registry().add_action("visual.line_end", [](Ctx& c) {
-        Target t = motion::to_line_end(E.pt, cursor_offset(), c.count);
+        Target t = motion::to_line_end(E.buf().pt, cursor_offset(), c.count);
         if(!t.ok) return;
-        t.pos = E.pt.line_end(E.pt.line_of(t.pos));
+        t.pos = E.buf().pt.line_end(E.buf().pt.line_of(t.pos));
         apply_motion(t);
     });
     registry().map(VISUAL, "$", "visual.line_end");

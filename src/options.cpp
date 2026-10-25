@@ -32,6 +32,15 @@ Opt kTable[] = {
     {"number", "nu", Kind::Bool, &opts.number, 0, 1},
     {"relativenumber", "rnu", Kind::Bool, &opts.relative_number, 0, 1},
     {"numberwidth", "nuw", Kind::Int, &opts.number_width, 1, 10},
+    {"rainbow", "rb", Kind::Bool, &opts.rainbow, 0, 1},
+    {"diagnostics", "diag", Kind::Bool, &opts.diagnostics, 0, 1},
+    {"diag_virtual_text", "", Kind::Bool, &opts.diag_virtual_text, 0, 1},
+    {"diag_undercurl", "", Kind::Bool, &opts.diag_undercurl, 0, 1},
+    {"diag_severity", "", Kind::Int, &opts.diag_severity, 1, 4},
+    {"scrolloff", "so", Kind::Int, &opts.scrolloff, 0, 999},
+    {"scrolleof", "", Kind::Bool, &opts.scrolleof, 0, 1},
+    {"history", "hi", Kind::Int, &opts.history, 0, 10000},
+    {"remember_cursor", "", Kind::Bool, &opts.remember_cursor, 0, 1},
 };
 
 std::optional<CursorStyle> parse_cursor(std::string_view v) {

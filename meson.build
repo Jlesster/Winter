@@ -11,7 +11,10 @@ project(
 
 sub_opts = ['warning_level=0', 'werror=false']
 ts_dep = dependency('tree-sitter', default_options: sub_opts)
-lua_dep = dependency('lua-5.4', 'lua5.4', 'lua54', 'lua', version: '>=5.4')
+lua_dep = dependency('lua5.4', method: 'pkg-config')
+if not lua_dep.found()
+  lua_dep = dependency('lua', version: '>=5.4', method: 'pkg-config')
+endif
 
 grammars = get_option('ts_grammars')
 lang_deps = []
@@ -32,34 +35,47 @@ configure_file(
 add_project_arguments('-DWINTER_TS_LANGS(X)=' + ' '.join(lang_syms), language: 'cpp')
 
 deps = [
-  lua_dep,
   dependency('trux'),
   ts_dep,
-] + lang_deps
+] + lang_deps + [lua_dep]
 
 sources = files(
   'src/buffer.cpp',
+  'src/buflist.cpp',
   'src/builtin_actions.cpp',
   'src/builtin_motions.cpp',
   'src/columns.cpp',
   'src/command.cpp',
+  'src/diag.cpp',
   'src/edit.cpp',
   'src/editor.cpp',
   'src/events.cpp',
   'src/file.cpp',
   'src/gutter.cpp',
   'src/input.cpp',
+  'src/job.cpp',
+  'src/json.cpp',
+  'src/loop.cpp',
+  'src/lsp_client.cpp',
+  'src/lsp_config.cpp',
+  'src/lsp_edit.cpp',
+  'src/lsp_reader.cpp',
+  'src/lsp_sync.cpp',
+  'src/lua_json.cpp',
   'src/main.cpp',
   'src/motion.cpp',
   'src/normal.cpp',
   'src/operator.cpp',
   'src/options.cpp',
+  'src/parser.cpp',
   'src/piece.cpp',
   'src/prompt.cpp',
   'src/registry.cpp',
   'src/render.cpp',
   'src/script.cpp',
   'src/search.cpp',
+  'src/shell.cpp',
+  'src/state.cpp',
   'src/syntax.cpp',
   'src/terminal.cpp',
 )

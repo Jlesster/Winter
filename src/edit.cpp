@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -15,16 +16,17 @@
 
 void editor_insert_char(int c) {
     const char ch = static_cast<char>(c);
-    E.pt.insert(cursor_offset(), std::string_view(&ch, 1));
+    E.buf().pt.insert(cursor_offset(), std::string_view(&ch, 1));
     E.cx++;
 }
 
 void editor_insert_tab() {
     if(!opts.expand_tab) return editor_insert_char('\t');
     // pad to the next shift-width column, not a fixed 4 spaces
-    const int rx = cx_to_rx(E.pt.line_text(E.cy), E.cx);
+    const int rx = cx_to_rx(E.buf().pt.line_text(E.cy), E.cx);
     const int n = opts.shift_width - (rx % opts.shift_width);
-    E.pt.insert(cursor_offset(), std::string(static_cast<size_t>(n), ' '));
+    E.buf().pt.insert(cursor_offset(),
+                      std::string(static_cast<size_t>(n), ' '));
     E.cx += n;
 }
 
@@ -34,8 +36,9 @@ namespace {
 
 // one indent level, per the current options
 std::string indent_unit() {
-    return opts.expand_tab ? std::string(static_cast<size_t>(opts.shift_width), ' ')
-                           : std::string("\t");
+    return opts.expand_tab
+               ? std::string(static_cast<size_t>(opts.shift_width), ' ')
+               : std::string("\t");
 }
 
 static char closer_for(char c) {
@@ -70,7 +73,7 @@ static bool is_empty_pair(char prev, char next) {
 }  // namespace
 
 void editor_insert_newline() {
-    const std::string line = E.pt.line_text(E.cy);
+    const std::string line = E.buf().pt.line_text(E.cy);
     const size_t cx = static_cast<size_t>(E.cx);
     const std::string_view before = std::string_view(line).substr(0, cx);
     const std::string_view after = std::string_view(line).substr(cx);
@@ -81,7 +84,7 @@ void editor_insert_newline() {
 
     // cursor sat in pure whitespace: don't leave trailing whitespace behind
     if(last == std::string_view::npos && cx > 0) {
-        E.pt.remove(cursor_offset() - cx, cx);
+        E.buf().pt.remove(cursor_offset() - cx, cx);
         E.cx = 0;
     }
 
@@ -94,7 +97,7 @@ void editor_insert_newline() {
         // {|} -> split onto three lines, cursor on the middle one
         if(after.starts_with(cl)) ins += "\n" + indent;
     }
-    E.pt.insert(cursor_offset(), ins);
+    E.buf().pt.insert(cursor_offset(), ins);
     E.cy++;
     E.cx = static_cast<int>(new_cx);
 }
@@ -102,7 +105,7 @@ void editor_insert_newline() {
 // typing a printable ascii char in insert mode
 void editor_type_char(int c) {
     const char ch = static_cast<char>(c);
-    const std::string line = E.pt.line_text(E.cy);
+    const std::string line = E.buf().pt.line_text(E.cy);
     const size_t cx = static_cast<size_t>(E.cx);
     const char prev = cx > 0 ? line[cx - 1] : 0;
     const char next = cx < line.size() ? line[cx] : 0;
@@ -119,11 +122,11 @@ void editor_type_char(int c) {
             size_t drop = 0;
             if(prev == '\t') drop = 1;
             else
-                while(drop < static_cast<size_t>(opts.shift_width) && drop < cx &&
-                      line[cx - 1 - drop] == ' ')
+                while(drop < static_cast<size_t>(opts.shift_width) &&
+                      drop < cx && line[cx - 1 - drop] == ' ')
                     ++drop;
             if(drop) {
-                E.pt.remove(cursor_offset() - drop, drop);
+                E.buf().pt.remove(cursor_offset() - drop, drop);
                 E.cx -= static_cast<int>(drop);
             }
         }
@@ -135,8 +138,8 @@ void editor_type_char(int c) {
     const bool room = next == 0 || next == ' ' || next == '\t' ||
                       is_closer(next) || next == ',' || next == ';';
     if(const char cl = closer_for(ch)) {
-        E.pt.insert(cursor_offset(),
-                    room ? std::string{ch, cl} : std::string{ch});
+        E.buf().pt.insert(cursor_offset(),
+                          room ? std::string{ch, cl} : std::string{ch});
         E.cx++;
         return;
     }
@@ -144,7 +147,7 @@ void editor_type_char(int c) {
         const bool apostrophe = ch == '\'' && is_word(prev);  // don't, it's
         const bool pair = room && !apostrophe && prev != ch;
         if(pair) {
-            E.pt.insert(cursor_offset(), std::string{ch, ch});
+            E.buf().pt.insert(cursor_offset(), std::string{ch, ch});
             E.cx++;
         } else editor_insert_char(c);
         return;
@@ -169,15 +172,15 @@ static std::string indent_below(std::string_view line) {
 }  // namespace
 
 void editor_open_below() {
-    const std::string indent = indent_below(E.pt.line_text(E.cy));
-    E.pt.insert(E.pt.line_end(E.cy), "\n" + indent);
+    const std::string indent = indent_below(E.buf().pt.line_text(E.cy));
+    E.buf().pt.insert(E.buf().pt.line_end(E.cy), "\n" + indent);
     E.cy++;
     E.cx = static_cast<int>(indent.size());
 }
 
 void editor_open_above() {
-    const std::string indent(leading_ws(E.pt.line_text(E.cy)));
-    E.pt.insert(E.pt.line_start(E.cy), indent + "\n");
+    const std::string indent(leading_ws(E.buf().pt.line_text(E.cy)));
+    E.buf().pt.insert(E.buf().pt.line_start(E.cy), indent + "\n");
     // the new line took this line's index; the old text moved down one
     E.cx = static_cast<int>(indent.size());
 }
@@ -186,32 +189,56 @@ void editor_delete_char() {
     const size_t pos = cursor_offset();
     if(pos == 0) return;
     if(E.cx > 0) {
-        const std::string line = E.pt.line_text(E.cy);
-        const char next =
-            E.cx < static_cast<int>(line.size()) ? line[E.cx] : 0;
+        const std::string line = E.buf().pt.line_text(E.cy);
+        const char next = E.cx < static_cast<int>(line.size()) ? line[E.cx] : 0;
         if(is_empty_pair(line[E.cx - 1], next)) {  // (|) -> |
-            E.pt.remove(pos - 1, 2);
+            E.buf().pt.remove(pos - 1, 2);
             E.cx--;
             return;
         }
         const int from = static_cast<int>(utf8_prev(line, E.cx));
-        E.pt.remove(pos - (E.cx - from), E.cx - from);
+        E.buf().pt.remove(pos - (E.cx - from), E.cx - from);
         E.cx = from;
     } else {
         const int prev_len = static_cast<int>(line_len(E.cy - 1));
-        E.pt.remove(pos - 1, 1);
+        E.buf().pt.remove(pos - 1, 1);
         E.cy--;
         E.cx = prev_len;
     }
 }
 
+size_t word_back_stop(std::string_view line, size_t pos) {
+    const auto cls = [&](size_t k) {
+        const auto c = static_cast<unsigned char>(line[k - 1]);
+        if(c == ' ' || c == '\t') return 0;
+        return (c >= 0x80 || std::isalnum(c) || c == '_') ? 1 : 2;
+    };
+    size_t i = pos;
+    while(i > 0) {
+        const int c = cls(i);
+        while(i > 0 && cls(i) == c) --i;
+    }
+    return i;
+}
+
+void editor_delete_word_back() {
+    const size_t pos = cursor_offset();
+    if(pos == 0) return;
+    if(E.cx == 0) return editor_delete_char();
+    const size_t i =
+        word_back_stop(E.buf().pt.line_text(E.cy), static_cast<size_t>(E.cx));
+    const size_t n = static_cast<size_t>(E.cx) - i;
+    E.buf().pt.remove(pos - n, n);
+    E.cx = i;
+}
+
 void editor_delete_forward() {
-    const std::string line = E.pt.line_text(E.cy);
+    const std::string line = E.buf().pt.line_text(E.cy);
     const size_t pos = cursor_offset();
     if(E.cx < static_cast<int>(line.size())) {
         const int to = static_cast<int>(utf8_next(line, E.cx));
-        E.pt.remove(pos, static_cast<size_t>(to - E.cx));
+        E.buf().pt.remove(pos, static_cast<size_t>(to - E.cx));
     } else if(E.cy < E.num_rows() - 1) {
-        E.pt.remove(pos, 1);
+        E.buf().pt.remove(pos, 1);
     }
 }

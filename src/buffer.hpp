@@ -9,6 +9,8 @@ struct Style {
     uint32_t bg = 0xFFFFFFFF;
     uint16_t attrs = 0;
 
+    uint32_t ul = 0xFFFFFFFF;
+
     bool operator==(const Style&) const = default;
 };
 
@@ -31,6 +33,7 @@ enum : uint16_t {
     ATTR_ITALIC = 1 << 2,
     ATTR_UNDERLINE = 1 << 3,
     ATTR_REVERSE = 1 << 4,
+    ATTR_UNDERCURL = 1 << 5,
 };
 
 class Screen {

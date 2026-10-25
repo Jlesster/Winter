@@ -35,7 +35,7 @@ void editor_find_callback(std::string query, int key) {
         current += direction;
         if(current == -1) current = E.num_rows() - 1;
         else if(current == E.num_rows()) current = 0;
-        const std::string line = E.pt.line_text(current);
+        const std::string line = E.buf().pt.line_text(current);
         size_t match_pos = line.find(query);
         if(match_pos != std::string::npos) {
             last_match = current;

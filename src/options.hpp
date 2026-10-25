@@ -21,18 +21,27 @@ struct CursorStyle {
 };
 
 struct Options {
+    int scrolloff = 5;       // scroll off padding
+    bool scrolleof = false;  // scroll past the EOF
     int tab_stop = 4;        // display width of a '\t'
     int shift_width = 4;     // one indent level
     bool expand_tab = true;  // Tab key / indents use spaces
     int quit_times = 3;      // extra Ctrl-Q presses needed with unsaved changes
+    int history = 500;       // history entries per file
+    bool remember_cursor = true;  // cursor pos memory per file
     // DECSCUSR: 1/2 block, 3/4 underline, 5/6 bar (odd = blinking)
     CursorStyle cursor_normal{CursorShape::Block, false};
     CursorStyle cursor_insert{CursorShape::Bar, false};
     CursorStyle cursor_visual{CursorShape::Underline, false};
-    bool cursor_inverse = false;   // semantic cursor coloring
-    bool number = false;           // line num
-    bool relative_number = false;  // relative line num
-    int number_width = 4;          // gutter width
+    bool cursor_inverse = false;    // semantic cursor coloring
+    bool number = false;            // line num
+    bool relative_number = false;   // relative line num
+    int number_width = 4;           // gutter width
+    bool rainbow = true;            // rainbow delimiters
+    bool diagnostics = true;        // show LSP diags
+    bool diag_virtual_text = true;  // end-of-line message
+    bool diag_undercurl = true;
+    int diag_severity = 4;  // show this severity and worse: 1 error .. 4 hint
 };
 
 extern Options opts;

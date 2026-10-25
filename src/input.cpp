@@ -18,11 +18,11 @@ static int quit_presses = 0;
 
 void editor_handle_key(int c) {
     const EditorMode before = E.mode;
-    const uint64_t rev_before = E.pt.revision();
+    const uint64_t rev_before = E.buf().pt.revision();
 
     switch(c) {
         case CTRL_KEY('q'):
-            if(E.pt.modified() && quit_presses < opts.quit_times) {
+            if(E.buf().pt.modified() && quit_presses < opts.quit_times) {
                 editor_set_status_message(
                     "[WARNING]!! File has unsaved changes, press CTRL-Q {} "
                     "more times to quit.",
@@ -64,7 +64,8 @@ void editor_handle_key(int c) {
             const bool was_insert = E.mode == EditorMode::INSERT;
             set_mode(EditorMode::NORMAL);
             if(was_insert && E.cx > 0)
-                E.cx = static_cast<int>(utf8_prev(E.pt.line_text(E.cy), E.cx));
+                E.cx = static_cast<int>(
+                    utf8_prev(E.buf().pt.line_text(E.cy), E.cx));
             update_want();
         } break;
     }
@@ -73,6 +74,9 @@ void editor_handle_key(int c) {
             switch(c) {
                 case '\r': editor_insert_newline(); break;
                 case BACKSPACE: editor_delete_char(); break;
+                case CTRL_BACKSPACE:
+                case CTRL_KEY('h'):
+                case CTRL_KEY('w'): editor_delete_word_back(); break;
                 case DELETE: editor_delete_forward(); break;
                 case ARROW_UP:
                 case ARROW_DOWN:
@@ -82,8 +86,8 @@ void editor_handle_key(int c) {
                 case END:
                 case PAGE_UP:
                 case PAGE_DOWN:
-                    E.pt.end_group();
-                    E.pt.begin_group();
+                    E.buf().pt.end_group();
+                    E.buf().pt.begin_group();
                     break;
                 default:
                     if(c >= 32 && c < 127) editor_type_char(c);
