@@ -1,6 +1,5 @@
 #include "piece.hpp"
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -131,12 +130,17 @@ bool PieceTable::try_expanded(Id t, size_t add_off, size_t n) {
     return true;
 }
 
-size_t PieceTable::raw_insert(size_t pos, std::string_view text) {
-    const size_t add_off = _add.size();
+size_t PieceTable::add_text(std::string_view text) {
+    const size_t off = _add.size();
     _add.append(text);
     for(size_t i = text.find('\n'); i != std::string_view::npos;
         i = text.find('\n', i + 1))
-        _add_lf.push_back(add_off + i);
+        _add_lf.push_back(off + i);
+    return off;
+}
+
+size_t PieceTable::raw_insert(size_t pos, std::string_view text) {
+    const size_t add_off = add_text(text);
     auto [l, r] = split(_root, pos);
     if(!try_expanded(l, add_off, text.size()))
         l = merge(l, make({Src::Add, add_off, text.size()}));
@@ -341,6 +345,47 @@ std::optional<size_t> PieceTable::redo() {
     r.reset = true;
     log_edit(r);
     return std::min(rev.edits.front().pos, size());
+}
+
+PieceTable::SavedHistory PieceTable::export_history() const {
+    SavedHistory h;
+    const size_t head = _rev_open ? _hist.size() : _head;
+    const auto text_of = [&](const std::vector<Piece>& ps) {
+        std::string s;
+        for(const Piece& p : ps) s.append(bytes(p));
+        return s;
+    };
+    for(size_t i = 0; i < _hist.size(); ++i) {
+        if(_hist[i].edits.empty()) continue;
+        auto& rev = h.revs.emplace_back();
+        for(const Edit& e : _hist[i].edits)
+            rev.push_back({e.pos, text_of(e.removed), text_of(e.inserted)});
+        if(i < head) ++h.head;
+    }
+    return h;
+}
+
+bool PieceTable::import_history(const SavedHistory& h) {
+    if(!_hist.empty() || _depth != 0 || h.head > h.revs.size()) return false;
+    for(const auto& rev : h.revs)
+        if(rev.empty()) return false;
+    const auto pieces = [&](const std::string& s) {
+        std::vector<Piece> v;
+        if(!s.empty()) v.push_back({Src::Add, add_text(s), s.size()});
+        return v;
+    };
+    std::vector<Revision> hist;
+    hist.reserve(h.revs.size());
+    for(const auto& rev : h.revs) {
+        Revision r;
+        for(const SavedEdit& e : rev)
+            r.edits.push_back({e.pos, pieces(e.removed), pieces(e.inserted)});
+        hist.push_back(std::move(r));
+    }
+    _hist = std::move(hist);
+    _head = h.head;
+    _saved_head = _head;
+    return true;
 }
 
 PieceTable& PieceTable::insert(size_t pos, std::string_view text) {

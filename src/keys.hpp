@@ -12,5 +12,6 @@ enum EditorKey {
     HOME,
     END,
     CTRL_BACKSPACE,
+    PASTE,
     NONE,
 };

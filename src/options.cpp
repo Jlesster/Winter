@@ -41,6 +41,11 @@ Opt kTable[] = {
     {"scrolleof", "", Kind::Bool, &opts.scrolleof, 0, 1},
     {"history", "hi", Kind::Int, &opts.history, 0, 10000},
     {"remember_cursor", "", Kind::Bool, &opts.remember_cursor, 0, 1},
+    {"undofile", "udf", Kind::Bool, &opts.undofile, 0, 1},
+    {"undolevels", "ul", Kind::Int, &opts.undo_levels, 0, 100000},
+    {"timeoutlen", "tm", Kind::Int, &opts.timeoutlen, 0, 60000},
+    {"hlsearch", "hls", Kind::Bool, &opts.hlsearch, 0, 1},
+    {"pasteindent", "pi", Kind::Bool, &opts.paste_indent, 0, 1},
 };
 
 std::optional<CursorStyle> parse_cursor(std::string_view v) {

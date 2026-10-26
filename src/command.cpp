@@ -22,6 +22,7 @@
 #include "piece.hpp"
 #include "prompt.hpp"
 #include "script.hpp"
+#include "search.hpp"
 #include "syntax.hpp"
 #include "terminal.hpp"
 
@@ -38,7 +39,7 @@ void skip_blanks(std::string_view& s) {
     while(!s.empty() && s.front() == ' ') s.remove_prefix(1);
 }
 
-std::optional<long> parse_addr(std::string_view& s) {
+std::optional<long> parse_addr(std::string_view& s, long base) {
     skip_blanks(s);
     if(s.empty()) return std::nullopt;
     const auto digit = [](char ch) {
@@ -52,13 +53,13 @@ std::optional<long> parse_addr(std::string_view& s) {
             s.remove_prefix(1);
         }
     } else if(c == '.') {
-        n = E.cy + 1;
+        n = base;
         s.remove_prefix(1);
     } else if(c == '$') {
         n = E.num_rows();
         s.remove_prefix(1);
     } else if(c == '+' || c == '-') {
-        n = E.cy + 1;
+        n = base;
     } else if(s.starts_with("'<") || s.starts_with("'>")) {
         if(!E.vm_valid) return std::nullopt;
         n = static_cast<long>(s[1] == '<' ? E.vm_first : E.vm_last) + 1;
@@ -99,14 +100,14 @@ bool parse_cmdline(std::string_view s, CmdLine& out, std::string& err) {
         out.last = E.num_rows();
         s.remove_prefix(1);
     } else if(!s.starts_with("$ ")) {
-        const auto a = parse_addr(s);
+        const auto a = parse_addr(s, cur);
         skip_blanks(s);
         if(a || s.starts_with(',')) {
             out.has_range = true;
             out.first = out.last = a.value_or(cur);
             if(s.starts_with(',')) {
                 s.remove_prefix(1);
-                out.last = parse_addr(s).value_or(cur);
+                out.last = parse_addr(s, cur).value_or(cur);
             }
         }
     }
@@ -181,14 +182,16 @@ void move_lines(long f, long l, long dest) {
 
 void cmd_move(const CmdLine& c) {
     std::string_view a = c.args;
-    const auto dest = parse_addr(a);
+    const long l = c.has_range ? c.last : E.cy + 1;
+    const long f = c.has_range ? c.first : l;
+    skip_blanks(a);
+    const long base = a.starts_with('-') ? f : l;
+    const auto dest = parse_addr(a, base);
     skip_blanks(a);
     if(!dest || !a.empty() || *dest < 0 || *dest > E.num_rows()) {
         editor_set_status_message("Invalid address: {}", c.args);
         return;
     }
-    const long f = c.has_range ? c.first : E.cy + 1;
-    const long l = c.has_range ? c.last : f;
     move_lines(f, l, *dest);
 }
 
@@ -449,6 +452,8 @@ void def(std::initializer_list<const char*> names, CmdFn fn) {
 }  // namespace
 
 void register_builtin_commands() {
+    def({"noh", "nohlsearch"},
+        [](const CmdLine&) { search_clear_highlight(); });
     def({"q", "quit"}, [](const CmdLine& c) {
         if(!c.bang && quit_blocked()) return;
         editor_quit();
@@ -502,6 +507,7 @@ void editor_command_palette(std::string_view cmd) {
 void editor_command_prompt() {
     std::string cmd = editor_prompt(
         ":", nullptr, std::exchange(E.cmd_prefill, std::string{}));
+    E.cmd_sel = false;
     set_mode(NORMAL);
     if(cmd.empty()) return;
     editor_command_palette(cmd);

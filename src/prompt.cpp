@@ -159,6 +159,13 @@ std::string editor_prompt(std::string_view prompt,
                 }
                 edited = false;
             } break;
+            case PASTE: {
+                std::string t = editor_take_paste();
+                for(char& c : t)
+                    if(static_cast<unsigned char>(c) < 32) c = ' ';
+                buf.insert(pos, t);
+                pos += t.size();
+            } break;
             default:
                 if(c >= 32 && c < 256) {  // ASCII and raw UTF-8 bytes
                     buf.insert(pos, 1, static_cast<char>(c));

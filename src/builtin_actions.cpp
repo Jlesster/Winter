@@ -167,8 +167,8 @@ void register_builtin_actions() {
         },
         "[d");
 
-    bind("search.next", [](Ctx&) { editor_find_callback("", 'n'); }, "n");
-    bind("search.prev", [](Ctx&) { editor_find_callback("", 'N'); }, "N");
+    bind("search.next", [](Ctx& c) { search_step(+1, c.count); }, "n");
+    bind("search.prev", [](Ctx& c) { search_step(-1, c.count); }, "N");
 
     bind(
         "edit.undo",
@@ -190,11 +190,15 @@ void register_builtin_actions() {
             } else editor_set_status_message("Already at newest change");
         },
         "<C-r>");
-    bind("edit.dot", [](Ctx& c) { dot_replay(); }, ".");
+    bind("edit.dot", [](Ctx&) { dot_replay(); }, ".");
 
     bind_visual(
         "visual.command",
         [](Ctx&) {
+            const Range r = visual_range();
+            E.cmd_sel_start = r.start;
+            E.cmd_sel_end = r.end;
+            E.cmd_sel = true;
             set_mode(NORMAL);
             E.cmd_prefill = std::string(kVisualRange);
             set_mode(COMMAND);

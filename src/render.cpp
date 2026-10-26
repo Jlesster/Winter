@@ -15,10 +15,16 @@
 #include "normal.hpp"
 #include "options.hpp"
 #include "prompt.hpp"
+#include "search.hpp"
 #include "terminal.hpp"
 #include "utf8.hpp"
 
 namespace {
+
+constexpr uint32_t kSearchBg = 0x585b70;     // every match
+constexpr uint32_t kSearchCurBg = 0xf9e2af;  // the one under the cursor
+constexpr uint32_t kSearchCurFg = 0x1e1e2e;
+constexpr uint32_t kSearchCurCursor = 0x89b4fa;  // cursor block over query
 
 Screen scr;
 
@@ -41,11 +47,12 @@ int put_text(int x, int y, std::string_view s, int limit, Style st) {
 
 void put_line(int y, std::string_view line, int col_off, int cols, int x0,
               const std::vector<Span>& spans = {}, size_t sel_lo = 0,
-              size_t sel_hi = 0, const std::vector<DiagMark>& marks = {}) {
+              size_t sel_hi = 0, const std::vector<DiagMark>& marks = {},
+              const std::vector<SearchMark>& hits = {}) {
     const int end = col_off + cols;
     int rx = 0;
     int last = -1;
-    size_t si = 0;
+    size_t si = 0, mi = 0;
     for(size_t i = 0; i < line.size() && rx < end;) {
         const size_t at = i;
         const Decoded d = utf8_decode(line, i);
@@ -53,6 +60,14 @@ void put_line(int y, std::string_view line, int col_off, int cols, int x0,
         while(si < spans.size() && spans[si].end <= at) ++si;
         Style st = (si < spans.size() && spans[si].start <= at) ? spans[si].st
                                                                 : Style{};
+        while(mi < hits.size() && hits[mi].hi <= at) ++mi;
+        if(mi < hits.size() && hits[mi].lo <= at) {
+            st.bg = hits[mi].cur ? kSearchCurBg : kSearchBg;
+            if(hits[mi].cur) {
+                st.fg = kSearchCurFg;
+                st.attrs = static_cast<uint16_t>(st.attrs | ATTR_BOLD);
+            }
+        }
         if(at >= sel_lo && at < sel_hi)
             st.attrs = static_cast<uint16_t>(st.attrs | ATTR_REVERSE);
         if(!marks.empty()) {
@@ -131,10 +146,13 @@ void editor_draw_rows() {
     E.buf().syntax.rainbow_prepare(base, base + view_text.size());
     const int g = gutter();
     size_t pos = 0;
-    const bool vis = E.mode == VISUAL;
-    const Range sel = vis ? visual_range() : Range{};
+    const bool vis = E.mode == VISUAL || (E.mode == COMMAND && E.cmd_sel);
+    const Range sel = E.mode == VISUAL ? visual_range() 
+                                       : vis ? Range{E.cmd_sel_start, E.cmd_sel_end} 
+                                       : Range{};
     const bool dg = opts.diagnostics;
     std::vector<DiagMark> marks;
+    std::vector<SearchMark> hits;
     for(int y = 0; y < E.term_rows; ++y) {
         const int file_row = y + E.row_offset;
         if(E.buf().pt.size() == 0 && y == 0) {
@@ -170,8 +188,17 @@ void editor_draw_rows() {
             }
             if(dg) diag_marks(E.buf().diags, ls, len, marks);
             else marks.clear();
-            put_line(
-                y, line, E.col_offset, text_cols(), g, spans, lo, hi, marks);
+            search_marks(file_row, line, hits);
+            put_line(y,
+                     line,
+                     E.col_offset,
+                     text_cols(),
+                     g,
+                     spans,
+                     lo,
+                     hi,
+                     marks,
+                     hits);
             if(dg && opts.diag_virtual_text) {
                 if(const Diag* w = diag_worst_on_line(E.buf().diags, ls, len)) {
                     const int end_x = g +
@@ -276,8 +303,10 @@ void editor_refresh_screen() {
     set_cursor_for_mode(pv.active ? INSERT : E.mode);
     uint32_t col = 0xFFFFFFFF;
     if(opts.cursor_inverse && sx >= 0 && sx < scr.width() && sy >= 0 &&
-       sy < scr.height())
-        col = scr.at(sx, sy).style.fg;
+       sy < scr.height()) {
+        const Style& s = scr.at(sx, sy).style;
+        col = s.bg == kSearchCurBg ? kSearchCurCursor : s.fg;
+    }
     set_cursor_color(col);
     scr.flush();
 }

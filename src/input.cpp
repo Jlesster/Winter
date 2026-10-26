@@ -1,6 +1,8 @@
 #include "input.hpp"
 
-#include <string>
+#include <chrono>
+#include <cstdint>
+#include <optional>
 
 #include "command.hpp"
 #include "core.hpp"
@@ -8,6 +10,7 @@
 #include "editor.hpp"
 #include "file.hpp"
 #include "keys.hpp"
+#include "loop.hpp"
 #include "normal.hpp"
 #include "options.hpp"
 #include "search.hpp"
@@ -17,6 +20,15 @@
 static int quit_presses = 0;
 
 void editor_handle_key(int c) {
+    if(c == PASTE) {
+        const EditorMode before = E.mode;
+        const uint64_t rev = E.buf().pt.revision();
+        normal_reset();
+        editor_paste(editor_take_paste());
+        dot_supress();
+        dot_after_key(c, before, rev);
+        return;
+    }
     const EditorMode before = E.mode;
     const uint64_t rev_before = E.buf().pt.revision();
 
@@ -102,6 +114,7 @@ void editor_handle_key(int c) {
         case VISUAL: normal_feed(c); break;
         case COMMAND: break;
         case SEARCH: break;
+        case OPPEND: break;
     }
     quit_presses = 0;
     dot_after_key(c, before, rev_before);
@@ -115,6 +128,23 @@ void editor_process_key() {
         editor_find();
         return;
     }
+    using clock = std::chrono::steady_clock;
+    static std::optional<clock::time_point> deadline;
+    if(opts.timeoutlen > 0 && normal_chord_pending()) {
+        if(!deadline)
+            deadline =
+                clock::now() + std::chrono::milliseconds(opts.timeoutlen);
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              *deadline - clock::now())
+                              .count();
+        if(left <= 0) {
+            deadline.reset();
+            normal_chord_timeout();
+            return;
+        }
+        if(!loop_wait(static_cast<int>(left))) return;
+    }
+    deadline.reset();
     const int c = editor_read_key();
     if(c == NONE) return;
     editor_handle_key(c);

@@ -1,3 +1,4 @@
+#include <vector>
 #include "buflist.hpp"
 #include "builtin.hpp"
 #include "editor.hpp"
@@ -25,7 +26,7 @@ void init_editor() {
     render_resize(rows, cols);
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, const char* argv[]) {
     enable_raw_mode();
     init_editor();
     loop_init();
@@ -34,8 +35,18 @@ int main(int argc, char* argv[]) {
     register_builtins();
     const bool lua_ok = script_init();
     if(lua_ok) script_load_config();
-    for(int i = 1; i < argc; ++i) buffer_open(argv[i]);
-    if(argc >= 2) buffer_open(argv[1]);
+    bool open_config = false;
+    std::vector<std::string> files;
+    for(int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if(a == "-c" || a == "--config") {
+            open_config = true;
+            continue;
+        }
+        files.emplace_back(a);
+    }
+    if(open_config) buffer_open(script_config_dir() + "/init.lua");
+    for(const auto& f : files) buffer_open(f);
     editor_set_status_message(
         "HELP: CTRL-S/:w = save | CTRL-Q/:q = quit | / = search");
     if(const std::string& err = script_last_error(); !err.empty())

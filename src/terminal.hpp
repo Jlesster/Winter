@@ -2,6 +2,7 @@
 // Raw mode, key input, terminal size, SIGWINCH and cursor shape.
 
 #include <cstdint>
+#include <string>
 #include "core.hpp"
 
 struct TermCaps {
@@ -16,6 +17,7 @@ void editor_quit();
 void enable_raw_mode();
 void disable_raw_mode();
 int editor_read_key();  // blocks; returns an EditorKey (keys.hpp) or a byte
+std::string editor_take_paste();
 
 int get_window_size(int* rows, int* cols);
 int query_window_size(int* rows, int* cols);  // ioctl only, never blocks

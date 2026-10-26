@@ -7,6 +7,7 @@
 #include <regex>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 #include "buffer.hpp"
 #include "piece.hpp"
@@ -30,9 +31,11 @@ public:
 
     void rainbow_prepare(size_t lo, size_t hi);
 
+    std::optional<int> indent_for(size_t line) const;
+
 private:
     struct Pred {
-        enum Op { Eq, Match, AnyOf } op{};
+        enum Op { Eq, Match, AnyOf, KindEq, HasParent, HasAncestor } op{};
         bool negate = false;
         uint32_t cap = 0;
         bool rhs_is_cap = 0;
@@ -58,9 +61,15 @@ private:
     void drop_tree();
     void detach();
     bool load_query(const TSLanguage* lang, std::string_view name);
-    void add_pred(uint32_t pattern,
+    using Meta = std::vector<std::pair<std::string, std::string>>;
+    bool load_indent_query(const TSLanguage* lang, std::string_view name);
+    void build_preds(TSQuery* q, std::vector<std::vector<Pred>>& out,
+                     std::vector<Meta>* meta);
+    void add_pred(TSQuery* q, std::vector<std::vector<Pred>>& out, Meta* meta,
+                  uint32_t pattern,
                   const std::vector<const TSQueryPredicateStep*>& s);
-    bool eval(const TSQueryMatch& m) const;
+    bool eval(const std::vector<std::vector<Pred>>& preds,
+              const TSQueryMatch& m) const;
     const std::vector<Span>& base_spans(size_t line_start, size_t line_len);
     void rb_walk(TSTreeCursor& c, size_t d, bool generic);
     void rb_emit(size_t s, size_t e, size_t depth);
@@ -77,6 +86,9 @@ private:
 
     static constexpr size_t kSpanCacheCap = 4096;
 
+    TSQuery* _iquery = nullptr;
+    std::vector<std::vector<Pred>> _ipreds;
+    std::vector<Meta> _imeta;
     std::vector<std::vector<Pred>> _preds;
     std::vector<std::optional<Style>> _cap_style;
     std::map<size_t, CacheLine> _span_cache;

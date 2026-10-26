@@ -47,6 +47,8 @@ struct EditorConfig {
     size_t v_anchor = 0;
     bool v_line = false;
     bool vm_valid = false;
+    bool cmd_sel = false;
+    size_t cmd_sel_start = 0, cmd_sel_end = 0;
     Buffer* alt = nullptr;
     Buffer& buf() const { return *buffers[cur]; }
     std::vector<std::unique_ptr<Buffer>> buffers;

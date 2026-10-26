@@ -63,7 +63,7 @@ void move_vertical(int dir, int count) {
     const std::string line = E.buf().pt.line_text(E.cy);
     const int size = static_cast<int>(line.size());
     int cx = E.want_rx == INT_MAX ? size : rx_to_cx(line, E.want_rx);
-    if(E.mode != VISUAL && cx >= size &&
+    if(E.mode == NORMAL && cx >= size &&
        size > 0)  // normal mode: stop on the last char
         cx = static_cast<int>(utf8_prev(line, size));
     E.cx = cx;
@@ -169,7 +169,8 @@ void dot_after_key(int c, EditorMode before, uint64_t rev_before) {
     }
     D.cur.push_back(c);
     if(normal_pending()) return;
-    const bool changed = E.buf().pt.revision() != rev_before || E.mode == INSERT;
+    const bool changed =
+        E.buf().pt.revision() != rev_before || E.mode == INSERT;
     if(D.skip || !changed) {
         D.skip = false;
         D.cur.clear();
@@ -192,7 +193,31 @@ void dot_replay() {
     D.skip = true;
 }
 
+namespace {
+static void run_exact(const Hit& hit) {
+    if(registry().wants_char(hit.action)) {
+        N.action = hit.action;
+        N.want_char = true;
+        show_pending();
+        return;
+    }
+    dispatch(hit.action, Ctx{N.count, {}});
+}
+}  // namespace
+
 void normal_reset() { N.reset(); }
+
+bool normal_chord_pending() { return !N.keys.empty() && !N.want_char; }
+
+void normal_chord_timeout() {
+    if(!normal_chord_pending()) return;
+    const EditorMode map_mode =
+        E.mode == VISUAL ? VISUAL : (N.op.empty() ? NORMAL : OPPEND);
+    const Hit hit = registry().lookup(map_mode, N.keys);
+    D.cur.clear();
+    if(hit.kind == Lookup::Exact) run_exact(hit);
+    else N.reset();
+}
 
 void normal_begin_operator(std::string_view name, int count) {
     N.op = name;
@@ -240,18 +265,12 @@ void normal_feed(int c) {
             return;
         case Lookup::Exact:
             // also the start of a longer chord ("<space>" vs "<space>f"):
-            // wait. There is no timeout yet, so Esc cancels.
+            // wait, timeoutlen decides
             if(hit.longer) {
                 show_pending();
                 return;
             }
-            if(registry().wants_char(hit.action)) {
-                N.action = hit.action;
-                N.want_char = true;
-                show_pending();
-                return;
-            }
-            dispatch(hit.action, Ctx{N.count, {}});
+            run_exact(hit);
             return;
     }
 }

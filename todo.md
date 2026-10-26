@@ -1,8 +1,14 @@
+# features
+
 replace, REPLACE
-fix m cmd
-cmd cursor
-cmd hist
-fix paste
-K stuff, virt text and ui backend
-fix search positioning on enter
+K hover stuff, virt text and ui backend
 abstract the diag rendering into virt text
+semantic tokens
+add more keyboard passthrough like ctrl/shift+enter/space
+debounce and improve diagnostics
+add comment toggle
+add provider map to clipboard utils
+
+# bugs
+
+auto indent is shocking needs to be improved dramatically maybe using ts as a backend

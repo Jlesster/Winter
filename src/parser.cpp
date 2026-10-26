@@ -16,6 +16,7 @@
 #include <vector>
 #include "job.hpp"
 #include "json.hpp"
+#include "script.hpp"
 
 namespace {
 struct ParserInfo {
@@ -111,9 +112,11 @@ void load_meta() {
     std::ranges::sort(g_meta, {}, [](const Meta& m) { return m.info->name; });
 }
 
-std::string query_for(std::string_view lang, int depth) {
-    const std::string txt = read_file(data_dir() + "/queries/" +
-                                      std::string(lang) + "/highlights.scm");
+std::string query_for(std::string_view lang, std::string_view kind, int depth) {
+    const std::string rel =
+        "/queries/" + std::string(lang) + "/" + std::string(kind) + ".scm";
+    std::string txt = read_file(script_config_dir() + rel);
+    if(txt.empty()) txt = read_file(data_dir() + rel);
     std::string pre;
     std::istringstream in(txt);
     for(std::string line;
@@ -128,7 +131,7 @@ std::string query_for(std::string_view lang, int depth) {
                                        return std::isspace(c) || c == '?';
                                    }),
                     b.end());
-            if(!b.empty()) pre += query_for(b, depth + 1) + "\n";
+            if(!b.empty()) pre += query_for(b, kind, depth + 1) + "\n";
         }
     }
     return pre + txt;
@@ -139,6 +142,7 @@ set -eu
 export GIT_TERMINAL_PROMPT=0
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+
 echo "cloning $NAME"
 git clone --depth 1 -q "$URL" "$tmp/repo"
 root="$tmp/repo"
@@ -152,6 +156,7 @@ for d in . "$root"; do
         if [ -f "$d/$m" ]; then cp -f "$d/$m" "$DATA/parsers/$NAME.meta.json";
     done
 done
+
 echo "compiling $NAME"
 cc=${CC:-cc}; cxx=${CXX:-c++}; link=$cc
 "$cc" -fPIC -O2 -Isrc -c src/parser.c -o parser.o
@@ -173,6 +178,18 @@ mv -f "$DATA/parsers/$NAME.so.new" "$DATA/parsers/$NAME.so"
 q="$root/$SUB/queries"; [ -d "$q" ] || q="$root/queries"
 if [ -f "$q/highlights.scm" ]; then cp -f "$q/highlights.scm" "$DATA/queries/$NAME/"; fi
 echo "done $NAME"
+
+NVTS=https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/main/runtime/queries
+fetch_indents() {
+  qd="$DATA/queries/$1"; mkdir -p "$qd"
+  curl -fsSL --max-time 20 "$NVTS/$1/indents.scm" -o "$qd/indents.scm.new" 2>/dev/null \
+    || { rm -f "$qd/indents.scm.new"; echo "no indents query for $1"; return 0; }
+  mv -f "$qd/indents.scm.new" "$qd/indents.scm"
+  for b in $(sed -n 's/^; inherits: *//p' "$qd/indents.scm" | head -1 | tr ',?' '  '); do
+    [ -f "$DATA/queries/$b/indents.scm" ] || fetch_indents "$b"
+  done
+}
+fetch_indents "$NAME"
 )SH";
 
 std::string script(const ParserInfo& p) {
@@ -231,7 +248,9 @@ const TSLanguage* parser_load(std::string_view lang) {
     return g_loaded[std::string(lang)] = fn();
 }
 
-std::string parser_query(std::string_view lang) { return query_for(lang, 0); }
+std::string parser_query(std::string_view lang, std::string_view kind) {
+    return query_for(lang, kind, 0);
+}
 
 std::string parser_list() {
     std::string o;

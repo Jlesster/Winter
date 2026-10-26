@@ -6,14 +6,17 @@
 #include <errno.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include <csignal>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
 #include <trux/core.hpp>
+#include <utility>
 
 #include "keys.hpp"
 #include "options.hpp"
@@ -33,6 +36,31 @@ bool next_byte(char& b, int ms = 50) {
     int r;
     while((r = poll(&p, 1, ms)) < 0 && errno == EINTR) {}
     return r > 0 && read(STDIN_FILENO, &b, 1) == 1;
+}
+
+std::string g_paste;
+void read_paste() {
+    static constexpr std::string_view kEnd = "\x1b[201~";
+    g_paste.clear();
+    char buf[4096];
+    pollfd p{STDIN_FILENO, POLLIN, 0};
+    for(;;) {
+        int r;
+        while((r = poll(&p, 1, 1000)) < 0 && errno == EINTR) {}
+        if(r <= 0) return;
+        const ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+        if(n <= 0) return;
+        g_paste.append(buf, static_cast<size_t>(n));
+        const size_t from =
+            g_paste.size() > static_cast<size_t>(n) + kEnd.size()
+                ? g_paste.size() - static_cast<size_t>(n) - kEnd.size()
+                : 0;
+        if(const size_t at = g_paste.find(kEnd, from);
+           at != std::string::npos) {
+            g_paste.resize(at);
+            return;
+        }
+    }
 }
 
 int get_cursor_position(int* rows, int* cols);  // below
@@ -74,6 +102,7 @@ void disable_raw_mode() {
        write(STDOUT_FILENO, "\x1b[0 q", 5) != 5) { /* best effort */
     }
     write(STDOUT_FILENO, "\x1b[>4;0m", 7);
+    write(STDOUT_FILENO, "\x1b[?2004l", 8);
     if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig) == -1) die("tcsetattr");
 }
 
@@ -95,6 +124,7 @@ void enable_raw_mode() {
     raw.c_cc[VTIME] = 1;
     trux::ansi::enter_alt_screen();
     write(STDOUT_FILENO, "\x1b[>4;1m", 7);
+    write(STDOUT_FILENO, "\x1b[?2004h", 8);
     if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
 }
 
@@ -171,6 +201,7 @@ int editor_read_key() {
                         case 27:
                             if(p[2] == 127 && ctrl(p[1])) return CTRL_BACKSPACE;
                             break;
+                        case 200: read_paste(); return PASTE;
                     }
                     break;
             }
@@ -179,6 +210,8 @@ int editor_read_key() {
     }
     return NONE;
 }
+
+std::string editor_take_paste() { return std::exchange(g_paste, {}); }
 
 namespace {
 int get_cursor_position(int* rows, int* cols) {

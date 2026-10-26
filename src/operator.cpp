@@ -1,18 +1,19 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
-#include <iterator>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "builtin.hpp"
 #include "editor.hpp"
+#include "indent.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
 #include "options.hpp"
 #include "piece.hpp"
 #include "registry.hpp"
+#include "shell.hpp"
 #include "utf8.hpp"
 
 namespace {
@@ -23,10 +24,28 @@ struct Register {
 };
 Register unnamed;
 
-std::string indent_unit() {  // same rule as edit.cpp's private one
-    return opts.expand_tab
-               ? std::string(static_cast<size_t>(opts.shift_width), ' ')
-               : std::string("\t");
+void clip_set(const std::string& s) {
+    shell_run(
+        "if command -v wl-copy >/dev/null 2>&1; then wl-copy >/dev/null 2>&1;"
+        " elif command -v xclip >/dev/null 2>&1;"
+        " then xclip -selection clipboard >/dev/null 2>&1; fi",
+        &s);
+}
+
+std::optional<std::string> clip_get() {
+    const ShellResult r = shell_run(
+        "if command -v wl-paste >/dev/null 2>&1; then wl-paste --no-newline "
+        "2>/dev/null;"
+        " elif command -v xclip >/dev/null 2>&1;"
+        " then xclip -o -selection clipboard 2>/dev/null; else exit 1; fi",
+        nullptr);
+    if(r.code != 0 || r.out.empty()) return std::nullopt;
+    return r.out;
+}
+
+void set_reg(std::string text, bool linewise) {
+    unnamed = {std::move(text), linewise};
+    clip_set(unnamed.text);
 }
 
 std::optional<size_t> find_open(const PieceTable& t, size_t p, char o, char c,
@@ -137,7 +156,7 @@ std::string grab(const Range& r) {
 size_t cut(const Range& r) {
     if(r.start == r.end && !r.linewise)
         return r.start;  // empty: keep the register
-    unnamed = {grab(r), r.linewise};
+    set_reg(grab(r), r.linewise);
     size_t a = r.start, n = r.end - r.start;
     // last line has no '\n' after it, so take the one before it instead
     if(r.linewise && (n == 0 || E.buf().pt.at(r.end - 1) != '\n') && a > 0) {
@@ -146,6 +165,14 @@ size_t cut(const Range& r) {
     }
     E.buf().pt.remove(a, n);
     return a;
+}
+
+void reindent(const Range& r) {
+    PieceTable& pt = E.buf().pt;
+    const size_t l0 = pt.line_of(r.start);
+    const size_t l1 = pt.line_of(r.end > r.start ? r.end - 1 : r.start);
+    indent::reindent_lines(E.buf().syntax, pt, E.buf().eol, l0, l1);
+    apply_motion(motion::to_first_nonblank(pt, pt.line_start(l0), 0));
 }
 
 // Target (from a motion) -> Range (what the operator eats)
@@ -183,7 +210,7 @@ Range resolve(const PieceTable& t, size_t from, Target tg, bool word_motion) {
 void shift(const Range& r, int dir) {  // > and <
     const size_t l0 = E.buf().pt.line_of(r.start);
     const size_t l1 = E.buf().pt.line_of(r.end > r.start ? r.end - 1 : r.start);
-    const std::string unit = indent_unit();
+    const std::string unit = indent::unit();
     for(size_t l = l1 + 1;
         l-- > l0;) {  // bottom-up keeps earlier offsets valid
         const size_t s = E.buf().pt.line_start(l), e = E.buf().pt.line_end(l);
@@ -199,10 +226,13 @@ void shift(const Range& r, int dir) {  // > and <
             if(n) E.buf().pt.remove(s, n);
         }
     }
-    apply_motion(motion::to_first_nonblank(E.buf().pt, E.buf().pt.line_start(l0), 0));
+    apply_motion(
+        motion::to_first_nonblank(E.buf().pt, E.buf().pt.line_start(l0), 0));
 }
 
 void paste(bool after, int count) {  // p and P
+    if(const auto c = clip_get(); c && *c != unnamed.text)
+        unnamed = {*c, c->back() == '\n'};
     if(unnamed.text.empty()) return;
     PieceTable::Group g(E.buf().pt);
     std::string s;
@@ -213,7 +243,8 @@ void paste(bool after, int count) {  // p and P
         bool lead_nl = false;
         if(!after) {
             at = E.buf().pt.line_start(E.cy);
-        } else if(const size_t e = E.buf().pt.line_end(E.cy); e == E.buf().pt.size()) {
+        } else if(const size_t e = E.buf().pt.line_end(E.cy);
+                  e == E.buf().pt.size()) {
             // last line has no '\n' to step over: move it to the paste's front
             at = e;
             lead_nl = true;
@@ -237,6 +268,21 @@ void paste(bool after, int count) {  // p and P
                               : motion::left(E.buf().pt, at + s.size(), 1).pos);
         update_want();
     }
+}
+
+void paste_indented(bool after, int count) {
+    PieceTable& pt = E.buf().pt;
+    PieceTable::Group g(pt);
+    const size_t first = after ? E.cy + 1 : E.cy;
+    paste(after, count);
+    if(unnamed.linewise) return;
+    const size_t n =
+        std::count(unnamed.text.begin(), unnamed.text.end(), '\n') *
+        static_cast<size_t>(std::max(count, 1));
+    if(n == 0) return;
+    indent::reindent_lines(
+        E.buf().syntax, pt, E.buf().eol, first, first + n - 1);
+    apply_motion(motion::to_first_nonblank(pt, pt.line_start(first), 0));
 }
 
 struct Pair {
@@ -290,7 +336,7 @@ void surround(const Range& r, const Pair& p) {
     if(E.buf().pt.at(r.end - 1) == '\n')
         E.buf().pt.insert(r.end, indent + trim(p.close) + "\n");
     else E.buf().pt.insert(r.end, "\n" + indent + trim(p.close));
-    const std::string unit = indent_unit();
+    const std::string unit = indent::unit();
     for(size_t l = l1 + 1; l-- > l0;)
         if(E.buf().pt.line_end(l) > E.buf().pt.line_start(l))
             E.buf().pt.insert(E.buf().pt.line_start(l), unit);
@@ -364,12 +410,14 @@ Range visual_range() {
     const size_t a = std::min(E.v_anchor, cur), b = std::max(E.v_anchor, cur);
     if(E.v_line)
         return {E.buf().pt.line_start(E.buf().pt.line_of(a)),
-                std::min(E.buf().pt.line_end(E.buf().pt.line_of(b)) + 1, E.buf().pt.size()),
+                std::min(E.buf().pt.line_end(E.buf().pt.line_of(b)) + 1,
+                         E.buf().pt.size()),
                 true};
     size_t end = b;
     if(end < E.buf().pt.size()) {
         ++end;
-        while(end < E.buf().pt.size() && utf8_is_cont(E.buf().pt.at(end))) ++end;
+        while(end < E.buf().pt.size() && utf8_is_cont(E.buf().pt.at(end)))
+            ++end;
     }
     return {a, end, false};
 }
@@ -415,17 +463,17 @@ void register_builtin_operators() {
         "op.delete",
         [](const Range& r) {
             set_cursor_offset(std::min(cut(r), E.buf().pt.size()));
-            apply_motion(
-                r.linewise
-                    ? motion::to_first_nonblank(E.buf().pt, cursor_offset(), 0)
-                    : Target{motion::clamp_normal(E.buf().pt, cursor_offset())});
+            apply_motion(r.linewise ? motion::to_first_nonblank(
+                                          E.buf().pt, cursor_offset(), 0)
+                                    : Target{motion::clamp_normal(
+                                          E.buf().pt, cursor_offset())});
         },
         "d");
 
     bind_op(
         "op.yank",
         [](const Range& r) {
-            unnamed = {grab(r), r.linewise};
+            set_reg(grab(r), r.linewise);
             if(!r.linewise)
                 apply_motion(Target{r.start});  // yy leaves the cursor alone
         },
@@ -435,13 +483,15 @@ void register_builtin_operators() {
         "op.change",
         [](const Range& r) {
             if(r.linewise) {  // cc: wipe the text, keep the line and its indent
-                const std::string line = E.buf().pt.line_text(E.buf().pt.line_of(r.start));
+                const std::string line =
+                    E.buf().pt.line_text(E.buf().pt.line_of(r.start));
                 const size_t w = line.find_first_not_of(" \t");
                 const std::string indent =
                     line.substr(0, w == std::string::npos ? line.size() : w);
-                unnamed = {grab(r), true};
+                set_reg(grab(r), true);
                 size_t b = r.end;
-                if(b > r.start && E.buf().pt.at(b - 1) == '\n') --b;  // keep the '\n'
+                if(b > r.start && E.buf().pt.at(b - 1) == '\n')
+                    --b;  // keep the '\n'
                 E.buf().pt.remove(r.start, b - r.start);
                 E.buf().pt.insert(r.start, indent);
                 set_cursor_offset(r.start + indent.size());
@@ -456,6 +506,8 @@ void register_builtin_operators() {
     bind_op("op.indent", [](const Range& r) { shift(r, +1); }, ">");
     bind_op("op.dedent", [](const Range& r) { shift(r, -1); }, "<");
 
+    bind_op("op.reindent", [](const Range& r) { reindent(r); }, "=");
+
     bind_alias("edit.x", "op.delete", "motion.right", "x");
     bind_alias("edit.X", "op.delete", "motion.left", "X");
     bind_alias("edit.D", "op.delete", "motion.line_end", "D");
@@ -468,8 +520,8 @@ void register_builtin_operators() {
                           [](Ctx& c) { paste(true, c.count); });
     registry().add_action("edit.paste_before",
                           [](Ctx& c) { paste(false, c.count); });
-    registry().map(NORMAL, "p", "edit.paste_after");
-    registry().map(NORMAL, "P", "edit.paste_before");
+    registry().map(NORMAL, "P", "edit.paste_after");
+    registry().map(NORMAL, "p", "edit.paste_before");
 
     bind_obj("obj.i\"", quote_obj<'"', false>, "i\"");
     bind_obj("obj.a\"", quote_obj<'"', true>, "a\"");

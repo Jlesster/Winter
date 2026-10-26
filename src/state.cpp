@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <string>
 
 #include "file.hpp"
 #include "options.hpp"
@@ -57,16 +58,17 @@ bool state_append(std::string_view name, std::string_view line) {
     return ok;
 }
 
-bool state_rewrite(std::string_view name,
-                   const std::vector<std::string>& lines) {
+bool state_write_blob(std::string_view name, std::string_view data) {
     const std::string path = path_of(name);
     if(path.empty()) return false;
+    std::error_code ec;
+    const fs::path parent = fs::path(path).parent_path();
+    fs::create_directories(parent, ec);
+    chmod(parent.c_str(), 0700);
     const std::string tmp = path + ".tmp" + std::to_string(getpid());
     const int fd =
         open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if(fd == -1) return false;
-    std::string data;
-    for(const std::string& l : lines) (data += l) += '\n';
     bool ok = write_all(fd, data);
     ok = (close(fd) == 0) && ok;
     if(!ok || rename(tmp.c_str(), path.c_str()) != 0) {
@@ -74,6 +76,27 @@ bool state_rewrite(std::string_view name,
         return false;
     }
     return true;
+}
+
+bool state_rewrite(std::string_view name,
+                   const std::vector<std::string>& lines) {
+    std::string data;
+    for(const std::string& l : lines) (data += l) += '\n';
+    return state_write_blob(name, data);
+}
+
+std::optional<std::string> state_read_blob(std::string_view name) {
+    const std::string path = path_of(name);
+    if(path.empty()) return std::nullopt;
+    std::ifstream in(path, std::ios::binary);
+    if(!in) return std::nullopt;
+    return std::string(std::istreambuf_iterator<char>(in),
+                       std::istreambuf_iterator<char>());
+}
+
+void state_remove(std::string_view name) {
+    const std::string path = path_of(name);
+    if(!path.empty()) unlink(path.c_str());
 }
 
 std::vector<std::string> state_read_lines(std::string_view name) {
@@ -93,8 +116,6 @@ uint64_t state_hash(std::string_view s, uint64_t h) {
     }
     return h;
 }
-
-// ---- history: "<prompt>\t<entry>" per line ----
 
 HistoryMap state_history_load() {
     HistoryMap h;
@@ -129,19 +150,17 @@ void state_history_append(std::string_view prompt, std::string_view entry) {
     state_append("history", std::string(prompt) + '\t' + std::string(entry));
 }
 
-// ---- cursor memory: "<realpath>\t<line>\t<col>" per line ----
-
-namespace {
-struct Pos {
-    int line, col;
-};
-
-std::string cursor_key(const std::string& file) {
+std::string state_file_key(const std::string& file) {
     std::error_code ec;
     const fs::path p = fs::weakly_canonical(file, ec);
     if(!ec) return p.string();
     return fs::absolute(file, ec).lexically_normal().string();
 }
+
+namespace {
+struct Pos {
+    int line, col;
+};
 
 std::map<std::string, Pos>& cursors() {
     static std::map<std::string, Pos> m = [] {
@@ -174,7 +193,7 @@ std::map<std::string, Pos>& cursors() {
 
 void cursor_remember(const std::string& file, int line, int col) {
     if(!opts.remember_cursor || file.empty()) return;
-    const std::string key = cursor_key(file);
+    const std::string key = state_file_key(file);
     if(key.find('\n') != std::string::npos) return;
     auto& m = cursors();
     if(const auto it = m.find(key);
@@ -189,7 +208,7 @@ void cursor_remember(const std::string& file, int line, int col) {
 bool cursor_recall(const std::string& file, int& line, int& col) {
     if(!opts.remember_cursor || file.empty()) return false;
     const auto& m = cursors();
-    const auto it = m.find(cursor_key(file));
+    const auto it = m.find(state_file_key(file));
     if(it == m.end()) return false;
     line = it->second.line;
     col = it->second.col;

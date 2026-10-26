@@ -16,20 +16,32 @@ if not lua_dep.found()
   lua_dep = dependency('lua', version: '>=5.4', method: 'pkg-config')
 endif
 
+fs = import('fs')
 grammars = get_option('ts_grammars')
 lang_deps = []
 lang_syms = []
 queries = ''
+indents = ''
 foreach g : grammars
   sp = subproject('tree-sitter-' + g)
-  queries += '{"@0@", R"scm(@1@)scm"},\n'.format(g.replace('-', '_'), sp.get_variable('highlights_scm'))
-  lang_syms += 'X(@0@)'.format(g.replace('-', '_'))
+  n = g.replace('-', '_')
+  queries += '{"@0@", R"scm(@1@)scm"},\n'.format(n, sp.get_variable('highlights_scm'))
+  ifile = 'queries' / n / 'indents.scm'
+  if fs.exists(ifile)
+    indents += '{"@0@", R"scm(@1@)scm"},\n'.format(n, fs.read(ifile))
+  endif
+  lang_syms += 'X(@0@)'.format(n)
   lang_deps += dependency('tree-sitter-' + g)
 endforeach
 configure_file(
   input: 'src/ts_queries.inc.in',
   output: 'ts_queries.inc',
   configuration: configuration_data({'QUERIES': queries}),
+)
+configure_file(
+  input: 'src/ts_indents.inc.in',
+  output: 'ts_indents.inc',
+  configuration: configuration_data({'INDENTS': indents}),
 )
 
 add_project_arguments('-DWINTER_TS_LANGS(X)=' + ' '.join(lang_syms), language: 'cpp')
@@ -52,6 +64,7 @@ sources = files(
   'src/events.cpp',
   'src/file.cpp',
   'src/gutter.cpp',
+  'src/indent.cpp',
   'src/input.cpp',
   'src/job.cpp',
   'src/json.cpp',
@@ -77,7 +90,9 @@ sources = files(
   'src/shell.cpp',
   'src/state.cpp',
   'src/syntax.cpp',
+  'src/syntax_indent.cpp',
   'src/terminal.cpp',
+  'src/undofile.cpp',
 )
 
 incls = include_directories('.')

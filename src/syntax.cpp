@@ -68,6 +68,9 @@ struct QueryEntry {
 const QueryEntry kQueries[] = {
 #include "ts_queries.inc"
 };
+const QueryEntry kIndents[] = {
+#include "ts_indents.inc"
+};
 constexpr std::pair<std::string_view, std::string_view> kInherits[] = {
     {"cpp", "c"}};
 
@@ -80,6 +83,13 @@ std::string_view query_src(std::string_view n) {
 std::string query_text(std::string_view n) {
     if(const auto s = query_src(n); !s.empty()) return std::string(s);
     return parser_query(n);
+}
+
+std::string indent_text(std::string_view n) {
+    if(auto s = parser_query(n, "indents"); !s.empty()) return s;
+    for(const auto& q : kIndents)
+        if(q.name == n) return std::string(q.src);
+    return {};
 }
 
 constexpr uint32_t MAUVE = 0xcba6f7, GREEN = 0xa6e3a1, PEACH = 0xfab387,
@@ -200,6 +210,7 @@ Syntax::Syntax()
       _parser(ts_parser_new()) {}
 
 Syntax::~Syntax() {
+    if(_iquery) ts_query_delete(_iquery);
     if(_query) ts_query_delete(_query);
     ts_query_cursor_delete(_qc);
     if(_tree) ts_tree_delete(_tree);
@@ -225,6 +236,10 @@ std::string_view Syntax::detect(std::string_view path) {
 
 void Syntax::detach() {
     drop_tree();
+    if(_iquery) ts_query_delete(_iquery);
+    _iquery = nullptr;
+    _ipreds.clear();
+    _imeta.clear();
     _span_cache.clear();
     _name = {};
     _seen_rev = ~0ULL;
@@ -250,6 +265,7 @@ bool Syntax::attach(std::string_view filename) {
     drop_tree();
     _name = lang;
     load_query(tl, lang);
+    load_indent_query(tl, lang);
     return true;
 }
 
@@ -306,30 +322,73 @@ bool Syntax::load_query(const TSLanguage* lang, std::string_view name) {
         const char* c = ts_query_capture_name_for_id(_query, i, &n);
         _cap_style[i] = theme_for({c, n});
     }
-    const uint32_t pc = ts_query_pattern_count(_query);
-    _preds.assign(pc, {});
+    build_preds(_query, _preds, nullptr);
+    return true;
+}
+
+bool Syntax::load_indent_query(const TSLanguage* lang, std::string_view name) {
+    if(_iquery) ts_query_delete(_iquery);
+    _iquery = nullptr;
+    _ipreds.clear();
+    _imeta.clear();
+    std::string src;
+    for(const auto& [from, base] : kInherits)
+        if(from == name) src = indent_text(base) + "\n";
+    src += indent_text(name);
+    if(src.empty()) {
+        _err = std::format("no indents query for {}, using heuristic", name);
+        return false;
+    }
+    if(src.empty()) return false;
+    uint32_t off = 0;
+    TSQueryError et{};
+    _iquery = ts_query_new(
+        lang, src.data(), static_cast<uint32_t>(src.size()), &off, &et);
+    if(!_iquery) {
+        _err = std::format(
+            "indents query error {} at byte {}", static_cast<int>(et), off);
+        return false;
+    }
+    build_preds(_iquery, _ipreds, &_imeta);
+    return true;
+}
+
+void Syntax::build_preds(TSQuery* q, std::vector<std::vector<Pred>>& out,
+                         std::vector<Meta>* meta) {
+    const uint32_t pc = ts_query_pattern_count(q);
+    out.assign(pc, {});
+    if(meta) meta->assign(pc, {});
     for(uint32_t p = 0; p < pc; ++p) {
         uint32_t n;
         const TSQueryPredicateStep* s =
-            ts_query_predicates_for_pattern(_query, p, &n);
+            ts_query_predicates_for_pattern(q, p, &n);
         std::vector<const TSQueryPredicateStep*> cur;
         for(uint32_t i = 0; i < n; ++i) {
             if(s[i].type == TSQueryPredicateStepTypeDone) {
-                add_pred(p, cur);
+                add_pred(q, out, meta ? &(*meta)[p] : nullptr, p, cur);
                 cur.clear();
             } else cur.push_back(&s[i]);
         }
     }
-    return true;
 }
 
-void Syntax::add_pred(uint32_t pattern,
+void Syntax::add_pred(TSQuery* q, std::vector<std::vector<Pred>>& out,
+                      Meta* meta, uint32_t pattern,
                       const std::vector<const TSQueryPredicateStep*>& s) {
     auto str = [&](const TSQueryPredicateStep* st) {
         uint32_t n;
-        const char* c = ts_query_string_value_for_id(_query, st->value_id, &n);
+        const char* c = ts_query_string_value_for_id(q, st->value_id, &n);
         return std::string(c, n);
     };
+    if(meta && s.size() >= 2 && s[0]->type == TSQueryPredicateStepTypeString &&
+       str(s[0]) == "set!" && s[1]->type == TSQueryPredicateStepTypeString) {
+        meta->emplace_back(
+            str(s[1]),
+            s.size() > 2 && s[2]->type == TSQueryPredicateStepTypeString
+                ? str(s[2])
+                : std::string("1"));
+        return;
+    }
     if(s.size() < 2 || s[0]->type != TSQueryPredicateStepTypeString ||
        s[1]->type != TSQueryPredicateStepTypeCapture)
         return;
@@ -359,38 +418,77 @@ void Syntax::add_pred(uint32_t pattern,
     } else if(name == "any-of?") {
         p.op = Pred::AnyOf;
         for(size_t i = 2; i < s.size(); ++i) p.any.push_back(str(s[i]));
+    } else if(name == "kind-eq?" || name == "has-parent?" ||
+              name == "has-ancestor?") {
+        p.op = name == "kind-eq?"      ? Pred::KindEq
+               : name == "has-parent?" ? Pred::HasParent
+                                       : Pred::HasAncestor;
+        for(size_t i = 2; i < s.size(); ++i) p.any.push_back(str(s[i]));
     } else {
         return;
     }
-    _preds[pattern].push_back(std::move(p));
+    out[pattern].push_back(std::move(p));
 }
 
-bool Syntax::eval(const TSQueryMatch& m) const {
-    auto text_of = [&](uint32_t cap) -> std::optional<std::string> {
-        for(uint16_t i = 0; i < m.capture_count; ++i) {
-            if(m.captures[i].index != cap) continue;
-            const uint32_t a = ts_node_start_byte(m.captures[i].node);
-            const uint32_t b = ts_node_end_byte(m.captures[i].node);
-            return _pt->text(a, b - a);
-        }
+bool Syntax::eval(const std::vector<std::vector<Pred>>& preds,
+                  const TSQueryMatch& m) const {
+    auto node_of = [&](uint32_t cap) -> std::optional<TSNode> {
+        for(uint16_t i = 0; i < m.capture_count; ++i)
+            if(m.captures[i].index == cap) return m.captures[i].node;
         return std::nullopt;
     };
-    for(const Pred& p : _preds[m.pattern_index]) {
-        const auto lhs = text_of(p.cap);
-        if(!lhs) continue;
+    auto text_of = [&](uint32_t cap) -> std::optional<std::string> {
+        const auto n = node_of(cap);
+        if(!n) return std::nullopt;
+        const uint32_t a = ts_node_start_byte(*n);
+        const uint32_t b = ts_node_end_byte(*n);
+        return _pt->text(a, b - a);
+    };
+    auto kind_in = [](const Pred& p, const char* t) {
+        return std::ranges::find(p.any, std::string_view(t)) != p.any.end();
+    };
+    for(const Pred& p : preds[m.pattern_index]) {
         bool ok = true;
         switch(p.op) {
+            case Pred::KindEq:
+            case Pred::HasParent:
+            case Pred::HasAncestor: {
+                const auto n = node_of(p.cap);
+                if(!n) continue;
+                if(p.op == Pred::KindEq) ok = kind_in(p, ts_node_type(*n));
+                else if(p.op == Pred::HasParent) {
+                    const TSNode par = ts_node_parent(*n);
+                    ok = !ts_node_is_null(par) && kind_in(p, ts_node_type(par));
+                } else {
+                    ok = false;
+                    for(TSNode a = ts_node_parent(*n);
+                        !ok && !ts_node_is_null(a);
+                        a = ts_node_parent(a))
+                        ok = kind_in(p, ts_node_type(a));
+                }
+                break;
+            }
             case Pred::Eq: {
+                const auto lhs = text_of(p.cap);
+                if(!lhs) continue;
                 const auto rhs = p.rhs_is_cap
                                      ? text_of(p.rhs_cap)
                                      : std::optional<std::string>(p.rhs);
                 ok = !rhs || *lhs == *rhs;
                 break;
             }
-            case Pred::Match: ok = std::regex_search(*lhs, p.re); break;
-            case Pred::AnyOf:
+            case Pred::Match: {
+                const auto lhs = text_of(p.cap);
+                if(!lhs) continue;
+                ok = std::regex_search(*lhs, p.re);
+                break;
+            }
+            case Pred::AnyOf: {
+                const auto lhs = text_of(p.cap);
+                if(!lhs) continue;
                 ok = std::ranges::find(p.any, *lhs) != p.any.end();
                 break;
+            }
         }
         if(ok == p.negate) return false;
     }
@@ -555,7 +653,7 @@ std::vector<Span> Syntax::compute_spans(size_t ls, size_t len) {
     TSQueryMatch m;
     uint32_t ci;
     while(ts_query_cursor_next_capture(_qc, &m, &ci)) {
-        if(!eval(m)) {
+        if(!eval(_preds, m)) {
             ts_query_cursor_remove_match(_qc, m.id);
             continue;
         }

@@ -9,7 +9,9 @@
 #include "columns.hpp"
 #include "core.hpp"
 #include "editor.hpp"
+#include "indent.hpp"
 #include "options.hpp"
+#include "piece.hpp"
 #include "utf8.hpp"
 
 // edits
@@ -32,14 +34,7 @@ void editor_insert_tab() {
 
 namespace {
 
-// auto indent / auto pairs
-
-// one indent level, per the current options
-std::string indent_unit() {
-    return opts.expand_tab
-               ? std::string(static_cast<size_t>(opts.shift_width), ' ')
-               : std::string("\t");
-}
+// auto pairs
 
 static char closer_for(char c) {
     switch(c) {
@@ -54,14 +49,17 @@ static bool is_closer(char c) { return c == ')' || c == ']' || c == '}'; }
 
 static bool is_quote(char c) { return c == '"' || c == '\'' || c == '`'; }
 
-static bool is_word(char c) {
-    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+static bool has_spare_closer(std::string_view rest, char open, char close) {
+    int depth = 0;
+    for(const char c : rest) {
+        if(c == open) ++depth;
+        else if(c == close && --depth < 0) return true;
+    }
+    return false;
 }
 
-static std::string_view leading_ws(std::string_view line) {
-    size_t i = 0;
-    while(i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
-    return line.substr(0, i);
+static bool is_word(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
 }
 
 // is `prev` immediately followed by the character that auto-pairing added?
@@ -70,36 +68,93 @@ static bool is_empty_pair(char prev, char next) {
     return closer_for(prev) == next || (is_quote(prev) && prev == next);
 }
 
+constexpr std::string_view kElectric[] = {"else",
+                                          "elif",
+                                          "elseif",
+                                          "end",
+                                          "until",
+                                          "case",
+                                          "default",
+                                          "catch",
+                                          "finally",
+                                          "except",
+                                          "rescue",
+                                          "ensure",
+                                          "fi",
+                                          "done",
+                                          "esac"};
+
+void set_line_indent(const std::string& ws) {
+    Buffer& B = E.buf();
+    const std::string line = B.pt.line_text(E.cy);
+    const std::string_view cur = indent::leading_ws(line);
+    if(cur == ws) return;
+    const size_t at = B.pt.line_start(E.cy);
+    if(!cur.empty()) B.pt.remove(at, cur.size());
+    if(!ws.empty()) B.pt.insert(at, ws);
+    E.cx += static_cast<int>(ws.size()) - static_cast<int>(cur.size());
+}
+
+std::string one_level_less(std::string_view lw) {
+    std::string s(lw);
+    if(!s.empty() && s.back() == '\t') s.pop_back();
+    else
+        for(int i = 0; i < opts.shift_width && !s.empty() && s.back() == ' ';
+            ++i)
+            s.pop_back();
+    return s;
+}
+
+void electric_indent() {
+    Buffer& B = E.buf();
+    const std::string line = B.pt.line_text(E.cy);
+    const std::string_view head = std::string_view(line).substr(0, E.cx);
+    const std::string_view tok = head.substr(indent::leading_ws(head).size());
+    const bool closer = tok.size() == 1 && is_closer(tok[0]);
+    if(!closer && std::ranges::find(kElectric, tok) == std::end(kElectric))
+        return;
+    if(const auto t = indent::from_tree(B.syntax, B.pt, B.eol, E.cy))
+        set_line_indent(*t);
+    else if(closer) set_line_indent(one_level_less(indent::leading_ws(head)));
+}
+
 }  // namespace
 
 void editor_insert_newline() {
-    const std::string line = E.buf().pt.line_text(E.cy);
+    Buffer& B = E.buf();
+    const std::string line = B.pt.line_text(E.cy);
     const size_t cx = static_cast<size_t>(E.cx);
     const std::string_view before = std::string_view(line).substr(0, cx);
     const std::string_view after = std::string_view(line).substr(cx);
 
-    const std::string indent(leading_ws(before));
+    const std::string base(indent::leading_ws(before));
     const size_t last = before.find_last_not_of(" \t");
     const char prev = last == std::string_view::npos ? 0 : before[last];
 
     // cursor sat in pure whitespace: don't leave trailing whitespace behind
     if(last == std::string_view::npos && cx > 0) {
-        E.buf().pt.remove(cursor_offset() - cx, cx);
+        B.pt.remove(cursor_offset() - cx, cx);
         E.cx = 0;
     }
 
-    std::string ins = "\n" + indent;
-    size_t new_cx = indent.size();
-    if(const char cl = closer_for(prev)) {
-        const std::string unit = indent_unit();
-        ins += unit;
-        new_cx += unit.size();
-        // {|} -> split onto three lines, cursor on the middle one
-        if(after.starts_with(cl)) ins += "\n" + indent;
-    }
-    E.buf().pt.insert(cursor_offset(), ins);
+    // whitespace right after cursor is replaced by indent
+    if(const size_t lw = indent::leading_ws(after).size())
+        B.pt.remove(cursor_offset(), lw);
+
+    const char cl = closer_for(prev);
+    const bool split =
+        cl && after.substr(indent::leading_ws(after).size()).starts_with(cl);
+    B.pt.insert(cursor_offset(), split ? "\n\n" : "\n");
     E.cy++;
-    E.cx = static_cast<int>(new_cx);
+    auto ws = [&](size_t l, const std::string& fallback) {
+        const auto t = indent::from_tree(B.syntax, B.pt, B.eol, l);
+        return t ? *t : fallback;
+    };
+    const std::string mid = ws(E.cy, indent::for_newline(before));
+    const std::string close = split ? ws(E.cy + 1, base) : std::string{};
+    if(split) B.pt.insert(B.pt.line_start(E.cy + 1), close);
+    B.pt.insert(B.pt.line_start(E.cy), mid);
+    E.cx = static_cast<int>(mid.size());
 }
 
 // typing a printable ascii char in insert mode
@@ -118,19 +173,8 @@ void editor_type_char(int c) {
 
     // electric dedent: a closer on a whitespace-only line pulls back one level
     if(is_closer(ch)) {
-        if(line.find_first_not_of(" \t") >= cx) {
-            size_t drop = 0;
-            if(prev == '\t') drop = 1;
-            else
-                while(drop < static_cast<size_t>(opts.shift_width) &&
-                      drop < cx && line[cx - 1 - drop] == ' ')
-                    ++drop;
-            if(drop) {
-                E.buf().pt.remove(cursor_offset() - drop, drop);
-                E.cx -= static_cast<int>(drop);
-            }
-        }
         editor_insert_char(c);
+        electric_indent();
         return;
     }
 
@@ -138,14 +182,16 @@ void editor_type_char(int c) {
     const bool room = next == 0 || next == ' ' || next == '\t' ||
                       is_closer(next) || next == ',' || next == ';';
     if(const char cl = closer_for(ch)) {
+        const bool pair = room && !has_spare_closer(line, ch, cl);
         E.buf().pt.insert(cursor_offset(),
-                          room ? std::string{ch, cl} : std::string{ch});
+                          pair ? std::string{ch, cl} : std::string{ch});
         E.cx++;
         return;
     }
     if(is_quote(ch)) {
         const bool apostrophe = ch == '\'' && is_word(prev);  // don't, it's
-        const bool pair = room && !apostrophe && prev != ch;
+        const bool odd = std::count(line.begin(), line.end(), ch) % 2 != 0;
+        const bool pair = room && !apostrophe && prev != ch && !odd;
         if(pair) {
             E.buf().pt.insert(cursor_offset(), std::string{ch, ch});
             E.cx++;
@@ -153,36 +199,28 @@ void editor_type_char(int c) {
         return;
     }
     editor_insert_char(c);
+    if(is_word(ch)) electric_indent();
 }
-
-namespace {
-
-// o / O: open a fresh line below / above the cursor line
-
-// indentation for a line opened *below* `line`: same as it, one deeper if
-// it ends in an opener
-static std::string indent_below(std::string_view line) {
-    std::string indent(leading_ws(line));
-    const size_t last = line.find_last_not_of(" \t");
-    if(last != std::string_view::npos && closer_for(line[last]))
-        indent += indent_unit();
-    return indent;
-}
-
-}  // namespace
 
 void editor_open_below() {
-    const std::string indent = indent_below(E.buf().pt.line_text(E.cy));
-    E.buf().pt.insert(E.buf().pt.line_end(E.cy), "\n" + indent);
+    Buffer& B = E.buf();
+    const std::string heur = indent::for_newline(B.pt.line_text(E.cy));
+    B.pt.insert(B.pt.line_end(E.cy), "\n");
     E.cy++;
-    E.cx = static_cast<int>(indent.size());
+    const auto t = indent::from_tree(B.syntax, B.pt, B.eol, E.cy);
+    const std::string ws = t ? *t : heur;
+    B.pt.insert(B.pt.line_start(E.cy), ws);
+    E.cx = static_cast<int>(ws.size());
 }
 
 void editor_open_above() {
-    const std::string indent(leading_ws(E.buf().pt.line_text(E.cy)));
-    E.buf().pt.insert(E.buf().pt.line_start(E.cy), indent + "\n");
-    // the new line took this line's index; the old text moved down one
-    E.cx = static_cast<int>(indent.size());
+    Buffer& B = E.buf();
+    const std::string heur = indent::for_open_above(B.pt.line_text(E.cy));
+    B.pt.insert(B.pt.line_start(E.cy), "\n");
+    const auto t = indent::from_tree(B.syntax, B.pt, B.eol, E.cy);
+    const std::string ws = t ? *t : heur;
+    B.pt.insert(B.pt.line_start(E.cy), ws);
+    E.cx = static_cast<int>(ws.size());
 }
 
 void editor_delete_char() {
@@ -214,6 +252,7 @@ size_t word_back_stop(std::string_view line, size_t pos) {
         return (c >= 0x80 || std::isalnum(c) || c == '_') ? 1 : 2;
     };
     size_t i = pos;
+    while(i > 0 && cls(i) == 0) --i;
     while(i > 0) {
         const int c = cls(i);
         while(i > 0 && cls(i) == c) --i;
@@ -230,6 +269,44 @@ void editor_delete_word_back() {
     const size_t n = static_cast<size_t>(E.cx) - i;
     E.buf().pt.remove(pos - n, n);
     E.cx = i;
+}
+
+void editor_paste(std::string text) {
+    std::string s;
+    s.reserve(text.size());
+    for(size_t i = 0; i < text.size(); ++i) {
+        if(text[i] != '\r') {
+            s += text[i];
+            continue;
+        }
+        s += '\n';
+        if(i + 1 < text.size() && text[i + 1] == '\n') ++i;
+    }
+    if(s.empty()) return;
+    if(E.mode == VISUAL) set_mode(NORMAL);
+    const bool ins = E.mode == INSERT;
+    PieceTable::Group g(E.buf().pt);
+    size_t at = cursor_offset();
+    if(!ins) {
+        const std::string line = E.buf().pt.line_text(E.cy);
+        if(E.cx < static_cast<int>(line.size()))
+            at += utf8_next(line, static_cast<size_t>(E.cx)) -
+                  static_cast<size_t>(E.cx);
+    }
+    E.buf().pt.insert(at, s);
+    PieceTable& pt = E.buf().pt;
+    const size_t end = at + s.size();
+    const size_t l0 = pt.line_of(at), l1 = pt.line_of(end);
+    const size_t tail = pt.line_end(l1) - end;
+    if(opts.paste_indent && l1 > l0) {
+        const size_t from = (at == pt.line_start(l0)) ? l0 : l0 + 1;
+        indent::reindent_lines(E.buf().syntax, pt, E.buf().eol, from, l1);
+    }
+    set_cursor_offset(pt.line_end(l1) - tail);
+    const std::string line = E.buf().pt.line_text(E.cy);
+    if(!ins && E.cx > 0)
+        E.cx = static_cast<int>(utf8_prev(line, static_cast<size_t>(E.cx)));
+    E.want_rx = cx_to_rx(line, E.cx);
 }
 
 void editor_delete_forward() {

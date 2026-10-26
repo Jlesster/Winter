@@ -47,6 +47,17 @@ public:
         PieceTable& _t;
     };
 
+    struct SavedEdit {
+        size_t pos = 0;
+        std::string removed, inserted;
+    };
+    struct SavedHistory {
+        std::vector<std::vector<SavedEdit>> revs;
+        size_t head = 0;
+    };
+    SavedHistory export_history() const;
+    bool import_history(const SavedHistory& h);
+
     explicit PieceTable(std::string_view original = {});
 
     PieceTable& insert(size_t p, std::string_view text);
@@ -158,6 +169,7 @@ private:
         return s == Src::Orig ? _orig_lf : _add_lf;
     }
     size_t count_lf(Src s, size_t off, size_t len) const;
+    size_t add_text(std::string_view text);
 
     std::string_view _original{};
     std::string _add{};
