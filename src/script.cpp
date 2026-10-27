@@ -2,7 +2,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <lua.hpp>
@@ -15,13 +17,16 @@
 #include "editor.hpp"
 #include "events.hpp"
 #include "json.hpp"
+#include "keys.hpp"
 #include "lsp_config.hpp"
 #include "lua_json.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
 #include "options.hpp"
+#include "overlay.hpp"
 #include "registry.hpp"
 #include "utf8.hpp"
+#include "virt.hpp"
 
 namespace {
 
@@ -353,6 +358,7 @@ int l_lsp(lua_State* L) {
     return ok ? 0 : lua_error(L);
 }
 
+#include "script_deco.inc"
 const luaL_Reg kApi[] = {{"map", l_map},
                          {"unmap", l_unmap},
                          {"action", l_action},
@@ -370,6 +376,15 @@ const luaL_Reg kApi[] = {{"map", l_map},
                          {"status", l_status},
                          {"command", l_command},
                          {"lsp", l_lsp},
+                         {"ns", l_ns},
+                         {"eol", l_eol},
+                         {"span", l_span},
+                         {"clear_ns", l_clear_ns},
+                         {"float", l_float},
+                         {"float_put", l_float_put},
+                         {"float_clear", l_float_clear},
+                         {"float_close", l_float_close},
+                         {"replace", l_replace},
                          {nullptr, nullptr}};
 
 }  // namespace

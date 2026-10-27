@@ -80,6 +80,7 @@ sources = files(
   'src/normal.cpp',
   'src/operator.cpp',
   'src/options.cpp',
+  'src/overlay.cpp',
   'src/parser.cpp',
   'src/piece.cpp',
   'src/prompt.cpp',
@@ -93,6 +94,7 @@ sources = files(
   'src/syntax_indent.cpp',
   'src/terminal.cpp',
   'src/undofile.cpp',
+  'src/virt.cpp',
 )
 
 incls = include_directories('.')

@@ -216,7 +216,7 @@ void editor_open_below() {
 void editor_open_above() {
     Buffer& B = E.buf();
     const std::string heur = indent::for_open_above(B.pt.line_text(E.cy));
-    B.pt.insert(B.pt.line_start(E.cy), "\n");
+    B.pt.insert(E.cy > 0 ? B.pt.line_end(E.cy - 1) : 0, "\n");
     const auto t = indent::from_tree(B.syntax, B.pt, B.eol, E.cy);
     const std::string ws = t ? *t : heur;
     B.pt.insert(B.pt.line_start(E.cy), ws);

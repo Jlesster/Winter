@@ -11,4 +11,4 @@ add provider map to clipboard utils
 
 # bugs
 
-auto indent is shocking needs to be improved dramatically maybe using ts as a backend
+NO BUGS YET :D

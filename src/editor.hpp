@@ -11,12 +11,14 @@
 #include "diag.hpp"
 #include "piece.hpp"
 #include "syntax.hpp"
+#include "virt.hpp"
 
 // data
 struct Buffer {
     PieceTable pt{};
     Syntax syntax{};
     std::vector<Diag> diags{};
+    DecoStore decos{};
     std::string filename{};
     std::string orig{};
     bool eol = true;
@@ -26,6 +28,14 @@ struct Buffer {
     int want_rx = 0;
     int row_offset = 0;
     int col_offset = 0;
+
+    void sync_anchors() {
+        for(const TextEdit& e : pt.drain_deco_edits()) {
+            decos.apply(e);
+            if(e.reset) diags.clear();
+            else diag_shift(diags, e);
+        }
+    }
 };
 
 struct EditorConfig {

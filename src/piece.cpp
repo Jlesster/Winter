@@ -18,6 +18,7 @@ PieceTable::PieceTable(std::string_view original)
         i = _original.find('\n', i + 1))
         _orig_lf.push_back(i);
     if(!original.empty()) _root = make({Src::Orig, 0, original.size()});
+    _deco_q.push_back(TextEdit{.reset = true});
 }
 
 size_t PieceTable::count_lf(Src s, size_t off, size_t len) const {
@@ -311,26 +312,42 @@ size_t PieceTable::u16_range(size_t pos, size_t n) const {
     return units;
 }
 
-void PieceTable::log_edit(const TextEdit& e) {
-    if(_lsp_on) note_lsp(e);
-    if(!_journal.empty() && _journal.back().reset) return;
-    if(e.reset || _journal.size() >= kJournalCap) {
+void PieceTable::push_capped(std::vector<TextEdit>& q, const TextEdit& e) {
+    if(!q.empty() && q.back().reset) return;
+    if(e.reset || q.size() >= kJournalCap) {
         TextEdit r;
         r.reset = true;
-        _journal.assign(1, r);
+        q.assign(1, r);
         return;
     }
-    _journal.push_back(e);
+    q.push_back(e);
+}
+
+void PieceTable::log_edit(const TextEdit& e, bool deco) {
+    if(_lsp_on) note_lsp(e);
+    push_capped(_journal, e);
+    if(deco) push_capped(_deco_q, e);
+}
+
+void PieceTable::note_deco_replace(size_t pos, size_t del, size_t ins) {
+    TextEdit e;
+    e.start = pos;
+    e.old_end = pos + del;
+    e.new_end = pos + ins;
+    push_capped(_deco_q, e);
 }
 
 std::optional<size_t> PieceTable::undo() {
     if(!can_undo()) return std::nullopt;
     const Revision& rev = _hist[--_head];
-    for(auto it = rev.edits.rbegin(); it != rev.edits.rend(); ++it)
-        replace_span(it->pos, span_len(it->inserted), it->removed);
+    for(auto it = rev.edits.rbegin(); it != rev.edits.rend(); ++it) {
+        const size_t del = span_len(it->inserted);
+        replace_span(it->pos, del, it->removed);
+        note_deco_replace(it->pos, del, span_len(it->removed));
+    }
     TextEdit r;
     r.reset = true;
-    log_edit(r);
+    log_edit(r, false);
     size_t first = size();
     for(const auto& e : rev.edits) first = std::min(first, e.pos);
     return std::min(first, size());
@@ -339,11 +356,14 @@ std::optional<size_t> PieceTable::undo() {
 std::optional<size_t> PieceTable::redo() {
     if(!can_redo()) return std::nullopt;
     const Revision& rev = _hist[_head++];
-    for(const Edit& e : rev.edits)
-        replace_span(e.pos, span_len(e.removed), e.inserted);
+    for(const Edit& e : rev.edits) {
+        const size_t del = span_len(e.removed);
+        replace_span(e.pos, del, e.inserted);
+        note_deco_replace(e.pos, del, span_len(e.inserted));
+    }
     TextEdit r;
     r.reset = true;
-    log_edit(r);
+    log_edit(r, false);
     return std::min(rev.edits.front().pos, size());
 }
 

@@ -6,6 +6,7 @@
 #include <vector>
 #include "json.hpp"
 #include "piece.hpp"
+#include "virt.hpp"
 
 struct Diag {
     size_t start = 0, end = 0;
@@ -13,16 +14,11 @@ struct Diag {
     std::string msg, source;
 };
 
-struct DiagMark {
-    size_t lo, hi;
-    int sev;
-};
-
 std::vector<Diag> diag_from_lsp(const PieceTable& pt, const Json& list,
                                 bool utf16);
 void diag_shift(std::vector<Diag>& v, const TextEdit& e);
-void diag_marks(const std::vector<Diag>& v, size_t ls, size_t len,
-                std::vector<DiagMark>& out);
+void diag_spans(const std::vector<Diag>& v, size_t ls, size_t len,
+                std::vector<LineSpan>& out);
 const Diag* diag_worst_on_line(const std::vector<Diag>& v, size_t ls,
                                size_t len);
 std::string diag_summary(const std::vector<Diag>& v);

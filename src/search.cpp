@@ -1,6 +1,8 @@
 #include "search.hpp"
 #include <algorithm>
+#include <cstddef>
 #include <optional>
+#include <string_view>
 #include "editor.hpp"
 #include "normal.hpp"
 #include "options.hpp"
@@ -119,14 +121,17 @@ void search_step(int dir, int count) {
 
 void search_clear_highlight() { g_hl.clear(); }
 
-void search_marks(int line, std::string_view text,
-                  std::vector<SearchMark>& out) {
-    out.clear();
+void search_spans(int line, std::string_view text, std::vector<LineSpan>& out) {
     if(!opts.hlsearch || g_hl.empty()) return;
-    for(size_t at = text.find(g_hl);
-        at != std::string_view::npos && out.size() < 512;
-        at = text.find(g_hl, at + g_hl.size()))
-        out.push_back({at,
-                       at + g_hl.size(),
-                       line == E.cy && static_cast<int>(at) == E.cx});
+    size_t n = 0;
+    for(size_t at = text.find(g_hl); at != std::string_view::npos && n < 512;
+        at = text.find(g_hl, at + g_hl.size()), ++n) {
+        const bool cur = line == E.cy && static_cast<int>(at) == E.cx;
+        Style st{.bg = cur ? kSearchCurBg : kSearchBg};
+        if(cur) {
+            st.fg = kSearchCurFg;
+            st.attrs = ATTR_BOLD;
+        }
+        out.push_back({at, at + g_hl.size(), kPrioSearch, st});
+    }
 }

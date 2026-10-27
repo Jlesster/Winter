@@ -516,10 +516,14 @@ void register_builtin_operators() {
     bind_alias("edit.S", "op.change", "motion.line", "S");
     bind_alias("edit.Y", "op.yank", "motion.line", "Y");
 
-    registry().add_action("edit.paste_after",
-                          [](Ctx& c) { paste(true, c.count); });
-    registry().add_action("edit.paste_before",
-                          [](Ctx& c) { paste(false, c.count); });
+    registry().add_action("edit.paste_after", [](Ctx& c) {
+        if(opts.paste_indent) paste_indented(true, c.count);
+        else paste(true, c.count);
+    });
+    registry().add_action("edit.paste_before", [](Ctx& c) {
+        if(opts.paste_indent) paste_indented(false, c.count);
+        else paste(false, c.count);
+    });
     registry().map(NORMAL, "P", "edit.paste_after");
     registry().map(NORMAL, "p", "edit.paste_before");
 

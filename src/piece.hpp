@@ -30,6 +30,12 @@ struct TextEdit {
 };
 TextEdit merge_edits(const TextEdit& a, const TextEdit& b);
 
+inline size_t shift_pos(size_t p, const TextEdit& e, bool is_end) {
+    if(p <= e.start) return p;
+    if(p >= e.old_end) return p - e.old_end + e.new_end;
+    return is_end ? e.new_end : e.start;
+}
+
 class PieceTable {
 public:
     static constexpr size_t npos = static_cast<size_t>(-1);
@@ -96,6 +102,10 @@ public:
     uint64_t revision() const { return _rev; }
     std::vector<TextEdit> drain_edits() { return std::exchange(_journal, {}); }
 
+    std::vector<TextEdit> drain_deco_edits() {
+        return std::exchange(_deco_q, {});
+    }
+
     void lsp_track(bool on, bool utf16 = false);
     std::optional<TextEdit> take_lsp_edit();
     bool lsp_dirty() const { return _lsp_pending.has_value(); }
@@ -157,7 +167,8 @@ private:
                 const std::function<void(std::string_view)>& fn) const;
     void trim_history();
     size_t nth_lf(Id t, size_t k) const;
-    void log_edit(const TextEdit& e);
+    void log_edit(const TextEdit& e, bool deco = true);
+    void note_deco_replace(size_t pos, size_t del, size_t ins);
 
     void note_lsp(const TextEdit& e);
     size_t u16_range(size_t pos, size_t n) const;
@@ -187,6 +198,8 @@ private:
     size_t _saved_head = 0;
     size_t _max_hist = 0;
     std::vector<TextEdit> _journal{};
+    std::vector<TextEdit> _deco_q{};
+    static void push_capped(std::vector<TextEdit>& q, const TextEdit& e);
     bool _lsp_on = false;
     bool _lsp_u16 = false;
     std::optional<TextEdit> _lsp_pending{};

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <ctime>
+#include <functional>
 #include <string_view>
 #include <vector>
 
@@ -10,21 +12,19 @@
 #include "columns.hpp"
 #include "diag.hpp"
 #include "editor.hpp"
+#include "events.hpp"
 #include "gutter.hpp"
 #include "lsp_sync.hpp"
 #include "normal.hpp"
 #include "options.hpp"
+#include "overlay.hpp"
 #include "prompt.hpp"
 #include "search.hpp"
 #include "terminal.hpp"
 #include "utf8.hpp"
+#include "virt.hpp"
 
 namespace {
-
-constexpr uint32_t kSearchBg = 0x585b70;     // every match
-constexpr uint32_t kSearchCurBg = 0xf9e2af;  // the one under the cursor
-constexpr uint32_t kSearchCurFg = 0x1e1e2e;
-constexpr uint32_t kSearchCurCursor = 0x89b4fa;  // cursor block over query
 
 Screen scr;
 
@@ -45,14 +45,25 @@ int put_text(int x, int y, std::string_view s, int limit, Style st) {
     return x;
 }
 
+void put_eols(int y, std::string_view line, int g,
+              std::vector<EolItem>& items) {
+    std::ranges::stable_sort(items, std::greater<>{}, &EolItem::prio);
+    const int end_x =
+        g + cx_to_rx(line, static_cast<int>(line.size())) - E.col_offset;
+    int x = std::max(g + 1, end_x + 2);
+    for(const EolItem& it : items) {
+        if(x >= E.term_cols - 4) break;
+        x = put_text(x, y, it.vt->text, E.term_cols, it.vt->style) + 2;
+    }
+}
+
 void put_line(int y, std::string_view line, int col_off, int cols, int x0,
               const std::vector<Span>& spans = {}, size_t sel_lo = 0,
-              size_t sel_hi = 0, const std::vector<DiagMark>& marks = {},
-              const std::vector<SearchMark>& hits = {}) {
+              size_t sel_hi = 0, const std::vector<LineSpan>& runs = {}) {
     const int end = col_off + cols;
     int rx = 0;
     int last = -1;
-    size_t si = 0, mi = 0;
+    size_t si = 0, ri = 0;
     for(size_t i = 0; i < line.size() && rx < end;) {
         const size_t at = i;
         const Decoded d = utf8_decode(line, i);
@@ -60,27 +71,10 @@ void put_line(int y, std::string_view line, int col_off, int cols, int x0,
         while(si < spans.size() && spans[si].end <= at) ++si;
         Style st = (si < spans.size() && spans[si].start <= at) ? spans[si].st
                                                                 : Style{};
-        while(mi < hits.size() && hits[mi].hi <= at) ++mi;
-        if(mi < hits.size() && hits[mi].lo <= at) {
-            st.bg = hits[mi].cur ? kSearchCurBg : kSearchBg;
-            if(hits[mi].cur) {
-                st.fg = kSearchCurFg;
-                st.attrs = static_cast<uint16_t>(st.attrs | ATTR_BOLD);
-            }
-        }
+        while(ri < runs.size() && runs[ri].hi <= at) ++ri;
+        if(ri < runs.size() && runs[ri].lo <= at) style_patch(st, runs[ri].st);
         if(at >= sel_lo && at < sel_hi)
             st.attrs = static_cast<uint16_t>(st.attrs | ATTR_REVERSE);
-        if(!marks.empty()) {
-            const DiagMark* m = nullptr;
-            for(const DiagMark& k : marks)
-                if(at >= k.lo && at < k.hi && (!m || k.sev < m->sev)) m = &k;
-            if(m) {
-                st.attrs = static_cast<uint16_t>(
-                    st.attrs |
-                    (opts.diag_undercurl ? ATTR_UNDERCURL : ATTR_UNDERLINE));
-                st.ul = diag_color(m->sev);
-            }
-        }
         const char32_t cp = d.cp;
         const int w = cell_width(cp, rx);
         if(w == 0) {
@@ -147,12 +141,13 @@ void editor_draw_rows() {
     const int g = gutter();
     size_t pos = 0;
     const bool vis = E.mode == VISUAL || (E.mode == COMMAND && E.cmd_sel);
-    const Range sel = E.mode == VISUAL ? visual_range() 
-                                       : vis ? Range{E.cmd_sel_start, E.cmd_sel_end} 
+    const Range sel = E.mode == VISUAL ? visual_range()
+                      : vis            ? Range{E.cmd_sel_start, E.cmd_sel_end}
                                        : Range{};
     const bool dg = opts.diagnostics;
-    std::vector<DiagMark> marks;
-    std::vector<SearchMark> hits;
+    std::vector<LineSpan> decos, runs;
+    std::vector<EolItem> eols;
+    E.buf().sync_anchors();
     for(int y = 0; y < E.term_rows; ++y) {
         const int file_row = y + E.row_offset;
         if(E.buf().pt.size() == 0 && y == 0) {
@@ -186,34 +181,24 @@ void editor_draw_rows() {
                     put_text(
                         g, y, " ", E.term_cols, Style{.attrs = ATTR_REVERSE});
             }
-            if(dg) diag_marks(E.buf().diags, ls, len, marks);
-            else marks.clear();
-            search_marks(file_row, line, hits);
-            put_line(y,
-                     line,
-                     E.col_offset,
-                     text_cols(),
-                     g,
-                     spans,
-                     lo,
-                     hi,
-                     marks,
-                     hits);
-            if(dg && opts.diag_virtual_text) {
+            decos.clear();
+            if(dg) diag_spans(E.buf().diags, ls, len, decos);
+            search_spans(file_row, line, decos);
+            E.buf().decos.spans_on_line(ls, len, decos);
+            compose_spans(decos, runs);
+            put_line(
+                y, line, E.col_offset, text_cols(), g, spans, lo, hi, runs);
+            eols.clear();
+            VirtText diag_vt;
+            if(dg && opts.diag_virtual_text)
                 if(const Diag* w = diag_worst_on_line(E.buf().diags, ls, len)) {
-                    const int end_x = g +
-                                      cx_to_rx(line, static_cast<int>(len)) -
-                                      E.col_offset;
-                    const int x = std::max(g + 1, end_x + 2);
-                    if(x < E.term_cols - 4)
-                        put_text(x,
-                                 y,
-                                 std::format("■ {}", diag_first_line(*w)),
-                                 E.term_cols,
-                                 Style{.fg = diag_color(w->severity),
-                                       .attrs = ATTR_ITALIC});
+                    diag_vt = {std::format("■ {}", diag_first_line(*w)),
+                               Style{.fg = diag_color(w->severity),
+                                     .attrs = ATTR_ITALIC}};
+                    eols.push_back({kPrioDiag - w->severity, &diag_vt});
                 }
-            }
+            E.buf().decos.eol_on_line(ls, len, eols);
+            put_eols(y, line, g, eols);
             pos += len + 1;
         }
     }
@@ -282,6 +267,31 @@ void render_resize(int rows, int cols) {
     if(term_caps().scroll_region) scr.set_scroll_rows(E.term_rows);
 }
 
+uint64_t overlay_stamp() {
+    uint64_t h = reinterpret_cast<uintptr_t>(&E.buf());
+    for(const uint64_t v : {E.buf().pt.revision(),
+                            static_cast<uint64_t>(E.cx),
+                            static_cast<uint64_t>(E.cy),
+                            static_cast<uint64_t>(E.mode)})
+        h = h * 1000003u ^ v;
+    return h;
+}
+
+void emit_change_events() {
+    static const Buffer* last_buf = nullptr;
+    static uint64_t last_rev = 0;
+    static int last_cx = -1, last_cy = -1;
+    const Buffer* b = &E.buf();
+    if(b == last_buf) {
+        if(b->pt.revision() != last_rev) events_emit("text_changed");
+        if(E.cx != last_cx || E.cy != last_cy) events_emit("cursor_moved");
+    }
+    last_buf = &E.buf();
+    last_rev = E.buf().pt.revision();
+    last_cx = E.cx;
+    last_cy = E.cy;
+}
+
 void editor_refresh_screen() {
     if(resize_pending()) {
         resize_ack();  // clear first: a resize during the query re-arms it
@@ -290,12 +300,23 @@ void editor_refresh_screen() {
     }
     E.buf().syntax.update(E.buf().pt, E.buf().eol);
     lsp_sync_tick();
+    E.buf().sync_anchors();
+    static bool seeded = false;
+    emit_change_events();
     editor_scroll();
+    overlay_tick();
     scr.clear();
     editor_draw_rows();
     editor_draw_status_bar();
     editor_draw_message_bar();
     const PromptView& pv = prompt_view();
+    if(!pv.active)
+        overlay_draw(scr,
+                     {.cols = scr.width(),
+                      .text_rows = E.term_rows,
+                      .rows = scr.height(),
+                      .cur_x = gutter() + E.rx - E.col_offset,
+                      .cur_y = E.cy - E.row_offset});
     const int sx = pv.active ? std::min(pv.col, scr.width() - 1)
                              : gutter() + E.rx - E.col_offset;
     const int sy = pv.active ? E.term_rows + 1 : E.cy - E.row_offset;

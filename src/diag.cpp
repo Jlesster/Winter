@@ -1,14 +1,15 @@
 #include "diag.hpp"
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <format>
 #include <vector>
+#include "buffer.hpp"
 #include "editor.hpp"
-#include "lsp_client.hpp"
 #include "options.hpp"
 #include "piece.hpp"
-#include "terminal.hpp"
 #include "utf8.hpp"
+#include "virt.hpp"
 
 size_t lsp_offset(const PieceTable& pt, int64_t line, int64_t character,
                   bool utf16) {
@@ -56,20 +57,14 @@ std::vector<Diag> diag_from_lsp(const PieceTable& pt, const Json& list,
 }
 
 void diag_shift(std::vector<Diag>& v, const TextEdit& e) {
-    const auto mv = [&](size_t p, bool is_end) -> size_t {
-        if(p <= e.start) return p;
-        if(p >= e.old_end) return p - e.old_end + e.new_end;
-        return is_end ? e.new_end : e.start;
-    };
     for(Diag& d : v) {
-        d.start = mv(d.start, false);
-        d.end = std::max(mv(d.end, true), d.start);
+        d.start = shift_pos(d.start, e, false);
+        d.end = std::max(shift_pos(d.end, e, true), d.start);
     }
 }
 
-void diag_marks(const std::vector<Diag>& v, size_t ls, size_t len,
-                std::vector<DiagMark>& out) {
-    out.clear();
+void diag_spans(const std::vector<Diag>& v, size_t ls, size_t len,
+                std::vector<LineSpan>& out) {
     const size_t le = ls + len;
     for(const Diag& d : v) {
         if(d.start > le) break;
@@ -77,7 +72,15 @@ void diag_marks(const std::vector<Diag>& v, size_t ls, size_t len,
         const size_t e = std::max(d.end, d.start + 1);
         if(e <= ls) continue;
         const size_t lo = std::max(d.start, ls) - ls, hi = std::min(e, le) - ls;
-        if(hi > lo) out.push_back({lo, hi, d.severity});
+        if(hi > lo) {
+            out.push_back({lo,
+                           hi,
+                           kPrioDiag - d.severity,
+                           Style{.attrs = static_cast<uint16_t>(
+                                     opts.diag_undercurl ? ATTR_UNDERCURL
+                                                         : ATTR_UNDERLINE),
+                                 .ul = diag_color(d.severity)}});
+        }
     }
 }
 
@@ -127,6 +130,7 @@ std::string_view diag_first_line(const Diag& d) {
 
 void diag_jump(int dir, int count) {
     Buffer& b = E.buf();
+    b.sync_anchors();
     std::vector<size_t> starts;
     for(const Diag& d : b.diags)
         if(d.severity <= opts.diag_severity &&

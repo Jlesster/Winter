@@ -78,8 +78,6 @@ void flush(Doc& d) {
     }
     auto e = d.buf->pt.take_lsp_edit();
     if(!e) return;
-    if(e->reset) d.buf->diags.clear();
-    else diag_shift(d.buf->diags, *e);
     Json change;
     if(d.sync == 2 && !d.full_only && !e->reset) {
         if(auto c = lsp_range_change(d.buf->pt, *e, d.utf16)) change = *c;
@@ -148,6 +146,7 @@ void on_diagnostics(LspId id, const Json& p) {
         if(d.server != id || d.path != path) continue;
         if(d.buf->pt.lsp_dirty()) return;
         if(p.has("version") && p["version"].as_int() != d.version) return;
+        d.buf->sync_anchors();
         d.buf->diags = diag_from_lsp(d.buf->pt, p["diagnostics"], d.utf16);
         return;
     }
