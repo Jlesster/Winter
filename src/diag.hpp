@@ -14,6 +14,8 @@ struct Diag {
     std::string msg, source;
 };
 
+size_t lsp_offset(const PieceTable& pt, int64_t line, int64_t character,
+                  bool utf16);
 std::vector<Diag> diag_from_lsp(const PieceTable& pt, const Json& list,
                                 bool utf16);
 void diag_shift(std::vector<Diag>& v, const TextEdit& e);

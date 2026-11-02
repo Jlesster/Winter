@@ -79,6 +79,7 @@ Style read_style(lua_State* L, int t, bool* bad) {
     if(opt_bool(L, t, "underline", false)) a |= ATTR_UNDERLINE;
     if(opt_bool(L, t, "undercurl", false)) a |= ATTR_UNDERCURL;
     if(opt_bool(L, t, "reverse", false)) a |= ATTR_REVERSE;
+    if(opt_bool(L, t, "strikethrough", false)) a |= ATTR_STRIKE;
     st.attrs = a;
     return st;
 }
@@ -159,14 +160,28 @@ int l_clear_ns(lua_State* L) {
     return 0;
 }
 
+struct InputRefs {
+    int on_change = LUA_NOREF;
+    int on_submit = LUA_NOREF;
+    int on_cancel = LUA_NOREF;
+    ~InputRefs() {
+        if(!g_L) return;
+        luaL_unref(g_L, LUA_REGISTRYINDEX, on_change);
+        luaL_unref(g_L, LUA_REGISTRYINDEX, on_submit);
+        luaL_unref(g_L, LUA_REGISTRYINDEX, on_cancel);
+    }
+};
+
 // keeps the Lua callbacks of a float alive exactly as long as the float
 struct FloatRefs {
     int on_key = LUA_NOREF;
     int on_close = LUA_NOREF;
+    int on_paint = LUA_NOREF;
     ~FloatRefs() {
         if(!g_L) return;  // Lua already shut down
         luaL_unref(g_L, LUA_REGISTRYINDEX, on_key);
         luaL_unref(g_L, LUA_REGISTRYINDEX, on_close);
+        luaL_unref(g_L, LUA_REGISTRYINDEX, on_paint);
     }
 };
 
@@ -214,6 +229,29 @@ int l_float(lua_State* L) {
         lua_pop(L, 1);
         if(bad) err = "float: colors are 0xRRGGBB or \"#rrggbb\"";
 
+        lua_getfield(L, 1, "border");
+        if(lua_type(L, -1) == LUA_TBOOLEAN) spec.framed = lua_toboolean(L, -1);
+        else if(lua_type(L, -1) == LUA_TSTRING) {
+            spec.framed = true;
+            spec.border = border_from_name(lua_tostring(L, -1));
+            if(!spec.border) err = "float: border is rounded|straight|double|block";
+        }
+        lua_pop(L, 1);
+        spec.modal = opt_bool(L, 1, "modal", false);
+        lua_getfield(L, 1, "pass");
+        if(lua_istable(L, -1)) {
+            spec.pass.clear();
+            for(lua_Integer i = 1, n = luaL_len(L, -1); i <= n; ++i) {
+                lua_rawgeti(L, -1, i);
+                size_t len = 0;
+                const char* s = lua_tolstring(L, -1, &len);
+                if(s && len == 1) spec.pass.push_back(static_cast<unsigned char>(s[0]));
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+        const int inset = spec.framed ? 1 : 0;
+
         std::vector<std::string> lines;
         lua_getfield(L, 1, "lines");
         if(lua_istable(L, -1)) {
@@ -229,10 +267,38 @@ int l_float(lua_State* L) {
         lua_pop(L, 1);
         int widest = 0;
         for(const std::string& l : lines) widest = std::max(widest, text_width(l));
-        spec.w = opt_int(L, 1, "w", lines.empty() ? 1 : widest + 2);
-        spec.h = opt_int(L, 1, "h", lines.empty() ? 1 : static_cast<int>(lines.size()));
+        spec.w = opt_int(L, 1, "w", lines.empty() ? 1 : widest + 2 + 2 * inset);
+        spec.h = opt_int(L, 1, "h", lines.empty() ? 1 : static_cast<int>(lines.size()) + 2 * inset);
+
+        spec.border_style = st;
+        lua_getfield(L, 1, "border_style");
+        if(lua_istable(L, -1)) spec.border_style = read_style(L, lua_gettop(L), &bad);
+        lua_pop(L, 1);
+
+        lua_getfield(L, 1, "cursor");
+        if(lua_istable(L, -1)) {
+            lua_rawgeti(L, -1, 1); spec.cursor_x = (int)lua_tointeger(L, -1); lua_pop(L, 1);
+            lua_rawgeti(L, -1, 2); spec.cursor_y = (int)lua_tointeger(L, -1); lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
 
         auto refs = std::make_shared<FloatRefs>();
+        lua_getfield(L, 1, "on_paint");
+        if(lua_isfunction(L, -1)) refs->on_paint = ref_function(L, -1);
+        lua_pop(L, 1);
+        if(refs->on_paint != LUA_NOREF)
+            spec.on_paint = [refs, w = spec.w, h = spec.h](OverlayId id) {
+                if(!g_L) return;
+                lua_rawgeti(g_L, LUA_REGISTRYINDEX, refs->on_paint);
+                lua_pushinteger(g_L, id);
+                lua_pushinteger(g_L, w);
+                lua_pushinteger(g_L, h);
+                if(!call(3)) {
+                    luaL_unref(g_L, LUA_REGISTRYINDEX, refs->on_paint);
+                    refs->on_paint = LUA_NOREF;
+                }
+            };
+
         lua_getfield(L, 1, "on_key");
         if(lua_isfunction(L, -1)) refs->on_key = ref_function(L, -1);
         lua_pop(L, 1);
@@ -246,7 +312,7 @@ int l_float(lua_State* L) {
                 const std::string name = key_name(c);
                 lua_pushlstring(g_L, name.data(), name.size());
                 lua_pushinteger(g_L, c);
-                if(!call(2, 1)) return false;  // an erroring handler passes the key on
+                if(!call(2, 1)) return false;
                 const bool consumed = lua_toboolean(g_L, -1) != 0;
                 lua_pop(g_L, 1);
                 return consumed;
@@ -261,7 +327,8 @@ int l_float(lua_State* L) {
         if(!err) {
             id = overlay_open(std::move(spec));
             overlay_clear(id, st);
-            for(size_t i = 0; i < lines.size(); ++i) overlay_put(id, 1, static_cast<int>(i), lines[i], st);
+            for(size_t i = 0; i < lines.size(); ++i)
+                overlay_put(id, 1 + inset, static_cast<int>(i) + inset, lines[i], st);
         }
     }
     if(err) return luaL_error(L, "%s", err);
@@ -282,6 +349,13 @@ int l_float_put(lua_State* L) {
     if(bad) return luaL_argerror(L, 5, "colors are 0xRRGGBB or \"#rrggbb\"");
     lua_pushinteger(L, overlay_put(id, x, y, std::string_view(s, n), st));
     return 1;
+}
+
+int l_float_cursor(lua_State* L) {
+    overlay_set_cursor(static_cast<OverlayId>(luaL_checkinteger(L, 1)),
+                       static_cast<int>(luaL_checkinteger(L, 2)),
+                       static_cast<int>(luaL_checkinteger(L, 3)));
+    return 0;
 }
 
 // winter.float_clear(id [, style]): blank the float with a background
@@ -313,13 +387,94 @@ int l_replace(lua_State* L) {
     luaL_argcheck(L, b >= a, 3, "range ends before it starts");
     {
         std::unique_ptr<PieceTable::Group> group;
-        if(E.mode != INSERT) group = std::make_unique<PieceTable::Group>(E.buf().pt);
+        if(!insertish(E.mode)) group = std::make_unique<PieceTable::Group>(E.buf().pt);
         if(b > a) E.buf().pt.remove(a, b - a);
         if(n) E.buf().pt.insert(a, std::string_view(text, n));
         set_cursor_offset(a + n);
-        if(E.mode != INSERT)
+        if(!insertish(E.mode))
             set_cursor_offset(motion::clamp_normal(E.buf().pt, cursor_offset()));
         update_want();
     }
     return 0;
+}
+
+// winter.input{ prompt=, default=, w=, at="center"|"cursor"|"screen", x=, y=,
+//               border=true|"double"|..., style={...},
+//               on_change=fn(text), on_submit=fn(text), on_cancel=fn() } -> id
+int l_input(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    OverlayId id = 0;
+    const char* err = nullptr;
+    {
+        InputSpec in;
+        auto refs = std::make_shared<InputRefs>();
+        bool bad = false;
+
+        lua_getfield(L, 1, "prompt");
+        if(lua_type(L, -1) == LUA_TSTRING) in.prompt = lua_tostring(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, 1, "default");
+        if(lua_type(L, -1) == LUA_TSTRING) in.initial = lua_tostring(L, -1);
+        lua_pop(L, 1);
+
+        in.w = opt_int(L, 1, "w", 40);
+        in.x = opt_int(L, 1, "x", 0);
+        in.y = opt_int(L, 1, "y", 0);
+
+        lua_getfield(L, 1, "at");
+        if(lua_type(L, -1) == LUA_TSTRING) {
+            const std::string_view at = lua_tostring(L, -1);
+            if(at == "screen") in.at = OverlaySpec::At::Screen;
+            else if(at == "cursor") in.at = OverlaySpec::At::Cursor;
+            else if(at != "center") err = "input: at is \"center\", \"cursor\" or \"screen\"";
+        }
+        lua_pop(L, 1);
+
+        lua_getfield(L, 1, "border");
+        if(lua_type(L, -1) == LUA_TSTRING) {
+            in.border = border_from_name(lua_tostring(L, -1));
+            if(!in.border) err = "input: border is rounded|straight|double|block";
+        }
+        lua_pop(L, 1);
+
+        lua_getfield(L, 1, "style");
+        if(lua_istable(L, -1)) in.style = read_style(L, lua_gettop(L), &bad);
+        lua_pop(L, 1);
+        if(bad) err = "input: colors are 0xRRGGBB or \"#rrggbb\"";
+
+        const auto ref = [&](const char* k) {
+            lua_getfield(L, 1, k);
+            const int r = lua_isfunction(L, -1) ? ref_function(L, -1) : LUA_NOREF;
+            lua_pop(L, 1);
+            return r;
+        };
+        refs->on_change = ref("on_change");
+        refs->on_submit = ref("on_submit");
+        refs->on_cancel = ref("on_cancel");
+        if(refs->on_change != LUA_NOREF)
+            in.on_change = [refs](std::string_view t) {
+                if(!g_L) return;
+                lua_rawgeti(g_L, LUA_REGISTRYINDEX, refs->on_change);
+                lua_pushlstring(g_L, t.data(), t.size());
+                call(1);
+            };
+        if(refs->on_submit != LUA_NOREF)
+            in.on_submit = [refs](std::string t) {
+                if(!g_L) return;
+                lua_rawgeti(g_L, LUA_REGISTRYINDEX, refs->on_submit);
+                lua_pushlstring(g_L, t.data(), t.size());
+                call(1);
+            };
+        if(refs->on_cancel != LUA_NOREF)
+            in.on_cancel = [refs] {
+                if(!g_L) return;
+                lua_rawgeti(g_L, LUA_REGISTRYINDEX, refs->on_cancel);
+                call(0);
+            };
+
+        if(!err) id = input_open(std::move(in));
+    }
+    if(err) return luaL_error(L, "%s", err);
+    lua_pushinteger(L, id);
+    return 1;
 }

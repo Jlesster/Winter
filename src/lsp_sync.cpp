@@ -1,13 +1,18 @@
 #include "lsp_sync.hpp"
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <format>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
+
 #include "diag.hpp"
 #include "editor.hpp"
 #include "file.hpp"
@@ -16,10 +21,28 @@
 #include "lsp_config.hpp"
 #include "lsp_edit.hpp"
 #include "lua_json.hpp"
+#include "options.hpp"
 #include "syntax.hpp"
+#include "theme.hpp"
+#include "utf8.hpp"
+#include "virt.hpp"
 
 namespace {
 constexpr int kDebounceMs = 150;
+
+struct SemTok {
+    size_t start, end, type;
+};
+
+struct SemStats {
+    int sent = 0, ok = 0, stale = 0, empty = 0, err = 0;
+    int req_ver = 0, got_ver = 0;
+    double ms = 0;
+    size_t raw = 0, applied = 0, unmapped = 0;
+    std::string last_err;
+    std::vector<size_t> counts;  // tokens per legend type id
+    std::vector<SemTok> toks;    // every token as of got_ver, sorted by start
+};
 
 struct Doc {
     Buffer* buf;
@@ -30,6 +53,7 @@ struct Doc {
     int sync = 0;
     bool full_only = false;
     TimerId timer = 0;
+    SemStats sem;
 };
 std::vector<Doc> g_docs;
 
@@ -71,6 +95,327 @@ int sync_kind(const Json& caps) {
     return s.is_int() ? int(s.as_int()) : int(s["change"].as_int(0));
 }
 
+constexpr int kPrioSemantic = 5;
+bool g_sem_debug = false;
+
+std::optional<Style> token_style(std::string_view type) {
+    if(const auto u = theme_override("lsp." + std::string(type))) return u;
+    static constexpr std::pair<std::string_view, std::string_view> k[] = {
+        {"namespace", "namespace"},
+        {"type", "type"},
+        {"class", "type"},
+        {"struct", "type"},
+        {"enum", "type"},
+        {"interface", "type"},
+        {"typeParameter", "type"},
+        {"concept", "type"},
+        {"parameter", "variable.parameter"},
+        {"property", "property"},
+        {"enumMember", "constant"},
+        {"function", "function"},
+        {"method", "method"},
+        {"macro", "define"},
+        {"decorator", "attribute"},
+        {"label", "label"},
+    };
+    for(const auto& [name, cap] : k)
+        if(name == type) return syntax_theme(cap);
+    return std::nullopt;
+}
+
+struct Legend {
+    bool ok = false, built = false;
+    uint64_t rev = 0;
+    std::vector<std::string> names;
+    std::vector<std::optional<Style>> style;
+    std::vector<std::string> mods;
+    mutable std::unordered_map<uint64_t, std::optional<Style>> combo;
+};
+
+const Legend* legend_for(LspId id) {
+    static std::map<LspId, Legend> cache;
+    Legend& lg = cache[id];
+    if(!lg.built || lg.rev != theme_rev()) {
+        lg = Legend{};
+        lg.built = true;
+        lg.rev = theme_rev();
+        const Json& p = lsp_capabilities(id)["semanticTokensProvider"];
+        const Json& full = p["full"];
+        lg.ok = p.is_object() &&
+                (full.is_bool() ? full.as_bool() : full.is_object());
+        const Json& mods = p["legend"]["tokenModifiers"];
+        if(lg.ok && mods.is_array())
+            for(const Json& m : mods.items()) lg.mods.emplace_back(m.as_str());
+        const Json& types = p["legend"]["tokenTypes"];
+        if(lg.ok && types.is_array())
+            for(const Json& t : types.items()) {
+                lg.names.emplace_back(t.as_str());
+                lg.style.push_back(token_style(t.as_str()));
+            }
+    }
+    return lg.ok ? &lg : nullptr;
+}
+
+struct LineCur {
+    const PieceTable& pt;
+    bool utf16;
+    size_t line = static_cast<size_t>(-1), base = 0, i = 0, units = 0;
+    std::string text;
+
+    void seek(size_t l) {
+        if(l == line) return;
+        line = l;
+        base = pt.line_start(l);
+        text = pt.line_text(l);
+        i = units = 0;
+    }
+    size_t at(size_t col) {
+        if(!utf16) return base + std::min(col, text.size());
+        if(col < units) i = units = 0;  // overlapping token: rewind
+        while(i < text.size() && units < col) {
+            const Decoded d = utf8_decode(text, i);
+            units += d.cp >= 0x10000 ? 2 : 1;
+            i += d.len;
+        }
+        return base + i;
+    }
+};
+
+std::optional<Style> token_style_mods(const Legend& lg, size_t ty,
+                                      uint64_t bits) {
+    const uint64_t key = (uint64_t(ty) << 32) | (bits & 0xFFFFFFFF);
+    if(const auto it = lg.combo.find(key); it != lg.combo.end())
+        return it->second;
+    std::optional<Style> out = lg.style[ty];
+    for(size_t i = 0; i < lg.mods.size() && i < 32; ++i) {
+        if(!((bits >> i) & 1)) continue;
+        for(const std::string& g :
+            {"lsp." + lg.names[ty] + "." + lg.mods[i], "lsp.mod." + lg.mods[i]})
+            if(const auto m = theme_override(g)) {
+                if(!out) out = Style{};
+                style_patch(*out, *m);
+            }
+    }
+    return lg.combo.emplace(key, out).first->second;
+}
+
+void apply_tokens(Doc& d, const Legend& lg, const Json& data) {
+    Buffer& b = *d.buf;
+    SemStats& st = d.sem;
+    b.sync_anchors();  // flush pending deco shifts BEFORE adding new spans
+    const NsId ns = deco_ns("lsp.semantic");
+    b.decos.clear_ns(ns);
+    st.raw = st.applied = st.unmapped = 0;
+    st.counts.assign(lg.style.size(), 0);
+    st.toks.clear();
+    if(!data.is_array()) return;
+    std::vector<int64_t> v;
+    for(const Json& n : data.items()) v.push_back(n.as_int());
+
+    LineCur cur{b.pt, d.utf16};
+    size_t line = 0, col = 0;
+    for(size_t k = 0; k + 4 < v.size(); k += 5) {
+        // [deltaLine, deltaStart, length, type, modifiers]
+        if(v[k] > 0) {
+            line += static_cast<size_t>(v[k]);
+            col = static_cast<size_t>(v[k + 1]);
+        } else {
+            col += static_cast<size_t>(v[k + 1]);
+        }
+        if(line >= b.pt.line_count()) break;
+        ++st.raw;
+        const auto ty = static_cast<size_t>(v[k + 3]);
+        if(ty >= lg.style.size()) continue;
+        ++st.counts[ty];
+        cur.seek(line);
+        const size_t s = cur.at(col);
+        const size_t e = cur.at(col + static_cast<size_t>(v[k + 2]));
+        if(e <= s) continue;
+        st.toks.push_back({s, e, ty});
+        const auto base =
+            token_style_mods(lg, ty, static_cast<uint64_t>(v[k + 4]));
+        if(!base) {
+            ++st.unmapped;
+            continue;
+        }
+        Style sty = *base;
+        if(g_sem_debug)
+            sty.attrs = static_cast<uint16_t>(sty.attrs | ATTR_UNDERLINE);
+        b.decos.add_span({s, e, ns, kPrioSemantic, sty});
+        ++st.applied;
+    }
+}
+
+void request_tokens(Doc& d) {
+    Buffer* b = d.buf;
+    if(!opts.semantic_tokens) {
+        b->decos.clear_ns(deco_ns("lsp.semantic"));
+        return;
+    }
+    if(!legend_for(d.server)) return;
+    const int ver = d.version;
+    d.sem.req_ver = ver;
+    ++d.sem.sent;
+    const auto t0 = std::chrono::steady_clock::now();
+    lsp_request(d.server,
+                "textDocument/semanticTokens/full",
+                Json::obj({{"textDocument", Json::obj({{"uri", d.uri}})}}),
+                [b, ver, t0](const Json& result, const Json& error) {
+                    Doc* d = find(*b);  // the buffer may have been closed
+                    if(!d) return;
+                    SemStats& st = d->sem;
+                    // stale: text moved on since we asked; the next flush
+                    // re-asks
+                    if(d->version != ver || b->pt.lsp_dirty()) {
+                        ++st.stale;
+                        return;
+                    }
+                    if(!error.is_null()) {
+                        ++st.err;
+                        st.last_err = std::string(error["message"].as_str("?"));
+                        return;
+                    }
+                    if(!result.is_object()) {
+                        ++st.empty;
+                        return;
+                    }
+                    st.ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t0)
+                                .count();
+                    st.got_ver = ver;
+                    ++st.ok;
+                    if(const Legend* lg = legend_for(d->server))
+                        apply_tokens(*d, *lg, result["data"]);
+                });
+}
+
+constexpr int kRefDelayMs = 120;  // idle time before asking the server
+constexpr int kPrioRef = 4;       // under semantic tokens (5) and search (10)
+
+struct RefState {
+    Buffer* buf = nullptr;
+    uint64_t rev = 0;  // pt.revision() the highlights were asked for
+    size_t pos = 0;    // cursor offset they were asked for
+    TimerId timer = 0;
+    std::vector<std::pair<size_t, size_t>> ranges;  // highlighted, as of rev
+};
+RefState g_ref;
+
+size_t col_units(const PieceTable& pt, size_t off, bool utf16) {
+    const size_t ls = pt.line_start(pt.line_of(off));
+    const std::string t = pt.text(ls, off - ls);
+    if(!utf16) return t.size();
+    size_t u = 0;
+    for(size_t i = 0; i < t.size();) {
+        const Decoded d = utf8_decode(t, i);
+        u += d.cp >= 0x10000 ? 2 : 1;
+        i += d.len;
+    }
+    return u;
+}
+
+bool ref_supported(LspId id) {
+    const Json& p = lsp_capabilities(id)["documentHighlightProvider"];
+    return p.is_bool() ? p.as_bool() : p.is_object();
+}
+
+void ref_clear(Buffer* b) {
+    b->decos.clear_ns(deco_ns("lsp.refs"));
+    g_ref.ranges.clear();
+}
+
+void ref_request(Buffer* b, uint64_t rev, size_t cur) {
+    const auto doc = lsp_sync_doc(*b, true);  // flush pending edits first
+    if(!doc || !ref_supported(doc->server)) return;
+    lsp_request(
+        doc->server,
+        "textDocument/documentHighlight",
+        Json::obj(
+            {{"textDocument", Json::obj({{"uri", doc->uri}})},
+             {"position",
+              Json::obj({{"line", b->pt.line_of(cur)},
+                         {"character", col_units(b->pt, cur, doc->utf16)}})}}),
+        [b, rev, cur, utf16 = doc->utf16](const Json& result,
+                                          const Json& error) {
+            // stale: the cursor or the text moved on, or the buffer changed
+            if(g_ref.buf != b || g_ref.rev != rev || g_ref.pos != cur) return;
+            b->sync_anchors();  // flush pending deco shifts BEFORE adding spans
+            ref_clear(b);
+            if(!error.is_null() || !result.is_array()) return;
+
+            const Style base = theme_ui("ui.reference", Style{.bg = 0x45475a});
+            Style wdef = base;
+            wdef.attrs = static_cast<uint16_t>(wdef.attrs | ATTR_UNDERLINE);
+            const Style rd = theme_ui("ui.reference.read", base);
+            const Style wr = theme_ui("ui.reference.write", wdef);
+            const NsId ns = deco_ns("lsp.refs");
+            for(const Json& h : result.items()) {
+                const Json& r = h["range"];
+                const size_t s = lsp_offset(b->pt,
+                                            r["start"]["line"].as_int(),
+                                            r["start"]["character"].as_int(),
+                                            utf16);
+                const size_t e = lsp_offset(b->pt,
+                                            r["end"]["line"].as_int(),
+                                            r["end"]["character"].as_int(),
+                                            utf16);
+                if(e <= s) continue;
+                const int64_t kind =
+                    h["kind"].as_int(1);  // 1 text 2 read 3 write
+                b->decos.add_span({s,
+                                   e,
+                                   ns,
+                                   kPrioRef,
+                                   kind == 3   ? wr
+                                   : kind == 2 ? rd
+                                               : base});
+                g_ref.ranges.emplace_back(s, e);
+            }
+        });
+}
+
+// Called every frame. Keeps the highlights in step with the cursor.
+void ref_tick() {
+    Buffer* b = &E.buf();
+    const bool want =
+        opts.hl_reference && (E.mode == NORMAL || E.mode == OPPEND);
+    Doc* d = want ? find(*b) : nullptr;
+    if(!d || !ref_supported(d->server)) {
+        if(g_ref.buf) {  // switched off, left insert/normal, or no server here
+            if(g_ref.timer) loop_cancel(g_ref.timer);
+            ref_clear(g_ref.buf);
+            g_ref = RefState{};
+        }
+        return;
+    }
+    const size_t cur = cursor_offset();
+    const uint64_t rev = b->pt.revision();
+    if(g_ref.buf == b && g_ref.rev == rev && g_ref.pos == cur) return;
+    if(g_ref.buf && g_ref.buf != b) {  // moved to another buffer
+        if(g_ref.timer) loop_cancel(g_ref.timer);
+        ref_clear(g_ref.buf);
+        g_ref = RefState{};
+    }
+    const bool inside = g_ref.buf == b && g_ref.rev == rev &&
+                        std::ranges::any_of(g_ref.ranges, [&](const auto& r) {
+                            return cur >= r.first && cur <= r.second;
+                        });
+    if(g_ref.timer) {
+        loop_cancel(g_ref.timer);
+        g_ref.timer = 0;
+    }
+    if(!inside) ref_clear(b);
+    g_ref.buf = b;
+    g_ref.rev = rev;
+    g_ref.pos = cur;
+    if(inside) return;
+    g_ref.timer = loop_after(kRefDelayMs, [b, rev, cur] {
+        g_ref.timer = 0;
+        if(g_ref.buf == b && g_ref.rev == rev && g_ref.pos == cur)
+            ref_request(b, rev, cur);
+    });
+}
+
 void flush(Doc& d) {
     if(d.timer) {
         loop_cancel(d.timer);
@@ -90,6 +435,7 @@ void flush(Doc& d) {
         Json::obj({{"textDocument",
                     Json::obj({{"uri", d.uri}, {"version", ++d.version}})},
                    {"contentChanges", Json::arr({change})}}));
+    request_tokens(d);
 }
 
 std::string abs_path(const Buffer& b) {
@@ -115,6 +461,7 @@ void open_doc(Server& s, Buffer& b, std::string_view lang) {
                                       {"text", text}})}}));
     if(d.sync) b.pt.lsp_track(true, d.utf16);
     g_docs.push_back(std::move(d));
+    request_tokens(g_docs.back());
 }
 
 void on_ready(LspId id) {
@@ -133,6 +480,8 @@ void on_exit(LspId id, std::string_view why) {
         if(d.server == id) {
             if(d.timer) loop_cancel(d.timer);
             d.buf->diags.clear();
+            d.buf->decos.clear_ns(deco_ns("lsp.semantic"));
+            d.buf->decos.clear_ns(deco_ns("lsp.refs"));
             d.buf->pt.lsp_track(false);
         }
     std::erase_if(g_docs, [&](const Doc& d) { return d.server == id; });
@@ -226,6 +575,7 @@ void lsp_sync_attach(Buffer& b) {
 }
 
 void lsp_sync_tick() {
+    ref_tick();
     for(Doc& d : g_docs)
         if(!d.timer && d.buf->pt.lsp_dirty())
             d.timer = loop_after(kDebounceMs, [b = d.buf] {
@@ -250,6 +600,12 @@ void lsp_sync_detach(Buffer& b) {
                "textDocument/didClose",
                Json::obj({{"textDocument", Json::obj({{"uri", d->uri}})}}));
     b.diags.clear();
+    b.decos.clear_ns(deco_ns("lsp.semantic"));
+    b.decos.clear_ns(deco_ns("lsp.refs"));
+    if(g_ref.buf == &b) {
+        if(g_ref.timer) loop_cancel(g_ref.timer);
+        g_ref = RefState{};
+    }
     std::erase_if(g_docs, [&](const Doc& x) { return x.buf == &b; });
 }
 
@@ -262,4 +618,105 @@ void lsp_sync_saved(Buffer& b) {
     Json p = Json::obj({{"textDocument", Json::obj({{"uri", d->uri}})}});
     if(save["includeText"].as_bool()) p.set("text", full_text(b));
     lsp_notify(d->server, "textDocument/didSave", std::move(p));
+}
+
+std::optional<LspDoc> lsp_sync_doc(Buffer& b, bool flush_pending) {
+    Doc* d = find(b);
+    if(!d || !lsp_ready(d->server)) return std::nullopt;
+    if(flush_pending) flush(*d);
+    return LspDoc{d->server, d->uri, d->utf16};
+}
+
+bool lsp_sync_semantic_debug(Buffer& b) {
+    g_sem_debug = !g_sem_debug;
+    if(Doc* d = find(b)) request_tokens(*d);  // repaint with/without underline
+    return g_sem_debug;
+}
+
+std::string lsp_sync_semantic_report(Buffer& b) {
+    if(b.nofile)
+        return "run :semstat from the buffer you want to inspect, "
+               "this one is a scratch buffer\n";
+    std::string o = std::format("semantic tokens: {}\n\n", b.filename);
+    o += std::format("option semantic_tokens : {}\n",
+                     opts.semantic_tokens ? "on" : "off");
+    o +=
+        std::format("debug underline       : {}\n", g_sem_debug ? "on" : "off");
+    Doc* d = find(b);
+    if(!d) {
+        o += is_waiting(b)
+                 ? "server                 : starting, buffer is queued\n"
+                 : "server                 : none attached (no lsp for this "
+                   "filetype, or lsp disabled)\n";
+        return o;
+    }
+    const Server* s = by_id(d->server);
+    o += std::format("server                 : {} (id {}){}\n",
+                     s ? s->name : "?",
+                     d->server,
+                     lsp_ready(d->server) ? "" : "  NOT READY");
+    const Legend* lg = legend_for(d->server);
+    o += std::format(
+        "provider              : {}\n",
+        lg ? std::format("full ok, {} token types", lg->names.size())
+           : "NOT ADVERTISED (no semanticTokensProvider.full in the server "
+             "capabilities)");
+    const SemStats& st = d->sem;
+    o += std::format("doc version           : {} (unsent edits: {})\n",
+                     d->version,
+                     b.pt.lsp_dirty() ? "yes" : "no");
+    o += std::format(
+        "requests              : sent {}  ok {}  "
+        "stale-dropped {}  null {}  error {}\n",
+        st.sent,
+        st.ok,
+        st.stale,
+        st.empty,
+        st.err);
+    o += std::format("last request/reply    : v{} -> v{} in {:.0f} ms\n",
+                     st.req_ver,
+                     st.got_ver,
+                     st.ms);
+    if(!st.last_err.empty())
+        o += std::format("last error            : {}\n", st.last_err);
+    o += std::format(
+        "tokens (v{})           : {} from server, {} painted, "
+        "{} unmapped (left to tree-sitter)\n",
+        st.got_ver,
+        st.raw,
+        st.applied,
+        st.unmapped);
+
+    if(&b == &E.buf() && !st.toks.empty()) {
+        const size_t cur = cursor_offset();
+        auto it = std::ranges::upper_bound(st.toks, cur, {}, &SemTok::start);
+        if(it != st.toks.begin() && cur < std::prev(it)->end) {
+            const SemTok& t = *std::prev(it);
+            const auto& sty = lg ? lg->style[t.type] : std::nullopt;
+            o += std::format(
+                "cursor token          : '{}' type={} -> {}{}\n",
+                b.pt.text(t.start, t.end - t.start),
+                lg ? lg->names[t.type] : "?",
+                sty ? std::format("painted #{:06x}", sty->fg & 0xFFFFFF)
+                    : "unmapped (tree-sitter colour)",
+                st.got_ver != d->version ? "  [tokens are stale]" : "");
+        } else {
+            o += "cursor token          : none under the cursor\n";
+        }
+    }
+
+    if(lg) {
+        o += "\nby type (tokens the server sent):\n";
+        for(size_t i = 0; i < lg->names.size() && i < st.counts.size(); ++i)
+            if(st.counts[i])
+                o += std::format("  {:<16}{:>6}  {}\n",
+                                 lg->names[i],
+                                 st.counts[i],
+                                 lg->style[i] ? "painted" : "tree-sitter");
+    }
+    return o;
+}
+
+void lsp_sync_semantic_refresh() {
+    for(Doc& d : g_docs) request_tokens(d);
 }

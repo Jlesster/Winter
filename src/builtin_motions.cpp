@@ -1,4 +1,5 @@
-#include <concepts>
+#include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -10,6 +11,7 @@
 #include "normal.hpp"
 #include "piece.hpp"
 #include "registry.hpp"
+#include "tree.hpp"
 
 namespace {
 
@@ -120,6 +122,13 @@ void register_builtin_motions() {
     bind_motion("motion.para_fwd", motion::para_fwd, "}");
     bind_motion("motion.match_pair", motion::match_pair, "%");
 
+    // the files pane (mode FILES) has its own keymap; these reuse the same
+    // actions, which move the tree selection when the mode is FILES
+    registry().map(FILES, "j", "motion.down");
+    registry().map(FILES, "k", "motion.up");
+    registry().map(FILES, "gg", "motion.file_start");
+    registry().map(FILES, "G", "motion.file_end");
+
     registry().add_action("visual.right", [](Ctx& c) {
         apply_motion(motion::right_op(E.buf().pt, cursor_offset(), c.count));
     });
@@ -132,9 +141,32 @@ void register_builtin_motions() {
     });
     registry().map(VISUAL, "$", "visual.line_end");
 
-    // j / k need the goal column, so they are actions only for now
-    bind_action("motion.down", [](Ctx& c) { move_vertical(+1, c.count); }, "j");
-    bind_action("motion.up", [](Ctx& c) { move_vertical(-1, c.count); }, "k");
+    // with the files pane focused (mode FILES) these move its selection
+    bind_action(
+        "motion.down",
+        [](Ctx& c) {
+            if(tree_focused()) return tree_move(std::max(c.count, 1));
+            move_vertical(+1, c.count);
+        },
+        "j");
+    bind_action(
+        "motion.up",
+        [](Ctx& c) {
+            if(tree_focused()) return tree_move(-std::max(c.count, 1));
+            move_vertical(-1, c.count);
+        },
+        "k");
+
+    // gg / G: a count means "go to row N", like in a buffer
+    registry().add_action("motion.file_start", [](Ctx& c) {
+        if(tree_focused()) return tree_goto(c.count ? c.count - 1 : 0);
+        apply_motion(
+            motion::to_file_start(E.buf().pt, cursor_offset(), c.count));
+    });
+    registry().add_action("motion.file_end", [](Ctx& c) {
+        if(tree_focused()) return tree_goto(c.count ? c.count - 1 : LONG_MAX);
+        apply_motion(motion::to_file_end(E.buf().pt, cursor_offset(), c.count));
+    });
 
     bind_find("find.f", motion::Find::f, "f");
     bind_find("find.F", motion::Find::F, "F");

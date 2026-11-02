@@ -14,6 +14,7 @@
 #include "render.hpp"
 #include "state.hpp"
 #include "terminal.hpp"
+#include "tree.hpp"
 #include "utf8.hpp"
 
 namespace {
@@ -60,6 +61,16 @@ PromptView& prompt_view() { return g_view; }
 std::string editor_prompt(std::string_view prompt,
                           void (*callback)(std::string, int),
                           std::string_view initial) {
+    PromptHooks hooks;
+    if(callback)
+        hooks.after_key = [callback](const std::string& b, size_t, int k, bool) {
+            callback(b, k);
+        };
+    return editor_prompt(prompt, hooks, initial);
+}
+
+std::string editor_prompt(std::string_view prompt, const PromptHooks& hooks,
+                          std::string_view initial) {
     struct Active {
         Active() { g_view.active = true; }
         ~Active() { g_view.active = false; }
@@ -81,8 +92,8 @@ std::string editor_prompt(std::string_view prompt,
         // line outgrew the bar: drop leading chars so the cursor stays visible
         const std::string_view sv = buf;
         size_t first = 0;
-        while(first < pos &&
-              pw + text_width(sv.substr(first, pos - first)) >= E.term_cols)
+        while(first < pos && pw + text_width(sv.substr(first, pos - first)) >=
+                                 E.term_cols + tree_cols())
             first = utf8_next(sv, first);
         E.status_message = std::format("{}{}", prompt, sv.substr(first));
         E.status_message_time = time(nullptr);
@@ -91,17 +102,22 @@ std::string editor_prompt(std::string_view prompt,
 
         const int c = editor_read_key();
         if(c == NONE) continue;  // resize / unknown escape: just redraw
+        if(hooks.pre_key && hooks.pre_key(c, buf, pos)) {
+            if(pos > buf.size()) pos = buf.size();
+            hidx = hist.size();
+            continue;
+        }
 
         if(c == '\x1b') {
             editor_set_status_message("");
-            if(callback) callback(buf, c);
+            if(hooks.after_key) hooks.after_key(buf, pos, c, false);
             return "";
         }
         if(c == '\r' && !buf.empty()) {
             history_add(hist, buf);
             state_history_append(prompt, buf);
             editor_set_status_message("");
-            if(callback) callback(buf, c);
+            if(hooks.after_key) hooks.after_key(buf, pos, c, false);
             return buf;
         }
 
@@ -174,6 +190,6 @@ std::string editor_prompt(std::string_view prompt,
                 break;
         }
         if(edited) hidx = hist.size();  // editing leaves history browsing
-        if(callback) callback(buf, c);
+        if(hooks.after_key) hooks.after_key(buf, pos, c, edited);
     }
 }

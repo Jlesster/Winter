@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <optional>
 
 #include "core.hpp"
 #include "motion.hpp"
@@ -16,8 +17,8 @@ struct Range {
     bool linewise = false;
 };
 using Operator = std::function<void(const Range&)>;
-using ObjectFn = std::optional<Range> (*)(const PieceTable&, size_t pos,
-                                          int count);
+using ObjectFn = std::function<std::optional<Range>(const PieceTable&,
+                                                    size_t pos, int count)>;
 
 struct Ctx {
     int count = 0;  // 0 = no count typed
@@ -39,6 +40,7 @@ public:
     // ---- actions: name -> behaviour ("edit.undo", "mode.insert", ...)
     void add_action(std::string name, Action fn, bool wants_char = false);
     bool run_action(std::string_view name, Ctx& ctx) const;  // false: unknown
+    bool remove_action(std::string_view name);
     bool wants_char(std::string_view name) const;
     std::vector<std::string> action_names() const;
 

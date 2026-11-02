@@ -12,7 +12,7 @@ Options opts;
 
 namespace {
 
-enum class Kind { Int, Bool, CursorSpec };
+enum class Kind { Int, Bool, CursorSpec, BorderStyle };
 
 struct Opt {
     const char* name;
@@ -45,7 +45,23 @@ Opt kTable[] = {
     {"undolevels", "ul", Kind::Int, &opts.undo_levels, 0, 100000},
     {"timeoutlen", "tm", Kind::Int, &opts.timeoutlen, 0, 60000},
     {"hlsearch", "hls", Kind::Bool, &opts.hlsearch, 0, 1},
-    {"pasteindent", "pi", Kind::Bool, &opts.paste_indent, 0, 1},
+    {"paste_indent", "pi", Kind::Bool, &opts.paste_indent, 0, 1},
+    {"nerdicons", "ni", Kind::Bool, &opts.nerdicons, 0, 1},
+    {"border", "bs", Kind::BorderStyle, &opts.border, 0, 0},
+    {"wrap", "", Kind::Bool, &opts.wrap, 0, 0},
+    {"indent_engine", "ie", Kind::Int, &opts.indent_engine, 0, 2},
+    {"semantic_tokens", "sem", Kind::Bool, &opts.semantic_tokens, 0, 0},
+    {"treewidth", "", Kind::Int, &opts.tree_width, 10, 80},
+    {"treeicons", "ti", Kind::Bool, &opts.tree_icons, 0, 1},
+    {"treehidden", "", Kind::Bool, &opts.tree_hidden, 0, 1},
+    {"treefollow", "", Kind::Bool, &opts.tree_follow, 0, 1},
+    {"treegit", "", Kind::Bool, &opts.tree_git, 0, 1},
+    {"treegitnames", "", Kind::Bool, &opts.tree_git_names, 0, 1},
+    {"cursorline", "cul", Kind::Bool, &opts.cursorline, 0, 1},
+    {"matchparen", "mp", Kind::Bool, &opts.matchparen, 0, 1},
+    {"hltrailing", "hlt", Kind::Bool, &opts.hl_trailing, 0, 1},
+    {"colorcolumn", "cc", Kind::Int, &opts.colorcolumn, 0, 500},
+    {"hlreference", "hlr", Kind::Bool, &opts.hl_reference, 0, 1},
 };
 
 std::optional<CursorStyle> parse_cursor(std::string_view v) {
@@ -83,7 +99,7 @@ std::string show_cursor(const CursorStyle& c) {
 }
 
 struct CursorSet {
-    CursorStyle n, v, i;
+    CursorStyle n, v, i, r;
 };
 
 std::string_view trim(std::string_view s) {
@@ -95,7 +111,10 @@ std::string_view trim(std::string_view s) {
 }
 
 std::optional<CursorSet> parse_cursor_spec(std::string_view spec) {
-    CursorSet out{opts.cursor_normal, opts.cursor_visual, opts.cursor_insert};
+    CursorSet out{opts.cursor_normal,
+                  opts.cursor_visual,
+                  opts.cursor_insert,
+                  opts.cursor_replace};
     std::string low(spec);
     std::ranges::transform(low, low.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -115,6 +134,7 @@ std::optional<CursorSet> parse_cursor_spec(std::string_view spec) {
         if(mode == "n") out.n = *style;
         else if(mode == "v") out.v = *style;
         else if(mode == "i") out.i = *style;
+        else if(mode == "r") out.r = *style;
         else return std::nullopt;
     }
     return out;
@@ -123,19 +143,33 @@ std::optional<CursorSet> parse_cursor_spec(std::string_view spec) {
 std::string show_cursor_spec() {
     return "n:" + show_cursor(opts.cursor_normal) +
            ";v:" + show_cursor(opts.cursor_visual) +
-           ";i:" + show_cursor(opts.cursor_insert);
+           ";i:" + show_cursor(opts.cursor_insert) +
+           ";r:" + show_cursor(opts.cursor_replace);
 }
 
 std::string show(const Opt& o) {
     switch(o.kind) {
         case Kind::Bool: return *static_cast<bool*>(o.ptr) ? "true" : "false";
         case Kind::CursorSpec: return show_cursor_spec();
+        case Kind::BorderStyle: {
+            static constexpr const char* n[] = {
+                "rounded", "straight", "double", "block"};
+            return n[static_cast<int>(opts.border)];
+        }
         case Kind::Int: break;
     }
     return std::to_string(*static_cast<int*>(o.ptr));
 }
 
 }  // namespace
+
+std::optional<Border> border_from_name(std::string_view s) {
+    if(s == "rounded") return Border::Rounded;
+    if(s == "straight") return Border::Straight;
+    if(s == "double") return Border::Double;
+    if(s == "block") return Border::Block;
+    return std::nullopt;
+}
 
 OptResult set_option(std::string_view name, std::string_view value) {
     Opt* o = find(name);
@@ -152,6 +186,13 @@ OptResult set_option(std::string_view name, std::string_view value) {
         opts.cursor_normal = c->n;
         opts.cursor_visual = c->v;
         opts.cursor_insert = c->i;
+        opts.cursor_replace = c->r;
+        return OptResult::Ok;
+    }
+    if(o->kind == Kind::BorderStyle) {
+        const auto b = border_from_name(value);
+        if(!b) return OptResult::BadValue;
+        opts.border = *b;
         return OptResult::Ok;
     }
     int n = 0;

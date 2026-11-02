@@ -15,4 +15,5 @@ void reindent_lines(Syntax& syn, PieceTable& pt, bool eol, size_t l0,
                     size_t l1);
 std::optional<std::string> from_tree(Syntax& syn, PieceTable& pt, bool eol,
                                      size_t line);
+bool is_label(std::string_view tok);
 }  // namespace indent

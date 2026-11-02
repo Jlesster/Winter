@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -147,6 +148,7 @@ size_t PieceTable::raw_insert(size_t pos, std::string_view text) {
         l = merge(l, make({Src::Add, add_off, text.size()}));
     _root = merge(l, r);
     ++_rev;
+    anchors_insert(pos, text.size());
     return add_off;
 }
 
@@ -157,6 +159,7 @@ void PieceTable::raw_remove(size_t pos, size_t n, std::vector<Piece>* removed) {
     release(m);
     _root = merge(l, r);
     ++_rev;
+    anchors_remove(pos, n);
 }
 
 void PieceTable::raw_insert_pieces(size_t pos, const std::vector<Piece>& ps) {
@@ -165,6 +168,7 @@ void PieceTable::raw_insert_pieces(size_t pos, const std::vector<Piece>& ps) {
     for(const Piece& p : ps) mid = merge(mid, make(p));
     _root = merge(merge(l, mid), r);
     ++_rev;
+    anchors_insert(pos, span_len(ps));
 }
 
 void PieceTable::replace_span(size_t pos, size_t del,
@@ -174,15 +178,21 @@ void PieceTable::replace_span(size_t pos, size_t del,
 }
 
 void PieceTable::begin_group() {
-    if(_depth++ == 0) _rev_open = false;
+    if(_depth++ == 0) {
+        _rev_open = false;
+        _grp_rev = _rev;
+    }
 }
 
 void PieceTable::end_group() {
     if(_depth == 0) return;
-    if(--_depth == 0 && _rev_open) {
-        _head = _hist.size();
-        _rev_open = false;
-        trim_history();
+    if(--_depth == 0) {
+        if(_rev_open) {
+            _head = _hist.size();
+            _rev_open = false;
+            trim_history();
+        }
+        if(_rev != _grp_rev && _on_group_end) _on_group_end();
     }
 }
 
@@ -327,6 +337,7 @@ void PieceTable::log_edit(const TextEdit& e, bool deco) {
     if(_lsp_on) note_lsp(e);
     push_capped(_journal, e);
     if(deco) push_capped(_deco_q, e);
+    if(_on_edit && !e.reset) _on_edit(e, origin);
 }
 
 void PieceTable::note_deco_replace(size_t pos, size_t del, size_t ins) {
@@ -337,13 +348,38 @@ void PieceTable::note_deco_replace(size_t pos, size_t del, size_t ins) {
     push_capped(_deco_q, e);
 }
 
+TextEdit PieceTable::span_edit(size_t pos, size_t del,
+                               const std::vector<Piece>& ins) const {
+    TextEdit te;
+    te.start = pos;
+    te.old_end = pos + del;
+    te.new_end = pos + span_len(ins);
+    te.start_pt = to_linecol(pos);
+    te.old_end_pt = to_linecol(pos + del);
+    size_t nls = 0, tail = 0;
+    for(const Piece& p : ins) {
+        const std::string_view s = bytes(p);
+        const size_t c =
+            static_cast<size_t>(std::count(s.begin(), s.end(), '\n'));
+        if(c) {
+            nls += c;
+            tail = s.size() - (s.rfind('\n') + 1);
+        } else tail += s.size();
+    }
+    te.new_end_pt = nls ? LineCol{te.start_pt.line + nls, tail}
+                        : LineCol{te.start_pt.line, te.start_pt.col + tail};
+    return te;
+}
+
 std::optional<size_t> PieceTable::undo() {
     if(!can_undo()) return std::nullopt;
     const Revision& rev = _hist[--_head];
     for(auto it = rev.edits.rbegin(); it != rev.edits.rend(); ++it) {
         const size_t del = span_len(it->inserted);
+        const TextEdit te = span_edit(it->pos, del, it->removed);
         replace_span(it->pos, del, it->removed);
         note_deco_replace(it->pos, del, span_len(it->removed));
+        if(_on_edit) _on_edit(te, Origin::Undo);
     }
     TextEdit r;
     r.reset = true;
@@ -358,8 +394,10 @@ std::optional<size_t> PieceTable::redo() {
     const Revision& rev = _hist[_head++];
     for(const Edit& e : rev.edits) {
         const size_t del = span_len(e.removed);
+        const TextEdit te = span_edit(e.pos, del, e.removed);
         replace_span(e.pos, del, e.inserted);
         note_deco_replace(e.pos, del, span_len(e.inserted));
+        if(_on_edit) _on_edit(te, Origin::Redo);
     }
     TextEdit r;
     r.reset = true;
@@ -636,4 +674,16 @@ LineCol PieceTable::to_linecol(size_t pos) const {
 size_t PieceTable::from_linecol(size_t line, size_t col) const {
     line = std::min(line, line_count() - 1);
     return std::min(line_start(line) + col, line_end(line));
+}
+
+void PieceTable::anchors_insert(size_t p, size_t n) {
+    for(Anchor& a : _anchors)
+        if(a.pos > p || (a.pos == p && a.g == Gravity::Right)) a.pos += n;
+}
+
+void PieceTable::anchors_remove(size_t p, size_t n) {
+    for(Anchor& a : _anchors) {
+        if(a.pos >= p + n) a.pos -= n;
+        else if(a.pos > p) a.pos = p;
+    }
 }

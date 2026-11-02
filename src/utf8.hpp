@@ -5,7 +5,12 @@
 #include <string>
 #include <string_view>
 
-inline static void append_utf8(std::string& out, char32_t c) {
+inline size_t utf8_seq_len(char lead) {
+    const auto b = static_cast<unsigned char>(lead);
+    return b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : b >= 0xC0 ? 2 : 1;
+}
+
+inline void append_utf8(std::string& out, char32_t c) {
     if(c < 0x80) {
         out += static_cast<char>(c);
     } else if(c < 0x800) {

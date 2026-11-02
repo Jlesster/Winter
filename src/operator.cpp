@@ -285,6 +285,42 @@ void paste_indented(bool after, int count) {
     apply_motion(motion::to_first_nonblank(pt, pt.line_start(first), 0));
 }
 
+void paste_over(const Range& r, int count, bool swap_reg) {
+    if(const auto c = clip_get(); c && *c != unnamed.text)
+        unnamed = {*c, c->back() == '\n'};
+    const Register src = unnamed;
+    if(src.text.empty()) return;
+    PieceTable& pt = E.buf().pt;
+    PieceTable::Group g(pt);
+    std::string s;
+    for(int i = std::max(count, 1); i > 0; --i) s += src.text;
+    if(swap_reg) set_reg(grab(r), r.linewise);
+    const size_t at = r.start;
+    size_t n = r.end - r.start;
+    if(r.linewise) {
+        if(n && pt.at(r.end - 1)) --n;
+        if(src.linewise) s.pop_back();
+    } else if(src.linewise) {
+        s.insert(0, "\n");
+    }
+    pt.remove(at, n);
+    pt.insert(at, s);
+    const size_t l0 = pt.line_of(at);
+    const size_t nl = std::count(s.begin(), s.end(), '\n');
+    if(opts.paste_indent && nl) {
+        const size_t first = r.linewise ? l0 : l0 + 1;
+        const size_t last = (!r.linewise && src.linewise) ? l0 + nl - 1 : l0 + nl;
+        if(last >= first)
+            indent::reindent_lines(E.buf().syntax, pt, E.buf().eol, first, last);
+    }
+    if(r.linewise || src.linewise)
+        apply_motion(motion::to_first_nonblank(pt, pt.line_start(r.linewise ? l0 : l0 + 1), 0));
+    else {
+        set_cursor_offset(nl ? at : motion::left(pt, at + s.size(), 1).pos);
+        update_want();
+    }
+}
+
 struct Pair {
     std::string open, close;
 };
@@ -588,4 +624,17 @@ void register_builtin_operators() {
         },
         /*wants_char=*/true);
     registry().map(VISUAL, "S", "visual.surround");
+
+    registry().add_action("visual.paste", [](Ctx& c) {
+        const Range r = visual_range();
+        set_mode(NORMAL);
+        paste_over(r, c.count, true);
+    });
+    registry().add_action("visual.paste_keep", [](Ctx& c) {
+        const Range r = visual_range();
+        set_mode(NORMAL);
+        paste_over(r, c.count, false);
+    });
+    registry().map(VISUAL, "p", "visual.paste");
+    registry().map(VISUAL, "P", "visual.paste_keep");
 }

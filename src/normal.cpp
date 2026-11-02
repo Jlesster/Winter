@@ -15,8 +15,18 @@
 #include "utf8.hpp"
 
 void editor_move_cursor(int key) {
-    if(key == ARROW_UP || key == 'k') return move_vertical(-1, 1);
-    if(key == ARROW_DOWN || key == 'j') return move_vertical(+1, 1);
+    if(key == ARROW_UP) { return move_vertical(-1, 1); }
+    if(key == ARROW_DOWN) { return move_vertical(+1, 1); }
+    if(key == 'k') {
+        if(insertish(E.mode)) return;
+        if(E.mode == NORMAL || E.mode == VISUAL) return move_vertical(-1, 1);
+        return;
+    }
+    if(key == 'j') {
+        if(insertish(E.mode)) return;
+        if(E.mode == NORMAL || E.mode == VISUAL) return move_vertical(+1, 1);
+        return;
+    }
     const int last = E.num_rows() - 1;
     std::string line = E.buf().pt.line_text(E.cy);
     switch(key) {
@@ -24,8 +34,9 @@ void editor_move_cursor(int key) {
         case ARROW_LEFT:
             if(E.cx > 0) {
                 E.cx = static_cast<int>(utf8_prev(line, E.cx));
-            } else if(E.cy > 0) {
+            } else if(!insertish(E.mode) && E.cy > 0) {
                 E.cy--;
+                line = E.buf().pt.line_text(E.cy);
                 E.cx = static_cast<int>(line_len(E.cy));
             }
             break;
@@ -33,18 +44,10 @@ void editor_move_cursor(int key) {
         case ARROW_RIGHT:
             if(E.cx < static_cast<int>(line.size())) {
                 E.cx = static_cast<int>(utf8_next(line, E.cx));
-            } else if(E.cy < last) {
+            } else if(!insertish(E.mode) && E.cy < last) {
                 E.cy++;
                 E.cx = 0;
             }
-            break;
-        case 'k':
-        case ARROW_UP:
-            if(E.cy > 0) E.cy--;
-            break;
-        case 'j':
-        case ARROW_DOWN:
-            if(E.cy < last) E.cy++;
             break;
     }
     line = E.buf().pt.line_text(E.cy);
@@ -77,11 +80,6 @@ void apply_motion(const Target& t) {
 }
 
 namespace {
-
-size_t utf8_seq_len(char lead) {
-    const auto b = static_cast<unsigned char>(lead);
-    return b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : b >= 0xC0 ? 2 : 1;
-}
 
 struct NormalState {
     int count = 0;           // 0 = nothing typed yet
@@ -120,6 +118,11 @@ bool normal_pending() {
     return N.count || !N.keys.empty() || N.want_char || !N.op.empty();
 }
 
+EditorMode keymap_mode() {
+    if(E.mode == VISUAL || E.mode == FILES) return E.mode;
+    return N.op.empty() ? NORMAL : OPPEND;
+}
+
 void show_pending() {
     editor_set_status_message(
         "{}{}", N.count ? std::to_string(N.count) : std::string(), N.keys);
@@ -147,7 +150,7 @@ void dot_supress() { D.skip = true; }
 
 void dot_after_key(int c, EditorMode before, uint64_t rev_before) {
     if(D.replaying) return;
-    if(before == INSERT) {
+    if(insertish(before)) {
         if(!D.in_insert) return;
         if(c >= 0x100) {
             D.in_insert = false;
@@ -155,7 +158,7 @@ void dot_after_key(int c, EditorMode before, uint64_t rev_before) {
             return;
         }
         D.cur.push_back(c);
-        if(E.mode != INSERT) {
+        if(insertish(E.mode)) {
             D.last = std::move(D.cur);
             D.cur.clear();
             D.in_insert = false;
@@ -170,13 +173,13 @@ void dot_after_key(int c, EditorMode before, uint64_t rev_before) {
     D.cur.push_back(c);
     if(normal_pending()) return;
     const bool changed =
-        E.buf().pt.revision() != rev_before || E.mode == INSERT;
+        E.buf().pt.revision() != rev_before || insertish(E.mode);
     if(D.skip || !changed) {
         D.skip = false;
         D.cur.clear();
         return;
     }
-    if(E.mode == INSERT) {
+    if(insertish(E.mode)) {
         D.in_insert = true;
         return;
     }
@@ -208,11 +211,11 @@ static void run_exact(const Hit& hit) {
 void normal_reset() { N.reset(); }
 
 bool normal_chord_pending() { return !N.keys.empty() && !N.want_char; }
+bool normal_input_pending() { return normal_pending(); }
 
 void normal_chord_timeout() {
     if(!normal_chord_pending()) return;
-    const EditorMode map_mode =
-        E.mode == VISUAL ? VISUAL : (N.op.empty() ? NORMAL : OPPEND);
+    const EditorMode map_mode = keymap_mode();
     const Hit hit = registry().lookup(map_mode, N.keys);
     D.cur.clear();
     if(hit.kind == Lookup::Exact) run_exact(hit);
@@ -224,16 +227,14 @@ void normal_begin_operator(std::string_view name, int count) {
     N.op_count = count;
 }
 
-// Every normal-mode key lands here. What a key *does* is looked up in the
-// registry: keys -> action name -> behaviour.
 void normal_feed(int c) {
-    if(c == '\x1b' || c >= 0x100) {  // Esc, arrows, page keys cancel a chord
+    if(c == '\x1b' || c >= 0x100) {
         N.reset();
         return;
     }
 
-    if(N.want_char) {  // second half of f/t/r...: collect one UTF-8 character
-        if(N.arg.empty() && c < 32) {  // <CR>, <Tab>... cancel it
+    if(N.want_char) {
+        if(N.arg.empty() && c < 32) {
             N.reset();
             return;
         }
@@ -244,7 +245,6 @@ void normal_feed(int c) {
         return;
     }
 
-    // a count: 1-9 starts one, 0 only continues one (bare 0 is a motion)
     if(N.keys.empty() &&
        ((c >= '1' && c <= '9') || (c == '0' && N.count > 0))) {
         N.count = std::min(N.count * 10 + (c - '0'), 1000000);
@@ -257,15 +257,9 @@ void normal_feed(int c) {
         E.mode == VISUAL ? VISUAL : (N.op.empty() ? NORMAL : OPPEND);
     const Hit hit = registry().lookup(map_mode, N.keys);
     switch(hit.kind) {
-        case Lookup::None:  // not bound to anything: swallow it
-            N.reset();
-            return;
-        case Lookup::Prefix:  // "g" is the start of "gg": wait for more
-            show_pending();
-            return;
+        case Lookup::None: N.reset(); return;
+        case Lookup::Prefix: show_pending(); return;
         case Lookup::Exact:
-            // also the start of a longer chord ("<space>" vs "<space>f"):
-            // wait, timeoutlen decides
             if(hit.longer) {
                 show_pending();
                 return;

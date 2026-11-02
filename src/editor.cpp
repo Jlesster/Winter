@@ -1,20 +1,23 @@
 #include "editor.hpp"
 #include <cstddef>
+#include "columns.hpp"
 #include "core.hpp"
+#include "edit.hpp"
 #include "events.hpp"
+#include "keys.hpp"
 #include "loop.hpp"
 #include "motion.hpp"
+#include "piece.hpp"
+#include "utf8.hpp"
 
 EditorConfig E;
 
 // row helpers
-
 size_t line_len(size_t y) {
     return E.buf().pt.line_end(y) - E.buf().pt.line_start(y);
 }
 
 // cursor offset modes
-
 size_t cursor_offset() { return E.buf().pt.from_linecol(E.cy, E.cx); }
 
 void set_cursor_offset(size_t pos) {
@@ -25,12 +28,14 @@ void set_cursor_offset(size_t pos) {
 
 const char* mode_name(EditorMode m) {
     switch(m) {
+        case FILES: return "files";
         case INSERT: return "insert";
         case NORMAL: return "normal";
         case VISUAL: return "visual";
         case SEARCH: return "search";
-        case COMMAND: return "command";
         case OPPEND: return "operator";
+        case COMMAND: return "command";
+        case REPLACE: return "replace";
     }
     return "?";
 }
@@ -47,7 +52,12 @@ void set_mode(EditorMode m) {
         set_cursor_offset(p);
     }
     if(E.mode == INSERT) E.buf().pt.end_group();
-    if(m == INSERT) E.buf().pt.begin_group();
+    const bool was_ins = insertish(E.mode), will_ins = insertish(m);
+    if(was_ins && !will_ins) {
+        E.buf().pt.end_group();
+        replace_reset();
+    }
+    if(!was_ins && will_ins) E.buf().pt.begin_group();
     const EditorMode old = E.mode;
     E.mode = m;
     events_emit("mode_changed", {mode_name(old), mode_name(m)});

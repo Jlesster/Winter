@@ -3,38 +3,44 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <filesystem>
+#include <format>
 #include <functional>
-#include <initializer_list>
+#include <map>
+#include <memory>
+#include <utility>
 #include <optional>
 #include <regex>
+#include <system_error>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "buflist.hpp"
+#include "core.hpp"
+#include "build.hpp"
 #include "editor.hpp"
+#include "errparse.hpp"
 #include "file.hpp"
+#include "fuzzy.hpp"
 #include "job.hpp"
+#include "lsp_sync.hpp"
+#include "menu.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
 #include "options.hpp"
 #include "parser.hpp"
 #include "piece.hpp"
 #include "prompt.hpp"
+#include "quickfix.hpp"
 #include "script.hpp"
 #include "search.hpp"
 #include "syntax.hpp"
 #include "terminal.hpp"
+#include "theme.hpp"
+#include "tree.hpp"
 
 namespace {
-struct CmdLine {
-    bool has_range = false;
-    long first = 0, last = 0;
-    std::string name;
-    bool bang = false;
-    std::string args;
-};
-
 void skip_blanks(std::string_view& s) {
     while(!s.empty() && s.front() == ' ') s.remove_prefix(1);
 }
@@ -83,6 +89,7 @@ std::optional<long> parse_addr(std::string_view& s, long base) {
 }
 
 bool parse_cmdline(std::string_view s, CmdLine& out, std::string& err) {
+    const size_t total = s.size();
     skip_blanks(s);
     const long cur = E.cy + 1;
     if(s.starts_with(kVisualRange)) {
@@ -119,6 +126,7 @@ bool parse_cmdline(std::string_view s, CmdLine& out, std::string& err) {
             return false;
         }
     }
+    out.name_off = total - s.size();
     if(s.starts_with("$ ")) {
         out.name = "$";
         s.remove_prefix(1);
@@ -134,6 +142,7 @@ bool parse_cmdline(std::string_view s, CmdLine& out, std::string& err) {
         }
     }
     skip_blanks(s);
+    out.args_off = total - s.size();
     out.args = std::string(s);
     return true;
 }
@@ -214,6 +223,95 @@ std::vector<std::string> split_delim(std::string_view s, char d) {
     return parts;
 }
 
+// Splits on blanks. '...' is literal, "..." honours \" and \\, and a bare
+// backslash escapes the next char. Returns false on an unterminated quote.
+bool split_argv(std::string_view s, std::vector<std::string>& out,
+                std::string& err) {
+    out.clear();
+    std::string cur;
+    bool in_arg = false;
+    for(size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        if(c == ' ' || c == '\t') {
+            if(in_arg) {
+                out.push_back(std::move(cur));
+                cur.clear();
+                in_arg = false;
+            }
+        } else if(c == '\'') {
+            in_arg = true;
+            const size_t e = s.find('\'', i + 1);
+            if(e == std::string_view::npos) {
+                err = "Unterminated '";
+                return false;
+            }
+            cur.append(s.substr(i + 1, e - i - 1));
+            i = e;
+        } else if(c == '"') {
+            in_arg = true;
+            size_t j = i + 1;
+            for(;; ++j) {
+                if(j >= s.size()) {
+                    err = "Unterminated \"";
+                    return false;
+                }
+                if(s[j] == '"') break;
+                if(s[j] == '\\' && j + 1 < s.size() &&
+                   (s[j + 1] == '"' || s[j + 1] == '\\'))
+                    ++j;
+                cur += s[j];
+            }
+            i = j;
+        } else if(c == '\\' && i + 1 < s.size()) {
+            in_arg = true;
+            cur += s[++i];
+        } else {
+            in_arg = true;
+            cur += c;
+        }
+    }
+    if(in_arg) out.push_back(std::move(cur));
+    return true;
+}
+
+bool validate_cmd(CmdLine& c, std::string& err) {
+    const CmdSpec& sp = *c.spec;
+    if(c.bang && !sp.bang) {
+        err = std::format("No ! allowed for :{}", sp.name);
+        return false;
+    }
+    if(c.has_range && !sp.range) {
+        err = std::format("No range allowed for :{}", sp.name);
+        return false;
+    }
+    const auto bad_args = [&] {
+        err = sp.usage.empty()
+                  ? std::format("Wrong number of arguments for :{}", sp.name)
+                  : std::format("Usage: {}", sp.usage);
+        return false;
+    };
+    if(sp.raw) {  // command parses c.args itself; only check empty/non-empty
+        if(sp.nargs == Nargs::None && !c.args.empty()) return bad_args();
+        if(sp.nargs == Nargs::One && c.args.empty()) return bad_args();
+        return true;
+    }
+    if(!split_argv(c.args, c.argv, err)) return false;
+    const size_t n = c.argv.size();
+    switch(sp.nargs) {
+        case Nargs::None:
+            if(n != 0) return bad_args();
+            break;
+        case Nargs::One:
+            if(n != 1) return bad_args();
+            break;
+        case Nargs::Opt:
+            if(n > 1) return bad_args();
+            break;
+        case Nargs::Any: break;
+    }
+    return true;
+}
+
 std::string to_format(std::string_view r) {
     std::string out;
     for(size_t i = 0; i < r.size(); ++i) {
@@ -235,45 +333,68 @@ std::string to_format(std::string_view r) {
     return out;
 }
 
-void cmd_substitute(const CmdLine& c) {
-    if(c.args.size() < 2) {
-        editor_set_status_message("Usage: :s/pattern/replacement/[gi]");
-        return;
+struct SubstSpec {
+    std::string pat;
+    bool has_rep = false;
+    bool global = false;
+    std::regex re;
+    std::string fmt;
+};
+
+std::optional<SubstSpec> parse_subst(std::string_view args, std::string& err) {
+    if(args.size() < 2) {
+        err = "Usage: :s/pattern/replacement/[gi]";
+        return std::nullopt;
     }
-    const char d = c.args[0];
+    const char d = args[0];
     if(std::isalnum(static_cast<unsigned char>(d)) || d == '\\' || d == ' ' ||
        d == '"' || d == '|') {
-        editor_set_status_message("Bad delim: {}", d);
-        return;
+        err = std::format("Bad delim: {}", d);
+        return std::nullopt;
     }
-    const auto parts = split_delim(std::string_view(c.args).substr(1), d);
-    const std::string& pat = parts[0];
-    const std::string rep = parts.size() > 1 ? parts[1] : "";
+    const auto parts = split_delim(args.substr(1), d);
+    SubstSpec sp;
+    sp.pat = parts[0];
+    sp.has_rep = parts.size() > 1;
+    const std::string rep = sp.has_rep ? parts[1] : "";
     const std::string flags = parts.size() > 2 ? parts[2] : "";
-    if(pat.empty()) {
-        editor_set_status_message("Empty pattern");
-        return;
+    if(sp.pat.empty()) {
+        err = "Empty pattern";
+        return std::nullopt;
     }
-    bool global = false, icase = false;
+    bool icase = false;
     for(const char f : flags) {
-        if(f == 'g') global = true;
+        if(f == 'g') sp.global = true;
         else if(f == 'i') icase = true;
         else if(f == 'I') icase = false;
         else {
-            editor_set_status_message("Unknown Flag: {}", f);
-            return;
+            err = std::format("Unknown Flag: {}", f);
+            return std::nullopt;
         }
     }
     auto syntax = std::regex::ECMAScript;
     if(icase) syntax |= std::regex::icase;
-    std::regex re;
     try {
-        re = std::regex(pat, syntax);
+        sp.re = std::regex(sp.pat, syntax);
     } catch(const std::regex_error&) {
-        editor_set_status_message("Invalid pattern: {}", pat);
+        err = std::format("Invalid pattern: {}", sp.pat);
+        return std::nullopt;
+    }
+    sp.fmt = to_format(rep);
+    return sp;
+}
+
+void cmd_substitute(const CmdLine& c) {
+    std::string err;
+    const auto sp = parse_subst(c.args, err);
+    if(!sp) {
+        editor_set_status_message("{}", err);
         return;
     }
-    const std::string fmt = to_format(rep);
+    const std::string& pat = sp->pat;
+    const std::regex& re = sp->re;
+    const std::string& fmt = sp->fmt;
+    const bool global = sp->global;
     const auto mflags = global ? std::regex_constants::format_default
                                : std::regex_constants::format_first_only;
     const long first = c.has_range ? c.first : E.cy + 1;
@@ -407,6 +528,30 @@ void reattach_syntax(std::string_view lang) {
     }
 }
 
+void cmd_copy(const CmdLine& c) {
+    auto& pt = E.buf().pt;
+    std::string_view a = c.args;
+    const long l = c.has_range ? c.last : E.cy + 1;
+    const long f = c.has_range ? c.first : l;
+    skip_blanks(a);
+    const auto dest = parse_addr(a, E.cy + 1);
+    skip_blanks(a);
+    if(!dest || !a.empty() || *dest < 0 || *dest > E.num_rows()) {
+        editor_set_status_message("Invalid address: {}", c.args);
+        return;
+    }
+    const size_t lo = pt.line_start(static_cast<size_t>(f - 1));
+    const size_t hi = pt.line_end(static_cast<size_t>(l - 1));
+    const std::string blk = pt.text(lo, hi - lo);
+    PieceTable::Group g(pt);
+    if(*dest < E.num_rows())
+        pt.insert(pt.line_start(static_cast<size_t>(*dest)), blk + "\n");
+    else pt.insert(pt.size(), "\n" + blk);
+    const long cnt = l - f + 1;
+    goto_line(*dest + cnt);
+    if(cnt > 2) editor_set_status_message("{} more lines", cnt);
+}
+
 void cmd_tsinstall(const CmdLine& c) {
     if(c.args.empty()) {
         editor_set_status_message("Grammars (* installed): {}", parser_list());
@@ -439,49 +584,251 @@ void cmd_tsinstall(const CmdLine& c) {
     if(!id) editor_set_status_message("TSInstall {}: already running", lang);
 }
 
-using CmdFn = std::function<void(const CmdLine&)>;
-std::map<std::string, CmdFn, std::less<>>& table() {
-    static std::map<std::string, CmdFn, std::less<>> t;
-    return t;
+std::vector<std::unique_ptr<CmdSpec>>& specs() {
+    static std::vector<std::unique_ptr<CmdSpec>> v;
+    return v;
 }
 
-void def(std::initializer_list<const char*> names, CmdFn fn) {
-    for(const char* n : names) table()[n] = fn;
+// canonical names and aliases, all pointing at the owning spec
+std::map<std::string, CmdSpec*, std::less<>>& index() {
+    static std::map<std::string, CmdSpec*, std::less<>> m;
+    return m;
 }
 
 }  // namespace
 
+void command_add(CmdSpec spec) {
+    auto& idx = index();
+    CmdSpec* slot = nullptr;
+    for(auto& p : specs())
+        if(p->name == spec.name) {
+            slot = p.get();
+            break;
+        }
+    if(slot) {  // re-registration: drop old names, overwrite in place
+        std::erase_if(idx, [slot](const auto& kv) { return kv.second == slot; });
+        *slot = std::move(spec);
+    } else {
+        specs().push_back(std::make_unique<CmdSpec>(std::move(spec)));
+        slot = specs().back().get();
+    }
+    idx[slot->name] = slot;
+    for(const std::string& a : slot->aliases) idx[a] = slot;
+}
+
+void command_add(std::string name, CmdFn fn) {
+    command_add(CmdSpec{.name = std::move(name),
+                        .range = true,
+                        .bang = true,
+                        .nargs = Nargs::Any,
+                        .raw = true,
+                        .run = std::move(fn)});
+}
+
+CmdMatch command_find(std::string_view name) {
+    CmdMatch m;
+    if(name.empty()) return m;
+    const auto& idx = index();
+    if(const auto it = idx.find(name); it != idx.end()) {  // exact / alias
+        m.spec = it->second;
+        return m;
+    }
+    // tier 1: prefix of a canonical name; tier 2: prefix of an alias
+    for(const bool canonical : {true, false}) {
+        std::vector<const CmdSpec*> hits;
+        for(auto it = idx.lower_bound(name);
+            it != idx.end() && it->first.starts_with(name);
+            ++it) {
+            const bool is_canon = it->first == it->second->name;
+            if(is_canon != canonical) continue;
+            if(std::ranges::find(hits, it->second) == hits.end())
+                hits.push_back(it->second);
+        }
+        if(hits.size() == 1) {
+            m.spec = hits[0];
+            return m;
+        }
+        if(hits.size() > 1) {
+            for(const CmdSpec* s : hits) m.cands.push_back(s->name);
+            return m;
+        }
+    }
+    return m;
+}
+
+// ---- completers (CmdSpec::complete) ----------------------------------------
+static std::vector<CmdCand> complete_files(std::string_view lead) {
+    namespace fs = std::filesystem;
+    std::vector<CmdCand> out;
+    const size_t slash = lead.rfind('/');
+    const std::string dir =
+        slash == std::string_view::npos ? "" : std::string(lead.substr(0, slash + 1));
+    const std::string stem(slash == std::string_view::npos ? lead
+                                                           : lead.substr(slash + 1));
+    std::error_code ec;
+    fs::directory_iterator it(dir.empty() ? "." : dir, ec);
+    if(ec) return out;
+    for(const fs::directory_iterator end; it != end && out.size() < 500;
+        it.increment(ec)) {
+        if(ec) break;
+        const std::string name = it->path().filename().string();
+        if(name.starts_with('.') && !stem.starts_with('.')) continue;
+        const bool is_dir = it->is_directory(ec);
+        out.push_back({dir + name + (is_dir ? "/" : ""), is_dir ? "dir" : ""});
+    }
+    return out;
+}
+
+static std::vector<CmdCand> complete_buffers(std::string_view) {
+    std::vector<CmdCand> out;
+    for(size_t i = 0; i < E.buffers.size(); ++i)
+        out.push_back({buffer_name(i), std::to_string(i + 1)});
+    return out;
+}
+
 void register_builtin_commands() {
-    def({"noh", "nohlsearch"},
-        [](const CmdLine&) { search_clear_highlight(); });
-    def({"q", "quit"}, [](const CmdLine& c) {
-        if(!c.bang && quit_blocked()) return;
-        editor_quit();
-    });
-    def({"w", "write"}, [](const CmdLine&) { editor_save(); });
-    def({"wq", "x"}, [](const CmdLine& c) {
-        editor_save();
-        if(c.bang || !quit_blocked()) editor_quit();
-    });
-    def({"e", "edit"}, [](const CmdLine& c) {
-        if(!c.args.empty()) buffer_open(c.args);
-    });
-    def({"ls", "buffers"},
-        [](const CmdLine&) { editor_set_status_message("{}", buffer_list()); });
-    def({"bn", "bnext"}, [](const CmdLine&) { buffer_cycle(+1); });
-    def({"bp", "bprev"}, [](const CmdLine&) { buffer_cycle(-1); });
-    def({"bd", "bdelete"},
-        [](const CmdLine& c) { buffer_close(E.cur, c.bang); });
-    def({"b", "buffer"}, [](const CmdLine& c) { buffer_goto(c.args); });
-    def({"set"}, [](const CmdLine& c) {
-        const std::string m = apply_set_command(c.args);
-        if(!m.empty()) editor_set_status_message("{}", m);
-    });
-    def({"lua"}, [](const CmdLine& c) { script_eval(c.args); });
-    def({"m", "move"}, cmd_move);
-    def({"s", "substitute"}, cmd_substitute);
-    def({"$"}, cmd_shell);
-    def({"TSInstall"}, cmd_tsinstall);
+    command_add({.name = "nohlsearch",
+                 .aliases = {"noh"},
+                 .desc = "Clear search highlight",
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine&) { search_clear_highlight(); }});
+    command_add({.name = "quit",
+                 .aliases = {"q"},
+                 .desc = "Quit the editor",
+                 .bang = true,
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine& c) {
+                     if(!c.bang && quit_blocked()) return;
+                     editor_quit();
+                 }});
+    command_add({.name = "write",
+                 .aliases = {"w"},
+                 .desc = "Save the buffer",
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine&) { editor_save(); }});
+    command_add({.name = "wq",
+                 .aliases = {"x"},
+                 .desc = "Save and quit",
+                 .bang = true,
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine& c) {
+                     editor_save();
+                     if(c.bang || !quit_blocked()) editor_quit();
+                 }});
+    command_add({.name = "edit",
+                 .aliases = {"e"},
+                 .desc = "Open a file",
+                 .usage = ":e <file>",
+                 .nargs = Nargs::Opt,
+                 .complete = complete_files,
+                 .run = [](const CmdLine& c) {
+                     if(!c.argv.empty()) buffer_open(c.argv[0]);
+                 }});
+    command_add({.name = "ls",
+                 .aliases = {"buffers"},
+                 .desc = "List buffers",
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine&) {
+                     editor_set_status_message("{}", buffer_list());
+                 }});
+    command_add({.name = "bnext",
+                 .aliases = {"bn"},
+                 .desc = "Next buffer",
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine&) { buffer_cycle(+1); }});
+    command_add({.name = "bprev",
+                 .aliases = {"bp"},
+                 .desc = "Previous buffer",
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine&) { buffer_cycle(-1); }});
+    command_add({.name = "bdelete",
+                 .aliases = {"bd"},
+                 .desc = "Close buffer",
+                 .bang = true,
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine& c) {
+                     buffer_close(E.cur, c.bang);
+                 }});
+    command_add({.name = "buffer",
+                 .aliases = {"b"},
+                 .desc = "Go to buffer",
+                 .usage = ":b <number|name>",
+                 .nargs = Nargs::Opt,
+                 .raw = true,
+                 .complete = complete_buffers,
+                 .run = [](const CmdLine& c) { buffer_goto(c.args); }});
+    command_add({.name = "set",
+                 .aliases = {"se"},
+                 .desc = "Set options",
+                 .nargs = Nargs::Any,
+                 .raw = true,
+                 .run = [](const CmdLine& c) {
+                     const std::string m = apply_set_command(c.args);
+                     if(!m.empty()) editor_set_status_message("{}", m);
+                 }});
+    command_add({.name = "lua",
+                 .desc = "Evaluate Lua",
+                 .nargs = Nargs::One,
+                 .raw = true,
+                 .run = [](const CmdLine& c) { script_eval(c.args); }});
+    command_add({.name = "semstat",
+                 .desc = "LSP semantic token report",
+                 .nargs = Nargs::Opt,
+                 .raw = true,
+                 .run = [](const CmdLine& c) {
+                     Buffer& b = E.buf();
+                     if(c.args == "debug") {
+                         const bool on = lsp_sync_semantic_debug(b);
+                         editor_set_status_message(
+                             "semstat: debug underline {}, tokens repaint on "
+                             "the next reply",
+                             on ? "on" : "off");
+                         return;
+                     }
+                     buffer_show_text("[semstat]", lsp_sync_semantic_report(b));
+                 }});
+    command_add({.name = "move",
+                 .aliases = {"m"},
+                 .desc = "Move lines",
+                 .usage = ":[range]m <address>",
+                 .range = true,
+                 .nargs = Nargs::One,
+                 .raw = true,
+                 .run = cmd_move});
+    command_add({.name = "copy",
+                 .aliases = {"t", "co"},
+                 .desc = "Copy lines",
+                 .usage = ":[range]t <address>",
+                 .range = true,
+                 .nargs = Nargs::One,
+                 .raw = true,
+                 .run = cmd_copy});
+    command_add({.name = "substitute",
+                 .aliases = {"s"},
+                 .desc = "Substitute with regex",
+                 .usage = ":[range]s/pattern/replacement/[gi]",
+                 .range = true,
+                 .nargs = Nargs::One,
+                 .raw = true,
+                 .run = cmd_substitute});
+    command_add({.name = "$",
+                 .desc = "Run a shell command (range: filter)",
+                 .usage = ":[range]$ <command>",
+                 .range = true,
+                 .nargs = Nargs::One,
+                 .raw = true,
+                 .run = cmd_shell});
+    command_add({.name = "TSInstall",
+                 .desc = "Install a tree-sitter grammar",
+                 .usage = ":TSInstall[!] [lang]",
+                 .bang = true,
+                 .nargs = Nargs::Opt,
+                 .raw = true,
+                 .run = cmd_tsinstall});
+    errparser_register_builtin();
+    qf_register_commands();
+    build_register_builtin();
+    build_register_commands();
 }
 
 void editor_command_palette(std::string_view cmd) {
@@ -496,19 +843,305 @@ void editor_command_palette(std::string_view cmd) {
         if(c.has_range) goto_line(c.last);
         return;
     }
-    const auto it = table().find(c.name);
-    if(it == table().end()) {
-        editor_set_status_message("Unknown Command: {}", c.name);
+    const CmdMatch m = command_find(c.name);
+    if(!m.spec) {
+        if(m.cands.empty()) {
+            editor_set_status_message("Unknown Command: {}", c.name);
+            return;
+        }
+        std::string list;
+        for(const std::string& n : m.cands) {
+            if(!list.empty()) list += ", ";
+            list += n;
+        }
+        editor_set_status_message("Ambiguous command {}: {}", c.name, list);
         return;
     }
-    it->second(c);
+    c.spec = m.spec;
+    if(!validate_cmd(c, err)) {
+        editor_set_status_message("{}", err);
+        return;
+    }
+    const CmdFn fn = m.spec->run;  // copy: the command may re-register itself
+    if(fn) fn(c);
 }
 
+// ---- the ':' completion popup ---------------------------------------------
+namespace {
+
+struct Popup {
+    Menu menu;
+    std::vector<std::string> inserts;  // MenuItem::id indexes this
+    size_t from = 0, to = 0;           // span of the line a pick replaces
+    bool name_ctx = false;
+    bool forced = false;  // Tab opened it on an empty word
+} g_pop;
+
+struct PopCtx {
+    bool name = false;  // completing the command name (else an argument)
+    size_t from = 0, to = 0;
+    std::string lead;  // the word before the cursor
+    const CmdSpec* spec = nullptr;
+};
+
+void pop_reset() {
+    g_pop.menu.close();
+    g_pop.forced = false;
+}
+
+bool pop_context(const std::string& buf, size_t pos, PopCtx& ctx) {
+    const std::string head = buf.substr(0, pos);
+    CmdLine c;
+    std::string err;
+    if(!parse_cmdline(head, c, err) || c.name == "$") return false;
+
+    const bool in_name = c.args.empty() && !c.bang && !head.ends_with(' ');
+    if(in_name) {
+        if(c.name.empty() && c.has_range) return false;  // ":12"
+        ctx.name = true;
+        ctx.from = c.name_off;
+        ctx.to = pos;
+        while(ctx.to < buf.size() &&
+              std::isalpha(static_cast<unsigned char>(buf[ctx.to])))
+            ++ctx.to;
+        ctx.lead = c.name;
+        return true;
+    }
+
+    if(c.name.empty()) return false;
+    if(c.args.empty() && !head.ends_with(' ')) return false;  // ":e!"
+    const CmdMatch m = command_find(c.name);
+    if(!m.spec || !m.spec->complete) return false;
+    const size_t ws = head.find_last_of(' ');
+    ctx.from = std::max(c.args_off, ws == std::string::npos ? size_t{0} : ws + 1);
+    ctx.to = pos;
+    while(ctx.to < buf.size() && buf[ctx.to] != ' ') ++ctx.to;
+    ctx.lead = head.substr(ctx.from);
+    ctx.spec = m.spec;
+    return true;
+}
+
+void pop_update(const std::string& buf, size_t pos) {
+    PopCtx ctx;
+    if(!pop_context(buf, pos, ctx) ||
+       (ctx.name && ctx.lead.empty() && !g_pop.forced))
+        return g_pop.menu.close();
+
+    struct Hit {
+        int score;
+        std::string insert;
+        MenuItem item;
+    };
+    std::vector<Hit> hits;
+    fuzzy::Match m;
+    if(ctx.name) {
+        for(const auto& sp : specs()) {
+            int best = 0;
+            std::vector<size_t> hl;
+            if(!ctx.lead.empty()) {
+                bool ok = false;
+                if(fuzzy::match(sp->name, ctx.lead, m)) {
+                    ok = true;
+                    best = m.score;
+                    hl = m.pos;
+                }
+                for(const std::string& a : sp->aliases)
+                    if(fuzzy::match(a, ctx.lead, m) && (!ok || m.score > best)) {
+                        ok = true;
+                        best = m.score;
+                        hl.clear();  // the match was on the alias, not the label
+                    }
+                if(!ok) continue;
+            }
+            hits.push_back({best,
+                            sp->name,
+                            MenuItem{.label = sp->name,
+                                     .detail = sp->desc,
+                                     .hl = std::move(hl)}});
+        }
+    } else {
+        for(CmdCand& cand : ctx.spec->complete(ctx.lead)) {
+            if(!ctx.lead.empty() && !fuzzy::match(cand.text, ctx.lead, m))
+                continue;
+            if(ctx.lead.empty()) m = {};
+            hits.push_back({m.score,
+                            cand.text,
+                            MenuItem{.label = cand.text,
+                                     .detail = std::move(cand.detail),
+                                     .hl = m.pos}});
+        }
+    }
+    if(hits.empty()) return g_pop.menu.close();
+
+    std::ranges::stable_sort(hits, [](const Hit& a, const Hit& b) {
+        return a.score != b.score ? a.score > b.score
+                                  : a.item.label < b.item.label;
+    });
+    if(hits.size() > 200) hits.erase(hits.begin() + 200, hits.end());
+
+    std::vector<MenuItem> items;
+    g_pop.inserts.clear();
+    for(Hit& h : hits) {
+        h.item.id = g_pop.inserts.size();
+        g_pop.inserts.push_back(std::move(h.insert));
+        items.push_back(std::move(h.item));
+    }
+    g_pop.from = ctx.from;
+    g_pop.to = ctx.to;
+    g_pop.name_ctx = ctx.name;
+    if(!g_pop.menu.is_open())
+        g_pop.menu.open({.at = OverlaySpec::At::Screen,
+                         .x = tree_cols(),
+                         .y = E.term_rows + 1,
+                         .up = true,
+                         .cover_bars = true,
+                         .in_prompt = true,
+                         .max_rows = 8,
+                         .min_w = 24,
+                         .max_w = 70});
+    g_pop.menu.set_items(std::move(items));
+}
+
+bool pop_accept(std::string& buf, size_t& pos) {
+    const MenuItem* it = g_pop.menu.selected();
+    if(!g_pop.menu.visible() || !it) return false;
+    const std::string text = g_pop.inserts[it->id];
+    const size_t from = std::min(g_pop.from, buf.size());
+    const size_t to = std::clamp(g_pop.to, from, buf.size());
+    buf.replace(from, to - from, text);
+    pos = from + text.size();
+    if(g_pop.name_ctx) {  // a command name is followed by its arguments
+        if(pos < buf.size() && buf[pos] == ' ') ++pos;
+        else buf.insert(pos++, 1, ' ');
+    }
+    return true;
+}
+
+bool popup_pre_key(int key, std::string& buf, size_t& pos) {
+    switch(key) {
+        case '\t':
+            if(g_pop.menu.visible()) {
+                if(pop_accept(buf, pos)) pop_update(buf, pos);
+            } else {
+                g_pop.forced = true;  // Tab on an empty word lists everything
+                pop_update(buf, pos);
+            }
+            return true;
+        case CTRL_KEY('y'):
+            if(!g_pop.menu.visible()) return false;
+            if(pop_accept(buf, pos)) pop_update(buf, pos);
+            return true;
+        case CTRL_KEY('n'):
+        case CTRL_KEY('p'):
+            if(!g_pop.menu.visible()) return false;  // fall through to history
+            g_pop.menu.move(key == CTRL_KEY('n') ? +1 : -1);
+            return true;
+        default: return false;
+    }
+}
+
+void popup_after_key(const std::string& buf, size_t pos, int key, bool edited) {
+    if(key == '\x1b' || key == '\r') return pop_reset();
+    if(edited) pop_update(buf, pos);
+    else g_pop.menu.close();  // cursor moved or history browsed
+}
+
+}  // namespace
+
 void editor_command_prompt() {
+    PromptHooks hooks;
+    hooks.pre_key = popup_pre_key;
+    hooks.after_key = [](const std::string& buf, size_t pos, int key,
+                         bool edited) {
+        subst_preview_key(buf, key);
+        popup_after_key(buf, pos, key, edited);
+    };
     std::string cmd = editor_prompt(
-        ":", nullptr, std::exchange(E.cmd_prefill, std::string{}));
+        ":", hooks, std::exchange(E.cmd_prefill, std::string{}));
+    pop_reset();
     E.cmd_sel = false;
     set_mode(NORMAL);
     if(cmd.empty()) return;
     editor_command_palette(cmd);
+}
+
+namespace {
+struct {
+    bool on = false;
+    long first = 0, last = 0;
+    bool show_rep = false, global = false;
+    std::regex re;
+    std::string fmt;
+} g_sp;
+}  // namespace
+
+size_t SubstView::map(size_t off) const {
+    long d = 0;
+    for(const Edit& e : edits) {
+        if(off <= e.lo) break;
+        if(off < e.hi) return e.nlo + std::min(off - e.lo, e.nhi - e.nlo);
+        d = static_cast<long>(e.nhi) - static_cast<long>(e.hi);
+    }
+    return static_cast<size_t>(static_cast<long>(off) + d);
+}
+
+void subst_preview_key(std::string cmd, int key) {
+    g_sp.on = false;
+    if(key == '\x1b' || key == '\r') return;
+    while(cmd.ends_with(' ')) cmd.pop_back();
+    CmdLine c;
+    std::string err;
+    if(!parse_cmdline(cmd, c, err)) return;
+    const CmdMatch m = command_find(c.name);
+    if(!m.spec || m.spec->name != "substitute") return;
+    auto sp = parse_subst(c.args, err);
+    if(!sp) return;
+    g_sp.first = c.has_range ? c.first : E.cy + 1;
+    g_sp.last = c.has_range ? c.last : g_sp.first;
+    g_sp.show_rep = sp->has_rep;
+    g_sp.global = sp->global;
+    g_sp.re = std::move(sp->re);
+    g_sp.fmt = std::move(sp->fmt);
+    g_sp.on = true;
+}
+
+bool subst_preview_line(int row, std::string_view line, SubstView& out) {
+    if(!g_sp.on || row + 1 < g_sp.first || row + 1 > g_sp.last) return false;
+    if(line.size() > 4096) return false;
+    const Style match_st =
+        theme_ui("ui.subst.match", Style{.fg = 0x1e1e2e, .bg = 0xf38ba8});
+    const Style rep_st =
+        theme_ui("ui.subst.replace",
+                 Style{.fg = 0x1e1e2e, .bg = 0xa6e3a1, .attrs = ATTR_BOLD});
+    out.text.clear();
+    out.marks.clear();
+    out.edits.clear();
+    const std::string s(line);
+    size_t copied = 0;
+    for(std::sregex_iterator it(s.begin(), s.end(), g_sp.re), end; it != end;
+        ++it) {
+        const std::smatch& m = *it;
+        const size_t lo = static_cast<size_t>(m.position(0));
+        const size_t hi = lo + static_cast<size_t>(m.length(0));
+        out.text.append(s, copied, lo - copied);
+        const size_t nlo = out.text.size();
+        if(g_sp.show_rep) {
+            std::string r = m.format(g_sp.fmt);
+            for(size_t k; (k = r.find('\n')) != std::string::npos;)
+                r.replace(k, 1, "\u21b5");
+            out.text += r;
+        } else {
+            out.text.append(s, lo, hi - lo);
+        }
+        out.edits.push_back({lo, hi, nlo, out.text.size()});
+        out.marks.push_back({nlo,
+                             out.text.size(),
+                             kPrioSubst,
+                             g_sp.show_rep ? rep_st : match_st});
+        copied = hi;
+        if(!g_sp.global) break;
+    }
+    if(out.edits.empty()) return false;
+    out.text.append(s, copied, std::string::npos);
+    return true;
 }

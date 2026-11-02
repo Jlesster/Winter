@@ -15,6 +15,9 @@ enum class CursorShape : uint8_t {
     Bar = 3
 };
 
+enum class Border : uint8_t { Rounded, Straight, Double, Block };
+std::optional<Border> border_from_name(std::string_view s);
+
 struct CursorStyle {
     CursorShape shape = CursorShape::Block;
     bool blink = false;
@@ -32,10 +35,24 @@ struct Options {
     bool diagnostics = true;        // show LSP diags
     bool diag_virtual_text = true;  // end-of-line message
     bool diag_undercurl = true;     // modern curly linting
+    bool semantic_tokens = true;    // lsp semantic token highlighting
     bool hlsearch = true;           // search match highlighting
     bool paste_indent = true;       // indent pastes
-    int timeoutlen = 1000;          // chord timeout ms
-    int undo_levels = 1000;         // # of stored edits per file
+    bool nerdicons = false;         // ui nerd icon toggle
+    bool tree_icons = false;     // no ui icons aside from the tree box glyphs
+    bool tree_hidden = false;    // show dotfiles when the tree is first opened
+    bool tree_follow = true;     // keep the cursor on the active buffer's file
+    bool tree_git = true;        // git status marks
+    bool tree_git_names = true;  // recolor file names by git stats
+    bool wrap = false;           // wrap long lines at screen edge
+    bool hl_reference =
+        false;  // highlight other uses of the symbol under the cursor (LSP)
+    bool cursorline = false;   // tint the cursor row
+    bool matchparen = false;   // highlight the matching bracket
+    bool hl_trailing = false;  // highlight trailing whitespace
+    int colorcolumn = 0;       // 1-based display column to tint, 0 = off
+    int timeoutlen = 1000;     // chord timeout ms
+    int undo_levels = 1000;    // # of stored edits per file
     int diag_severity = 4;  // show this severity and worse: 1 error .. 4 hint
     int scrolloff = 5;      // scroll off padding
     int tab_stop = 4;       // display width of a '\t'
@@ -43,10 +60,15 @@ struct Options {
     int quit_times = 3;     // extra Ctrl-Q presses needed with unsaved changes
     int history = 500;      // history entries per file
     int number_width = 4;   // gutter width
+    int tree_width = 30;    // columns, before the separator
+    int indent_engine =
+        0;  // 0 structural + ts fallback / 1 ts only / 2 structural only
+    Border border = Border::Rounded;  // ui border selection
     // DECSCUSR: 1/2 block, 3/4 underline, 5/6 bar (odd = blinking)
     CursorStyle cursor_normal{CursorShape::Block, false};
     CursorStyle cursor_insert{CursorShape::Bar, false};
     CursorStyle cursor_visual{CursorShape::Underline, false};
+    CursorStyle cursor_replace{CursorShape::Underline, false};
 };
 
 extern Options opts;

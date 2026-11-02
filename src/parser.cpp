@@ -151,9 +151,14 @@ if [ ! -f src/parser.c ]; then
   echo "$NAME: repo has no src/parser.c (needs tree-sitter generate)"
   exit 1
 fi
+
+mkdir -p "$DATA/parsers" "$DATA/queries/$NAME"
 for d in . "$root"; do
     for m in tree-sitter.json package.json; do
-        if [ -f "$d/$m" ]; then cp -f "$d/$m" "$DATA/parsers/$NAME.meta.json";
+        if [ -f "$d/$m" ]; then
+            cp -f "$d/$m" "$DATA/parsers/$NAME.meta.json"
+            break 2
+        fi
     done
 done
 

@@ -10,6 +10,14 @@
 #include <vector>
 
 enum class Src : uint8_t { Orig, Add };
+enum class Origin : uint8_t { User, Undo, Redo, Snippet, Lsp, External };
+enum class Gravity : uint8_t { Left, Right };
+
+struct Anchor {
+    size_t id;
+    size_t pos;
+    Gravity g;
+};
 
 struct Piece {
     Src src{};
@@ -37,6 +45,8 @@ inline size_t shift_pos(size_t p, const TextEdit& e, bool is_end) {
 }
 
 class PieceTable {
+    using EditSink = std::function<void(const TextEdit&, Origin)>;
+
 public:
     static constexpr size_t npos = static_cast<size_t>(-1);
     class Group {
@@ -86,6 +96,23 @@ public:
     void for_each_chunk(size_t pos, size_t n,
                         const std::function<void(std::string_view)>& fn) const;
 
+    size_t anchor_add(size_t pos, Gravity g) {
+        _anchors.push_back({_next_anchor, std::min(pos, size()), g});
+        return _next_anchor++;
+    }
+    std::optional<size_t> anchor_pos(size_t id) const {
+        for(const Anchor& a : _anchors)
+            if(a.id == id) return a.pos;
+        return std::nullopt;
+    }
+    void anchor_remove(size_t id) {
+        std::erase_if(_anchors, [&](const Anchor& a) { return a.id == id; });
+    }
+    void anchor_set_gravity(size_t id, Gravity g) {
+        for(Anchor& a : _anchors)
+            if(a.id == id) a.g = g;
+    }
+
     void begin_group();
     void end_group();
     std::optional<size_t> undo();
@@ -101,6 +128,12 @@ public:
 
     uint64_t revision() const { return _rev; }
     std::vector<TextEdit> drain_edits() { return std::exchange(_journal, {}); }
+
+    void set_edit_sink(EditSink f) { _on_edit = std::move(f); }
+    void set_group_end_sink(std::function<void()> f) {
+        _on_group_end = std::move(f);
+    }
+    Origin origin = Origin::User;
 
     std::vector<TextEdit> drain_deco_edits() {
         return std::exchange(_deco_q, {});
@@ -182,26 +215,36 @@ private:
     size_t count_lf(Src s, size_t off, size_t len) const;
     size_t add_text(std::string_view text);
 
+    void anchors_insert(size_t p, size_t n);
+    void anchors_remove(size_t p, size_t n);
+
+    bool _rev_open = false;
+    bool _lsp_on = false;
+    bool _lsp_u16 = false;
+    Id _root = NIL;
+    size_t _head = 0;
+    size_t _saved_head = 0;
+    size_t _max_hist = 0;
+    size_t _next_anchor = 1;
+    int _depth = 0;
+    uint64_t _rng = 0x9E3779B97F4A7C15ULL;
+    uint64_t _rev = 0;
+    uint64_t _grp_rev = 0;
     std::string_view _original{};
     std::string _add{};
     std::vector<size_t> _orig_lf{};
     std::vector<size_t> _add_lf{};
     std::vector<Node> _n{};
     std::vector<Id> _free{};
-    Id _root = NIL;
-    uint64_t _rng = 0x9E3779B97F4A7C15ULL;
-    uint64_t _rev = 0;
     std::vector<Revision> _hist{};
-    size_t _head = 0;
-    int _depth = 0;
-    bool _rev_open = false;
-    size_t _saved_head = 0;
-    size_t _max_hist = 0;
     std::vector<TextEdit> _journal{};
     std::vector<TextEdit> _deco_q{};
+    std::vector<Anchor> _anchors{};
+    std::function<void()> _on_group_end;
+    EditSink _on_edit;
+    TextEdit span_edit(size_t pos, size_t del,
+                       const std::vector<Piece>& ins) const;
     static void push_capped(std::vector<TextEdit>& q, const TextEdit& e);
-    bool _lsp_on = false;
-    bool _lsp_u16 = false;
     std::optional<TextEdit> _lsp_pending{};
     static constexpr size_t kJournalCap = 1024;
 };

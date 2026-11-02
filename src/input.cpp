@@ -5,6 +5,7 @@
 #include <optional>
 
 #include "command.hpp"
+#include "complete.hpp"
 #include "core.hpp"
 #include "edit.hpp"
 #include "editor.hpp"
@@ -13,14 +14,19 @@
 #include "loop.hpp"
 #include "normal.hpp"
 #include "options.hpp"
+#include "overlay.hpp"
 #include "search.hpp"
+#include "snippet.hpp"
 #include "terminal.hpp"
+#include "tree.hpp"
 #include "utf8.hpp"
-
-static int quit_presses = 0;
 
 void editor_handle_key(int c) {
     if(c == PASTE) {
+        if(overlay_modal()) {
+            editor_take_paste();
+            return;
+        }
         const EditorMode before = E.mode;
         const uint64_t rev = E.buf().pt.revision();
         normal_reset();
@@ -29,22 +35,11 @@ void editor_handle_key(int c) {
         dot_after_key(c, before, rev);
         return;
     }
+    if(c != PASTE && overlay_key(c)) return;
     const EditorMode before = E.mode;
     const uint64_t rev_before = E.buf().pt.revision();
 
     switch(c) {
-        case CTRL_KEY('q'):
-            if(E.buf().pt.modified() && quit_presses < opts.quit_times) {
-                editor_set_status_message(
-                    "[WARNING]!! File has unsaved changes, press CTRL-Q {} "
-                    "more times to quit.",
-                    opts.quit_times - quit_presses);
-                quit_presses++;
-                return;
-            }
-            editor_quit();
-            break;
-
         case CTRL_KEY('s'): editor_save(); break;
 
         case HOME: E.cx = 0; break;
@@ -73,7 +68,8 @@ void editor_handle_key(int c) {
 
         case CTRL_KEY('l'):
         case '\x1b': {
-            const bool was_insert = E.mode == EditorMode::INSERT;
+            snippet_end();
+            const bool was_insert = insertish(E.mode);
             set_mode(EditorMode::NORMAL);
             if(was_insert && E.cx > 0)
                 E.cx = static_cast<int>(
@@ -83,6 +79,16 @@ void editor_handle_key(int c) {
     }
     switch(E.mode) {
         case INSERT:
+        case REPLACE:
+            if(c == '\t') {
+                if(snippet_active()) {
+                    snippet_next();
+                    break;
+                }
+                if(snippet_try_trigger()) break;
+            }
+            if(snippet_pre_key(c)) break;
+            if(E.mode == REPLACE && replace_key(c)) break;
             switch(c) {
                 case '\r': editor_insert_newline(); break;
                 case BACKSPACE: editor_delete_char(); break;
@@ -112,11 +118,15 @@ void editor_handle_key(int c) {
             normal_feed(c);  // keys -> registry -> action: see builtin_*.cpp
             break;
         case VISUAL: normal_feed(c); break;
+        case FILES:
+            if(normal_input_pending() || !tree_key(c)) normal_feed(c);
+            break;
         case COMMAND: break;
         case SEARCH: break;
         case OPPEND: break;
     }
-    quit_presses = 0;
+    snippet_post_key();
+    completion_post_key(c);
     dot_after_key(c, before, rev_before);
 }
 

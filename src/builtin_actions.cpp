@@ -1,8 +1,11 @@
+#include <cstddef>
 #include <string>
 
 #include "buflist.hpp"
 #include "builtin.hpp"
 #include "command.hpp"
+#include "comment.hpp"
+#include "complete.hpp"
 #include "diag.hpp"
 #include "edit.hpp"
 #include "editor.hpp"
@@ -10,6 +13,7 @@
 #include "normal.hpp"
 #include "registry.hpp"
 #include "search.hpp"
+#include "tree.hpp"
 #include "utf8.hpp"
 
 namespace {
@@ -192,6 +196,19 @@ void register_builtin_actions() {
         "<C-r>");
     bind("edit.dot", [](Ctx&) { dot_replay(); }, ".");
 
+    registry().add_action(
+        "edit.replace_char",
+        [](Ctx& c) { replace_char_at_cursor(c.count, c.arg); },
+        true);
+    registry().map(NORMAL, parse_keys("r"), "edit.replace_char");
+    bind(
+        "mode.replace",
+        [](Ctx&) {
+            set_mode(REPLACE);
+            replace_reset();
+        },
+        "R");
+
     bind_visual(
         "visual.command",
         [](Ctx&) {
@@ -204,6 +221,38 @@ void register_builtin_actions() {
             set_mode(COMMAND);
         },
         ":");
+
+    bind("lsp.hover", [](Ctx&) { hover_show(); }, "K");
+    bind_visual(
+        "visual.dup",
+        [](Ctx&) {
+            set_mode(NORMAL);
+            editor_command_palette("'<,'>t'>");
+        },
+        "<space>dl");
+    bind("tree.toggle", [](Ctx&) { tree_toggle(); }, "<space>e");
+    registry().map(FILES, parse_keys("<space>e"), "tree.toggle");
+
+    bind(
+        "edit.comment",
+        [](Ctx& c) {
+            const size_t l0 = static_cast<size_t>(E.cy);
+            comment_toggle(l0,
+                           l0 + static_cast<size_t>(std::max(c.count, 1)) - 1);
+        },
+        "<space>/");
+
+    bind_visual(
+        "visual.comment",
+        [](Ctx&) {
+            const Range r = visual_range();
+            const auto& pt = E.buf().pt;
+            const size_t l0 = pt.line_of(r.start);
+            const size_t l1 = pt.line_of(r.end > r.start ? r.end - 1 : r.start);
+            set_mode(NORMAL);
+            comment_toggle(l0, l1);
+        },
+        "<space>/");
 }
 
 void register_builtins() {

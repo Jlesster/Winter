@@ -10,12 +10,17 @@
 #include "core.hpp"
 #include "editor.hpp"
 #include "indent.hpp"
+#include "keys.hpp"
 #include "options.hpp"
 #include "piece.hpp"
 #include "utf8.hpp"
 
-// edits
+namespace {
+std::vector<std::string> g_replaced;
+std::string g_pending;
+}  // namespace
 
+// edits
 void editor_insert_char(int c) {
     const char ch = static_cast<char>(c);
     E.buf().pt.insert(cursor_offset(), std::string_view(&ch, 1));
@@ -49,23 +54,130 @@ static bool is_closer(char c) { return c == ')' || c == ']' || c == '}'; }
 
 static bool is_quote(char c) { return c == '"' || c == '\'' || c == '`'; }
 
-static bool has_spare_closer(std::string_view rest, char open, char close) {
-    int depth = 0;
-    for(const char c : rest) {
-        if(c == open) ++depth;
-        else if(c == close && --depth < 0) return true;
-    }
-    return false;
-}
-
 static bool is_word(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
 }
 
-// is `prev` immediately followed by the character that auto-pairing added?
-static bool is_empty_pair(char prev, char next) {
+using Lit = Syntax::Lit;
+
+constexpr std::string_view kBacktick[] = {
+    "javascript", "typescript", "go", "markdown"};
+
+static char opener_for(char c) {
+    switch(c) {
+        case ')': return '(';
+        case ']': return '[';
+        case '}': return '{';
+        default: return 0;
+    }
+}
+
+// Is the cursor inside a string/comment? Probes the byte before AND the byte
+// after the cursor, so it doesn't depend on exactly where a grammar puts its
+// span boundaries (python's string_start/string_end tokens, c's string_content,
+// ...). Both bytes must be literal for the cursor to be "inside".
+// Comment at end of line is also inside (line comments don't include the \n).
+static Lit lit_kind(Buffer& B, size_t off, char next) {
+    B.syntax.update(B.pt, B.eol);  // same call indent::from_tree makes
+    if(off == 0) return Lit::None;
+    const Syntax::LitSpan a = B.syntax.literal_at(off - 1);
+    if(a.kind == Lit::None) return Lit::None;
+    if(B.syntax.literal_at(off).kind == a.kind) return a.kind;
+    return (a.kind == Lit::Comment && next == 0) ? Lit::Comment : Lit::None;
+}
+
+// Unescaped `q` count in `before` is odd => we're inside a string of that
+// quote kind. Only looks left of the cursor (the old code counted the line).
+static bool odd_quotes_before(std::string_view before, char q) {
+    int n = 0;
+    for(size_t i = 0; i < before.size(); ++i) {
+        if(before[i] == '\\') ++i;  // skip the escaped char
+        else if(before[i] == q) ++n;
+    }
+    return n % 2 != 0;
+}
+
+// How many `open`s left of the cursor are still unclosed? Scans back up to 64
+// lines, counting only brackets in the same kind of context as the cursor.
+static int unclosed_before(Buffer& B, char open, char close, Lit here) {
+    const size_t cy = static_cast<size_t>(E.cy);
+    int depth = 0, unclosed = 0;
+    for(size_t l = cy + 1, n = 0; l-- > 0 && n < 64; ++n) {
+        const std::string line = B.pt.line_text(l);
+        const size_t base = B.pt.line_start(l);
+        const size_t end = l == cy ? static_cast<size_t>(E.cx) : line.size();
+        for(size_t i = end; i-- > 0;) {
+            const char c = line[i];
+            if(c != open && c != close) continue;
+            if(B.syntax.literal_at(base + i).kind != here) continue;
+            if(c == close) ++depth;
+            else if(depth > 0) --depth;
+            else ++unclosed;
+        }
+    }
+    return unclosed;
+}
+
+// How many `close`s in `rest` (text right of the cursor) have no `open` in
+// `rest` to pair with, i.e. they belong to something left of the cursor.
+static int unmatched_after(std::string_view rest, char open, char close) {
+    int depth = 0, n = 0;
+    for(const char c : rest) {
+        if(c == open) ++depth;
+        else if(c == close) {
+            if(depth > 0) --depth;
+            else ++n;
+        }
+    }
+    return n;
+}
+
+// python string prefixes (r f b u rb br fr rf, any case) and C/C++ ones
+// (R L u U u8 + R combos). Only matters for ', since " always pairs.
+static bool is_str_prefix(std::string_view lang, std::string_view w) {
+    if(lang == "python") {
+        std::string s(w);
+        for(char& ch : s)
+            ch =
+                static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        constexpr std::string_view k[] = {
+            "r", "f", "b", "u", "rb", "br", "fr", "rf"};
+        return std::ranges::find(k, std::string_view(s)) != std::end(k);
+    }
+    if(lang == "c" || lang == "cpp") {
+        constexpr std::string_view k[] = {
+            "R", "L", "u", "U", "u8", "LR", "uR", "UR", "u8R"};
+        return std::ranges::find(k, w) != std::end(k);
+    }
+    return false;
+}
+
+// Per-language / per-context rules for whether a quote is allowed to pair.
+static bool can_pair_quote(char q, std::string_view before,
+                           std::string_view lang) {
+    if(q == '`')
+        return lang.empty() ||
+               std::ranges::find(kBacktick, lang) != std::end(kBacktick);
+    if(q == '"') return true;         // f"  R"  u8"  all fine
+    if(lang == "rust") return false;  // &'a, <'a>
+    size_t i = before.size();         // the word right before the cursor
+    while(i > 0 && is_word(before[i - 1])) --i;
+    const std::string_view word = before.substr(i);
+    // don't, 1'000 -> no pair.  f'  b'  u8'  L' -> pair.
+    return word.empty() || is_str_prefix(lang, word);
+}
+
+// Backspace: `prev` is the char left of the cursor, `next` the one right of
+// it, `before` is the text left of `prev`. True only if prev+next is an empty
+// pair that prev opened.
+static bool is_empty_pair(char prev, char next, std::string_view before) {
     if(!next) return false;
-    return closer_for(prev) == next || (is_quote(prev) && prev == next);
+    if(closer_for(prev)) return closer_for(prev) == next;
+    if(!is_quote(prev) || prev != next) return false;
+    if(!before.empty() && before.back() == '\\') return false;  // \"|"
+    // even count to the left => prev opened a string. Odd => prev CLOSED one,
+    // so `"a"|"b"` no longer eats both quotes.
+    return !odd_quotes_before(before, prev);
 }
 
 constexpr std::string_view kElectric[] = {"else",
@@ -111,7 +223,8 @@ void electric_indent() {
     const std::string_view head = std::string_view(line).substr(0, E.cx);
     const std::string_view tok = head.substr(indent::leading_ws(head).size());
     const bool closer = tok.size() == 1 && is_closer(tok[0]);
-    if(!closer && std::ranges::find(kElectric, tok) == std::end(kElectric))
+    if(!closer && !indent::is_label(tok) &&
+       std::ranges::find(kElectric, tok) == std::end(kElectric))
         return;
     if(const auto t = indent::from_tree(B.syntax, B.pt, B.eol, E.cy))
         set_line_indent(*t);
@@ -160,15 +273,23 @@ void editor_insert_newline() {
 // typing a printable ascii char in insert mode
 void editor_type_char(int c) {
     const char ch = static_cast<char>(c);
-    const std::string line = E.buf().pt.line_text(E.cy);
+    Buffer& B = E.buf();
+    const std::string line = B.pt.line_text(E.cy);
     const size_t cx = static_cast<size_t>(E.cx);
+    const std::string_view before = std::string_view(line).substr(0, cx);
+    const std::string_view after = std::string_view(line).substr(cx);
     const char prev = cx > 0 ? line[cx - 1] : 0;
     const char next = cx < line.size() ? line[cx] : 0;
-
-    // typing over a closer we (or the user) already put there
-    if((is_closer(ch) || is_quote(ch)) && next == ch) {
-        E.cx++;
-        return;
+    const Lit here = lit_kind(B, cursor_offset(), next);
+    if(next == ch) {
+        const bool skip =
+            is_closer(ch)  ? unclosed_before(B, opener_for(ch), ch, here)
+            : is_quote(ch) ? prev != '\\' && odd_quotes_before(before, ch)
+                           : false;
+        if(skip) {
+            E.cx++;
+            return;
+        }
     }
 
     // electric dedent: a closer on a whitespace-only line pulls back one level
@@ -178,20 +299,27 @@ void editor_type_char(int c) {
         return;
     }
 
-    // only pair when what follows can't be part of the thing we're opening
-    const bool room = next == 0 || next == ' ' || next == '\t' ||
-                      is_closer(next) || next == ',' || next == ';';
+    // only pair when what follows can't be part of the thing we're opening;
+    // another opener counts as room, so foo(|[ pairs
+    const bool room = next == 0 || next == ' ' || next == '\t' || next == ',' ||
+                      next == ';' || is_closer(next) || closer_for(next) != 0;
     if(const char cl = closer_for(ch)) {
-        const bool pair = room && !has_spare_closer(line, ch, cl);
+        // never in strings; fine in code and comments. The spare-closer check
+        // now only looks right of the cursor.
+        const bool pair =
+            room && here != Lit::String &&
+            unmatched_after(after, ch, cl) <= unclosed_before(B, ch, cl, here);
         E.buf().pt.insert(cursor_offset(),
                           pair ? std::string{ch, cl} : std::string{ch});
         E.cx++;
         return;
     }
     if(is_quote(ch)) {
-        const bool apostrophe = ch == '\'' && is_word(prev);  // don't, it's
-        const bool odd = std::count(line.begin(), line.end(), ch) % 2 != 0;
-        const bool pair = room && !apostrophe && prev != ch && !odd;
+        // never in strings or comments, never after a backslash, never when
+        // an odd quote to the left means this one closes something
+        const bool pair = room && here == Lit::None && prev != ch &&
+                          prev != '\\' && !odd_quotes_before(before, ch) &&
+                          can_pair_quote(ch, before, B.syntax.lang());
         if(pair) {
             E.buf().pt.insert(cursor_offset(), std::string{ch, ch});
             E.cx++;
@@ -199,7 +327,7 @@ void editor_type_char(int c) {
         return;
     }
     editor_insert_char(c);
-    if(is_word(ch)) electric_indent();
+    if(is_word(ch) || ch == ':') electric_indent();
 }
 
 void editor_open_below() {
@@ -229,7 +357,10 @@ void editor_delete_char() {
     if(E.cx > 0) {
         const std::string line = E.buf().pt.line_text(E.cy);
         const char next = E.cx < static_cast<int>(line.size()) ? line[E.cx] : 0;
-        if(is_empty_pair(line[E.cx - 1], next)) {  // (|) -> |
+        if(is_empty_pair(
+               line[E.cx - 1],
+               next,
+               std::string_view(line).substr(0, E.cx - 1))) {  // (|) -> |
             E.buf().pt.remove(pos - 1, 2);
             E.cx--;
             return;
@@ -253,10 +384,9 @@ size_t word_back_stop(std::string_view line, size_t pos) {
     };
     size_t i = pos;
     while(i > 0 && cls(i) == 0) --i;
-    while(i > 0) {
-        const int c = cls(i);
-        while(i > 0 && cls(i) == c) --i;
-    }
+    if(i == 0) return 0;
+    const int c = cls(i);
+    while(i > 0 && cls(i) == c) --i;
     return i;
 }
 
@@ -269,6 +399,75 @@ void editor_delete_word_back() {
     const size_t n = static_cast<size_t>(E.cx) - i;
     E.buf().pt.remove(pos - n, n);
     E.cx = i;
+}
+
+void replace_reset() {
+    g_replaced.clear();
+    g_pending.clear();
+}
+
+void replace_char_at_cursor(int count, std::string_view ch) {
+    PieceTable& pt = E.buf().pt;
+    const std::string line = pt.line_text(E.cy);
+    const size_t n = static_cast<size_t>(std::max(count, 1));
+    const size_t start = static_cast<size_t>(E.cx);
+    size_t end = start;
+    for(size_t i = 0; i < n; ++i) {
+        if(end >= line.size()) return;
+        end = utf8_next(line, end);
+    }
+    std::string rep;
+    for(size_t i = 0; i < n; ++i) rep += ch;
+    const size_t at = cursor_offset();
+    PieceTable::Group g(pt);
+    pt.remove(at, end - start);
+    pt.insert(at, rep);
+    E.cx = static_cast<int>(start + rep.size() - ch.size());
+    E.want_rx = cx_to_rx(pt.line_text(E.cy), E.cx);
+}
+
+bool replace_key(int c) {
+    PieceTable& pt = E.buf().pt;
+    if(c == BACKSPACE || c == CTRL_KEY('h')) {
+        g_pending.clear();
+        const std::string line = pt.line_text(E.cy);
+        const size_t cx = static_cast<size_t>(E.cx);
+        const size_t prev = utf8_prev(line, cx);
+        if(g_replaced.empty()) {
+            E.cx = static_cast<int>(prev);
+            return true;
+        }
+        const std::string old = std::move(g_replaced.back());
+        g_replaced.pop_back();
+        E.cx = static_cast<int>(prev);
+        pt.remove(cursor_offset(), cx - prev);
+        if(!old.empty()) pt.insert(cursor_offset(), old);
+        return true;
+    }
+    std::string ch;
+    if(c >= 32 && c < 127) {
+        ch.assign(1, static_cast<char>(c));
+    } else if(c >= 0x80 && c < 0x100) {
+        g_pending += static_cast<char>(c);
+        if(g_pending.size() < utf8_seq_len(g_pending[0])) return true;
+        ch = std::move(g_pending);
+        g_pending.clear();
+    } else {
+        replace_reset();
+        return false;
+    }
+    const std::string line = pt.line_text(E.cy);
+    const size_t cx = static_cast<size_t>(E.cx);
+    std::string old;
+    if(cx < line.size()) {
+        const size_t n = utf8_next(line, cx) - cx;
+        old = line.substr(cx, n);
+        pt.remove(cursor_offset(), n);
+    }
+    g_replaced.push_back(std::move(old));
+    pt.insert(cursor_offset(), ch);
+    E.cx += static_cast<int>(ch.size());
+    return true;
 }
 
 void editor_paste(std::string text) {
@@ -284,7 +483,7 @@ void editor_paste(std::string text) {
     }
     if(s.empty()) return;
     if(E.mode == VISUAL) set_mode(NORMAL);
-    const bool ins = E.mode == INSERT;
+    const bool ins = insertish(E.mode);
     PieceTable::Group g(E.buf().pt);
     size_t at = cursor_offset();
     if(!ins) {

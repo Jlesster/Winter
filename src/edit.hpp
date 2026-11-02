@@ -13,5 +13,8 @@ void editor_open_above();        // O
 void editor_delete_char();       // backspace
 void editor_delete_forward();    // delete
 void editor_delete_word_back();  // ctrl+backspace
-void editor_paste(std::string text);  // bracketed paste
+void editor_paste(std::string text);                          // bracketed paste
+void replace_char_at_cursor(int count, std::string_view ch);  // normal mode r
+void replace_reset();     // forget R's undo state
+bool replace_key(int c);  // true if key handled within R/r
 size_t word_back_stop(std::string_view line, size_t pos);

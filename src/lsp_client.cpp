@@ -1,13 +1,14 @@
 #include "lsp_client.hpp"
 #include <unistd.h>
-#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <format>
 #include <map>
 #include <memory>
+#include <optional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include "job.hpp"
 #include "loop.hpp"
@@ -198,8 +199,48 @@ void send_initialize(Client& c) {
         {{"general",
           Json::obj({{"positionEncodings", Json::arr({"utf-8", "utf-16"})}})},
          {"textDocument",
-          Json::obj({{"synchronization", Json::obj({{"didSave", true}})},
-                     {"publishDiagnostics", Json::obj()}})},
+          Json::obj(
+              {{"synchronization", Json::obj({{"didSave", true}})},
+               {"publishDiagnostics", Json::obj()},
+               {"documentHighlight", Json::obj()},
+               {"semanticTokens",
+                Json::obj(
+                    {{"requests", Json::obj({{"full", true}})},
+                     {"tokenTypes",
+                      Json::arr({"namespace",     "type",       "class",
+                                 "enum",          "interface",  "struct",
+                                 "typeParameter", "parameter",  "variable",
+                                 "property",      "enumMember", "event",
+                                 "function",      "method",     "macro",
+                                 "keyword",       "modifier",   "comment",
+                                 "string",        "number",     "regexp",
+                                 "operator",      "decorator"})},
+                     {"tokenModifiers",
+                      Json::arr({"declaration",
+                                 "definition",
+                                 "readonly",
+                                 "static",
+                                 "deprecated",
+                                 "abstract",
+                                 "async",
+                                 "modification",
+                                 "documentation",
+                                 "defaultLibrary"})},
+                     {"formats", Json::arr({"relative"})}})},
+               {"completion",
+                Json::obj(
+                    {{"completionItem",
+                      Json::obj(
+                          {{"snippetSupport", true},
+                           {"insertReplaceSupport", false},
+                           {"documentationFormat", Json::arr({"plaintext"})},
+                           {"resolveSupport",
+                            Json::obj(
+                                {{"properties",
+                                  Json::arr(
+                                      {"documentation",
+                                       "detail",
+                                       "additionalTextEdits"})}})}})}})}})},
          {"workspace",
           Json::obj({{"configuration", true}, {"workspaceFolders", true}})}});
     Json p;

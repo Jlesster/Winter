@@ -101,6 +101,11 @@ void disable_raw_mode() {
     if(g_caps.cursor_shapes &&
        write(STDOUT_FILENO, "\x1b[0 q", 5) != 5) { /* best effort */
     }
+    constexpr char kResetCursorColor[] = "\x1b]112\x1b\\";
+    if(g_caps.cursor_shapes &&
+       write(STDOUT_FILENO, kResetCursorColor, sizeof kResetCursorColor - 1) <
+           0) { /* best effort */
+    }
     write(STDOUT_FILENO, "\x1b[>4;0m", 7);
     write(STDOUT_FILENO, "\x1b[?2004l", 8);
     if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig) == -1) die("tcsetattr");
@@ -166,6 +171,14 @@ int editor_read_key() {
     int np = 0;
     bool sub = false;
     const auto ctrl = [&](int mod) { return mod > 1 && ((mod - 1) & 4); };
+    const auto plain = [](int mod, int key) -> int {
+        const int bits = mod > 1 ? mod - 1 : 0;
+        if(bits & ~1) return NONE;
+        if(key >= 'a' && key <= 'z') return (bits & 1) ? key - 32 : key;
+        if(key == ' ' || key == '\r' || key == '\t' || key == 127 || key == 27)
+            return key;
+        return NONE;
+    };
     for(int i = 0; i < 16; ++i) {
         if(!next_byte(b)) return '\x1b';
         if(b >= '0' && b <= '9') {
@@ -188,7 +201,7 @@ int editor_read_key() {
                         if(p[0] == 127) return CTRL_BACKSPACE;
                         if(p[0] >= 'a' && p[0] <= 'z') return p[0] & 0x1f;
                     }
-                    break;
+                    return plain(p[1], p[0]);
                 case '~':
                     switch(p[0]) {
                         case 1:
@@ -200,7 +213,7 @@ int editor_read_key() {
                         case 6: return PAGE_DOWN;
                         case 27:
                             if(p[2] == 127 && ctrl(p[1])) return CTRL_BACKSPACE;
-                            break;
+                            return plain(p[1], p[2]);
                         case 200: read_paste(); return PASTE;
                     }
                     break;
@@ -262,6 +275,7 @@ static int cursor_style_for(EditorMode m) {
     switch(m) {
         case EditorMode::INSERT: return decscursr(opts.cursor_insert);
         case EditorMode::VISUAL: return decscursr(opts.cursor_visual);
+        case EditorMode::REPLACE: return decscursr(opts.cursor_replace);
         default: return decscursr(opts.cursor_normal);
     }
 }

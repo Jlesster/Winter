@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -11,11 +12,15 @@
 #include <memory>
 #include <string>
 #include <string_view>
+
 #include "columns.hpp"
 #include "command.hpp"
+#include "comment.hpp"
 #include "core.hpp"
 #include "editor.hpp"
 #include "events.hpp"
+#include "glyphs.hpp"
+#include "inputbox.hpp"
 #include "json.hpp"
 #include "keys.hpp"
 #include "lsp_config.hpp"
@@ -25,6 +30,9 @@
 #include "options.hpp"
 #include "overlay.hpp"
 #include "registry.hpp"
+#include "script_internal.hpp"
+#include "snippet.hpp"
+#include "theme.hpp"
 #include "utf8.hpp"
 #include "virt.hpp"
 
@@ -32,7 +40,6 @@ namespace {
 
 lua_State* g_L = nullptr;
 std::string g_last_error;
-int g_next_anon = 1;
 
 void report(const char* msg) {
     g_last_error = msg ? msg : "(unknown error)";
@@ -66,29 +73,6 @@ bool call(int nargs, int nresults = 0) {
 int ref_function(lua_State* L, int idx) {
     lua_pushvalue(L, idx);
     return luaL_ref(L, LUA_REGISTRYINDEX);
-}
-
-// wrap a Lua function as a C++ Action. It receives {count=, arg=}
-Action make_action(int ref) {
-    return [ref](Ctx& c) {
-        lua_rawgeti(g_L, LUA_REGISTRYINDEX, ref);
-        lua_createtable(g_L, 0, 2);
-        lua_pushinteger(g_L, c.count);
-        lua_setfield(g_L, -2, "count");
-        lua_pushlstring(g_L, c.arg.data(), c.arg.size());
-        lua_setfield(g_L, -2, "arg");
-        call(1);
-    };
-}
-
-bool parse_mode(std::string_view s, EditorMode* out) {
-    if(s == "n" || s == "normal") *out = NORMAL;
-    else if(s == "i" || s == "insert") *out = INSERT;
-    else if(s == "v" || s == "visual") *out = VISUAL;
-    else if(s == "c" || s == "command") *out = COMMAND;
-    else if(s == "s" || s == "search") *out = SEARCH;
-    else return false;
-    return true;
 }
 
 // tostring() of every argument, tab-separated. Used by print and :lua.
@@ -152,165 +136,19 @@ int opt_newindex(lua_State* L) {
     return 0;
 }
 
-int l_map(lua_State* L) {
-    const char* mode = luaL_checkstring(L, 1);
-    const char* keys = luaL_checkstring(L, 2);
-    EditorMode m;
-    if(!parse_mode(mode, &m)) return luaL_error(L, "unknown mode '%s'", mode);
-    if(lua_isfunction(L, 3)) {
-        const int ref = ref_function(L, 3);
-        std::string name = std::format("lua.anon{}", g_next_anon++);
-        registry().add_action(name, make_action(ref));
-        registry().map(m, parse_keys(keys), std::move(name));
-    } else {
-        const char* action = luaL_checkstring(L, 3);
-        registry().map(m, parse_keys(keys), action);
-    }
-    return 0;
-}
-
-int l_unmap(lua_State* L) {
-    const char* mode = luaL_checkstring(L, 1);
-    const char* keys = luaL_checkstring(L, 2);
-    EditorMode m;
-    if(!parse_mode(mode, &m)) return luaL_error(L, "unknown mode '%s'", mode);
-    lua_pushboolean(L, registry().unmap(m, parse_keys(keys)));
-    return 1;
-}
-
-int l_action(lua_State* L) {
-    const char* name = luaL_checkstring(L, 1);
-    luaL_checktype(L, 2, LUA_TFUNCTION);
-    bool wants_char = false;
-    if(lua_istable(L, 3)) {
-        lua_getfield(L, 3, "wants_char");
-        wants_char = lua_toboolean(L, -1);
-        lua_pop(L, 1);
-    }
-    const int ref = ref_function(L, 2);
-    registry().add_action(name, make_action(ref), wants_char);
-    return 0;
-}
-
-int l_run(lua_State* L) {
-    const char* name = luaL_checkstring(L, 1);
-    int count = 0;
-    const char* arg = "";
-    if(lua_istable(L, 2)) {
-        lua_getfield(L, 2, "count");
-        if(lua_isinteger(L, -1)) count = static_cast<int>(lua_tointeger(L, -1));
-        lua_getfield(L, 2, "arg");
-        if(lua_type(L, -1) == LUA_TSTRING) arg = lua_tostring(L, -1);
-    }
-    Ctx ctx{count, arg};
-    lua_pushboolean(L, registry().run_action(name, ctx));
-    return 1;
-}
-
-int l_actions(lua_State* L) {
-    lua_newtable(L);
-    int i = 1;
-    for(const std::string& n : registry().action_names()) {
-        lua_pushlstring(L, n.data(), n.size());
-        lua_rawseti(L, -2, i++);
-    }
-    return 1;
-}
-
-int l_on(lua_State* L) {
-    const char* event = luaL_checkstring(L, 1);
-    luaL_checktype(L, 2, LUA_TFUNCTION);
-    const int ref = ref_function(L, 2);
-    const int id =
-        events_on(event, [ref](const std::vector<std::string>& args) {
-            lua_rawgeti(g_L, LUA_REGISTRYINDEX, ref);
-            for(const std::string& a : args)
-                lua_pushlstring(g_L, a.data(), a.size());
-            call(static_cast<int>(args.size()));
-        });
-    lua_pushinteger(L, id);
-    return 1;
-}
-
-int l_off(lua_State* L) {
-    lua_pushboolean(L, events_off(static_cast<int>(luaL_checkinteger(L, 1))));
-    return 1;
-}
-
-int l_cursor(lua_State* L) {
-    lua_pushinteger(L, E.cy + 1);
-    lua_pushinteger(L, E.cx + 1);
-    return 2;
-}
-
-void place_cursor(lua_Integer line, lua_Integer col) {
-    E.cy = static_cast<int>(
-        std::clamp<lua_Integer>(line - 1, 0, E.num_rows() - 1));
-    const std::string text = E.buf().pt.line_text(E.cy);
-    const int size = static_cast<int>(text.size());
-    int cx = snap_cx(
-        text, static_cast<int>(std::clamp<lua_Integer>(col - 1, 0, size)));
-    if(E.mode != INSERT && cx >= size && size > 0)
-        cx = static_cast<int>(utf8_prev(text, static_cast<size_t>(size)));
-    E.cx = cx;
-    update_want();
-}
-
-int l_set_cursor(lua_State* L) {
-    const lua_Integer line = luaL_checkinteger(L, 1);
-    const lua_Integer col = luaL_optinteger(L, 2, 1);
-    place_cursor(line, col);
-    return 0;
-}
-
-int l_line(lua_State* L) {
-    const lua_Integer n = luaL_optinteger(L, 1, E.cy + 1);
-    if(n < 1 || n > E.num_rows()) {
-        lua_pushnil(L);
-        return 1;
-    }
-    const std::string text = E.buf().pt.line_text(static_cast<size_t>(n - 1));
-    lua_pushlstring(L, text.data(), text.size());
-    return 1;
-}
-
-int l_line_count(lua_State* L) {
-    lua_pushinteger(L, E.num_rows());
-    return 1;
-}
-
-void insert_text(std::string_view text) {
-    std::unique_ptr<PieceTable::Group> group;
-    if(E.mode != INSERT)
-        group = std::make_unique<PieceTable::Group>(E.buf().pt);
-    E.buf().pt.insert(cursor_offset(), text);
-    const auto newlines = std::count(text.begin(), text.end(), '\n');
-    if(newlines == 0) {
-        E.cx += static_cast<int>(text.size());
-    } else {
-        E.cy += static_cast<int>(newlines);
-        E.cx = static_cast<int>(text.size() - (text.rfind('\n') + 1));
-    }
-    if(E.mode != INSERT)
-        set_cursor_offset(motion::clamp_normal(E.buf().pt, cursor_offset()));
-    update_want();
-}
-
-int l_insert(lua_State* L) {
+int l_snippet(lua_State* L) {
     size_t n;
     const char* s = luaL_checklstring(L, 1, &n);
-    insert_text(std::string_view(s, n));
+    lua_pushboolean(L, snippet_expand(std::string_view(s, n)));
+    return 1;
+}
+
+int l_snippet_add(lua_State* L) {
+    size_t tn, bn;
+    const char* t = luaL_checklstring(L, 1, &tn);
+    const char* b = luaL_checklstring(L, 2, &bn);
+    snippet_add(std::string(t, tn), std::string(b, bn));
     return 0;
-}
-
-int l_mode(lua_State* L) {
-    lua_pushstring(L, mode_name(E.mode));
-    return 1;
-}
-
-int l_filename(lua_State* L) {
-    lua_pushlstring(L, E.buf().filename.data(), E.buf().filename.size());
-    return 1;
 }
 
 int l_status(lua_State* L) {
@@ -320,12 +158,31 @@ int l_status(lua_State* L) {
     return 0;
 }
 
-int l_command(lua_State* L) {
-    size_t n;
-    const char* s = luaL_checklstring(L, 1, &n);
-    editor_command_palette(std::string_view(s, n));
+int l_comment(lua_State* L) {
+    const char* lang = luaL_checkstring(L, 1);
+    const char* a = luaL_checkstring(L, 2);
+    const char* b = luaL_optstring(L, 3, nullptr);
+    comment_register(lang,
+                     b ? CommentStyle{"", a, b} : CommentStyle{a, "", ""});
     return 0;
 }
+
+// winter.tree.icons({ lua = "\u{e620}", zig = "\u{e6a9}" })
+int l_tree_icons(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_pushnil(L);
+    while(lua_next(L, 1)) {
+        if(lua_type(L, -2) != LUA_TSTRING || lua_type(L, -1) != LUA_TSTRING)
+            return luaL_error(L, "winter.tree.icons: { ext = \"glyph\", ... }");
+        size_t kn, vn;
+        const char* k = lua_tolstring(L, -2, &kn);
+        const char* v = lua_tolstring(L, -1, &vn);
+        tree_icon_set({k, kn}, {v, vn});
+        lua_pop(L, 1);
+    }
+    return 0;
+}
+const luaL_Reg kTreeLua[] = {{"icons", l_tree_icons}, {nullptr, nullptr}};
 
 int l_print(lua_State* L) {
     const int n = lua_gettop(L);
@@ -359,42 +216,218 @@ int l_lsp(lua_State* L) {
 }
 
 #include "script_deco.inc"
-const luaL_Reg kApi[] = {{"map", l_map},
-                         {"unmap", l_unmap},
-                         {"action", l_action},
-                         {"run", l_run},
-                         {"actions", l_actions},
-                         {"on", l_on},
-                         {"off", l_off},
-                         {"cursor", l_cursor},
-                         {"set_cursor", l_set_cursor},
-                         {"line", l_line},
-                         {"line_count", l_line_count},
-                         {"insert", l_insert},
-                         {"mode", l_mode},
-                         {"filename", l_filename},
-                         {"status", l_status},
-                         {"command", l_command},
-                         {"lsp", l_lsp},
-                         {"ns", l_ns},
-                         {"eol", l_eol},
-                         {"span", l_span},
-                         {"clear_ns", l_clear_ns},
-                         {"float", l_float},
-                         {"float_put", l_float_put},
-                         {"float_clear", l_float_clear},
-                         {"float_close", l_float_close},
-                         {"replace", l_replace},
-                         {nullptr, nullptr}};
+
+bool color_at(lua_State* L, int idx, uint32_t* out) {
+    if(lua_isinteger(L, idx)) {
+        *out = static_cast<uint32_t>(lua_tointeger(L, idx)) & 0xFFFFFF;
+        return true;
+    }
+    if(lua_type(L, idx) != LUA_TSTRING) return false;
+    const char* s = lua_tostring(L, idx);
+    if(s[0] != '#' || std::strlen(s) != 7) return false;
+    char* end = nullptr;
+    const unsigned long v = std::strtoul(s + 1, &end, 16);
+    if(*end != '\0') return false;
+    *out = static_cast<uint32_t>(v);
+    return true;
+}
+
+// winter.theme.set(group, {fg=, bg=, ul=, bold=, italic=, ...})
+// winter.theme.set(group, false)  -- remove the override, back to the default
+int l_theme_set(lua_State* L) {
+    size_t n;
+    const char* g = luaL_checklstring(L, 1, &n);
+    const std::string_view group(g, n);
+    if(lua_isnoneornil(L, 2) || (lua_isboolean(L, 2) && !lua_toboolean(L, 2))) {
+        theme_unset(group);
+        return 0;
+    }
+    const int t = table_arg(L, 2);
+    bool bad = false;
+    const Style st = read_style(L, t, &bad);
+    if(bad)
+        return luaL_error(
+            L, "winter.theme.set: colours are 0xRRGGBB or \"#rrggbb\"");
+    theme_set(group, st);
+    return 0;
+}
+
+// winter.theme.apply({ ["function"] = {...}, ["ui.statusline"] = {...} })
+int l_theme_apply(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_pushnil(L);
+    while(lua_next(L, 1)) {
+        if(lua_type(L, -2) != LUA_TSTRING)
+            return luaL_error(L, "winter.theme.apply: keys are group names");
+        size_t n;
+        const char* g = lua_tolstring(L, -2, &n);
+        const std::string_view group(g, n);
+        if(lua_istable(L, -1)) {
+            bool bad = false;
+            const Style st = read_style(L, lua_gettop(L), &bad);
+            if(bad)
+                return luaL_error(
+                    L, "winter.theme.apply: bad colour in '%s'", g);
+            theme_set(group, st);
+        } else if(lua_isboolean(L, -1) && !lua_toboolean(L, -1)) {
+            theme_unset(group);
+        } else {
+            return luaL_error(
+                L, "winter.theme.apply: '%s' needs a table or false", g);
+        }
+        lua_pop(L, 1);
+    }
+    return 0;
+}
+
+void push_color_field(lua_State* L, const char* key, uint32_t c) {
+    if(c == 0xFFFFFFFF) return;
+    char b[8];
+    std::snprintf(b, sizeof b, "#%06x", c & 0xFFFFFF);
+    lua_pushstring(L, b);
+    lua_setfield(L, -2, key);
+}
+
+void push_flag_field(lua_State* L, const char* key, bool on) {
+    if(!on) return;
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, key);
+}
+
+// winter.theme.get(group) -> the override table, or nil if none is set
+int l_theme_get(lua_State* L) {
+    const auto st = theme_override(luaL_checkstring(L, 1));
+    if(!st) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_newtable(L);
+    push_color_field(L, "fg", st->fg);
+    push_color_field(L, "bg", st->bg);
+    push_color_field(L, "ul", st->ul);
+    push_flag_field(L, "bold", st->attrs & ATTR_BOLD);
+    push_flag_field(L, "dim", st->attrs & ATTR_DIM);
+    push_flag_field(L, "italic", st->attrs & ATTR_ITALIC);
+    push_flag_field(L, "underline", st->attrs & ATTR_UNDERLINE);
+    push_flag_field(L, "undercurl", st->attrs & ATTR_UNDERCURL);
+    push_flag_field(L, "reverse", st->attrs & ATTR_REVERSE);
+    push_flag_field(L, "strikethrough", st->attrs & ATTR_STRIKE);
+    return 1;
+}
+
+// winter.theme.reset(): drop every override and the rainbow palette
+int l_theme_reset(lua_State*) {
+    theme_clear();
+    return 0;
+}
+
+// winter.theme.rainbow({"#f38ba8", 0xfab387, ...}); no argument = built-in
+int l_theme_rainbow(lua_State* L) {
+    if(lua_isnoneornil(L, 1)) {
+        theme_set_rainbow({});
+        return 0;
+    }
+    luaL_checktype(L, 1, LUA_TTABLE);
+    const lua_Integer n = luaL_len(L, 1);
+    uint32_t c = 0;
+    for(lua_Integer i = 1; i <= n; ++i) {  // validate first: nothing to unwind
+        lua_rawgeti(L, 1, i);
+        const bool ok = color_at(L, -1, &c);
+        lua_pop(L, 1);
+        if(!ok)
+            return luaL_error(L,
+                              "winter.theme.rainbow: item %d is not a colour",
+                              static_cast<int>(i));
+    }
+    std::vector<uint32_t> v;
+    for(lua_Integer i = 1; i <= n; ++i) {
+        lua_rawgeti(L, 1, i);
+        color_at(L, -1, &c);
+        lua_pop(L, 1);
+        v.push_back(c);
+    }
+    theme_set_rainbow(std::move(v));
+    return 0;
+}
+
+// winter.theme.groups() -> the built-in ui.* / diag.* group names
+int l_theme_groups(lua_State* L) {
+    lua_newtable(L);
+    lua_Integer i = 1;
+    for(const std::string_view g : theme_ui_groups()) {
+        lua_pushlstring(L, g.data(), g.size());
+        lua_rawseti(L, -2, i++);
+    }
+    return 1;
+}
+
+int l_theme_link(lua_State* L) {
+    size_t n, m;
+    const char* a = luaL_checklstring(L, 1, &n);
+    if(lua_isnoneornil(L, 2) || (lua_isboolean(L, 2) && !lua_toboolean(L, 2))) {
+        theme_unlink({a, n});
+        return 0;
+    }
+    const char* b = luaL_checklstring(L, 2, &m);
+    theme_link({a, n}, {b, m});
+    return 0;
+}
+
+const luaL_Reg kBuf[] = {{"replace", l_replace}, {nullptr, nullptr}};
+const luaL_Reg kUi[] = {
+    {"input", l_input}, {"status", l_status}, {nullptr, nullptr}};
+const luaL_Reg kFloat[] = {{"open", l_float},
+                           {"put", l_float_put},
+                           {"clear", l_float_clear},
+                           {"close", l_float_close},
+                           {"cursor", l_float_cursor},
+                           {nullptr, nullptr}};
+const luaL_Reg kDeco[] = {{"ns", l_ns},
+                          {"span", l_span},
+                          {"eol", l_eol},
+                          {"clear", l_clear_ns},
+                          {nullptr, nullptr}};
+const luaL_Reg kLsp[] = {{"setup", l_lsp}, {nullptr, nullptr}};
+const luaL_Reg kSnippet[] = {
+    {"expand", l_snippet}, {"add", l_snippet_add}, {nullptr, nullptr}};
+const luaL_Reg kLang[] = {{"comment", l_comment}, {nullptr, nullptr}};
+const luaL_Reg kTheme[] = {{"set", l_theme_set},
+                           {"apply", l_theme_apply},
+                           {"get", l_theme_get},
+                           {"reset", l_theme_reset},
+                           {"rainbow", l_theme_rainbow},
+                           {"groups", l_theme_groups},
+                           {"link", l_theme_link},
+                           {nullptr, nullptr}};
 
 }  // namespace
+
+lua_State* script_state() { return g_L; }
+
+bool script_call(int nargs, int nresults) { return call(nargs, nresults); }
+
+void script_register(const char* group, const luaL_Reg* funcs) {
+    const int base = lua_gettop(g_L);
+    lua_getglobal(g_L, "winter");
+    if(group) {
+        lua_getfield(g_L, -1, group);
+        if(!lua_istable(g_L, -1)) {
+            lua_pop(g_L, 1);
+            lua_newtable(g_L);
+            lua_pushvalue(g_L, -1);
+            lua_setfield(g_L, -3, group);
+        }
+    }
+    luaL_setfuncs(g_L, funcs, 0);
+    lua_settop(g_L, base);
+}
 
 bool script_init() {
     g_L = luaL_newstate();
     if(!g_L) return false;
     luaL_openlibs(g_L);
 
-    luaL_newlib(g_L, kApi);
+    lua_newtable(g_L);  // winter
     lua_newtable(g_L);
     lua_newtable(g_L);
     lua_pushcfunction(g_L, opt_index);
@@ -406,6 +439,18 @@ bool script_init() {
     lua_pushstring(g_L, WINTER_VERSION);
     lua_setfield(g_L, -2, "version");
     lua_setglobal(g_L, "winter");
+
+    script_register("buf", kBuf);
+    script_register("ui", kUi);
+    script_register("float", kFloat);
+    script_register("deco", kDeco);
+    script_register("lsp", kLsp);
+    script_register("snippet", kSnippet);
+    script_register("lang", kLang);
+    script_register("theme", kTheme);
+    script_register("tree", kTreeLua);
+    script_open_buf();
+    script_open_ext();
 
     lua_pushcfunction(g_L, l_print);
     lua_setglobal(g_L, "print");

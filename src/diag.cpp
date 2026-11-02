@@ -8,6 +8,7 @@
 #include "editor.hpp"
 #include "options.hpp"
 #include "piece.hpp"
+#include "theme.hpp"
 #include "utf8.hpp"
 #include "virt.hpp"
 
@@ -73,13 +74,13 @@ void diag_spans(const std::vector<Diag>& v, size_t ls, size_t len,
         if(e <= ls) continue;
         const size_t lo = std::max(d.start, ls) - ls, hi = std::min(e, le) - ls;
         if(hi > lo) {
-            out.push_back({lo,
-                           hi,
-                           kPrioDiag - d.severity,
-                           Style{.attrs = static_cast<uint16_t>(
-                                     opts.diag_undercurl ? ATTR_UNDERCURL
-                                                         : ATTR_UNDERLINE),
-                                 .ul = diag_color(d.severity)}});
+            Style us = theme_ui(
+                "diag.underline",
+                Style{.attrs = static_cast<uint16_t>(opts.diag_undercurl
+                                                         ? ATTR_UNDERCURL
+                                                         : ATTR_UNDERLINE)});
+            if(us.ul == 0xFFFFFFFF) us.ul = diag_color(d.severity);
+            out.push_back({lo, hi, kPrioDiag - d.severity, us});
         }
     }
 }
@@ -112,10 +113,10 @@ std::string diag_summary(const std::vector<Diag>& v) {
 
 uint32_t diag_color(int sev) {
     switch(sev) {
-        case 1: return 0xf38ba8;
-        case 2: return 0xf9e2af;
-        case 3: return 0x89dceb;
-        default: return 0x94e2d5;
+        case 1: return theme_fg("diag.error", 0xf38ba8);
+        case 2: return theme_fg("diag.warn", 0xf9e2af);
+        case 3: return theme_fg("diag.info", 0x89dceb);
+        default: return theme_fg("diag.hint", 0x94e2d5);
     }
 }
 

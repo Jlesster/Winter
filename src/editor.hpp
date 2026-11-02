@@ -9,12 +9,21 @@
 
 #include "core.hpp"
 #include "diag.hpp"
+#include "edit_bus.hpp"
 #include "piece.hpp"
 #include "syntax.hpp"
 #include "virt.hpp"
 
 // data
 struct Buffer {
+    Buffer() {
+        pt.set_edit_sink([this](const TextEdit& e, Origin o) {
+            syntax.on_edit(e);
+            edit_emit(make_event(pt, e, o));
+        });
+        pt.set_group_end_sink([] { edit_group_end(); });
+    }
+    Buffer(const Buffer&) = delete;
     PieceTable pt{};
     Syntax syntax{};
     std::vector<Diag> diags{};
@@ -43,6 +52,7 @@ struct EditorConfig {
     int rx = 0;
     int want_rx = 0;  // goal column for j/k (INT_MAX = stick to line end)
     int row_offset = 0;
+    int row_sub = 0; //wrap visible screen row within row offset
     int col_offset = 0;
     int term_rows = 0;
     int term_cols = 0;

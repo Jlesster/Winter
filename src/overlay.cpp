@@ -4,7 +4,10 @@
 #include <vector>
 
 #include "columns.hpp"
+#include "glyphs.hpp"
+#include "theme.hpp"
 #include "utf8.hpp"
+#include "virt.hpp"
 
 namespace {
 
@@ -34,11 +37,35 @@ std::vector<OverlayId> top_down() {
     return ids;
 }
 
+void paint_frame(const Overlay& o) {
+    const OverlaySpec& s = o.spec;
+    if(!s.framed || s.w < 2 || s.h < 2) return;
+    const BorderSet& b = border_set(s.border.value_or(opts.border));
+    const int W = s.w, H = s.h;
+    const Style bst = s.border_style == Style{}
+                          ? theme_ui("ui.float.border", Style{})
+                          : s.border_style;
+    const auto put = [&](int x, int y, std::string_view g) {
+        overlay_put(o.id, x, y, g, bst);
+    };
+    for(int x = 1; x < W - 1; ++x) put(x, 0, b.t), put(x, H - 1, b.b);
+    for(int y = 1; y < H - 1; ++y) put(0, y, b.l), put(W - 1, y, b.r);
+    put(0, 0, b.lt);
+    put(W - 1, 0, b.tr);
+    put(0, H - 1, b.bl);
+    put(W - 1, H - 1, b.br);
+}
+
 }  // namespace
 
 Rect overlay_place(const OverlaySpec& s, const Viewport& v) {
     Rect r{0, 0, std::min(s.w, v.cols), s.h};
     const int limit = s.cover_bars ? v.rows : v.text_rows;
+    if(s.at == OverlaySpec::At::Center) {
+        r.x = std::max(0, (v.cols - r.w) / 2) + s.x;
+        r.y = std::max(0, (limit - r.h) / 3) + s.y;
+        return r;
+    }
     if(s.at == OverlaySpec::At::Screen) {
         r.x = s.x;
         r.y = s.y;
@@ -56,6 +83,7 @@ Rect overlay_place(const OverlaySpec& s, const Viewport& v) {
 OverlayId overlay_open(OverlaySpec spec) {
     spec.w = std::max(spec.w, 1);
     spec.h = std::max(spec.h, 1);
+    if(spec.modal) spec.dismiss_on_move = false;
     Overlay o{g_next++, std::move(spec), {}, overlay_stamp()};
     o.cells.assign(static_cast<size_t>(o.spec.w) * o.spec.h, Cell{});
     g_ov.push_back(std::move(o));
@@ -75,6 +103,31 @@ void overlay_close_all() {
 }
 
 bool overlay_any() { return !g_ov.empty(); }
+
+bool overlay_modal() {
+    for(const Overlay& o : g_ov)
+        if(o.spec.modal && o.spec.visible) return true;
+    return false;
+}
+
+void overlay_set_cursor(OverlayId id, int x, int y) {
+    if(Overlay* o = find(id)) o->spec.cursor_x = x, o->spec.cursor_y = y;
+}
+
+bool overlay_cursor(const Viewport& v, int& sx, int& sy) {
+    for(const OverlayId id : top_down()) {
+        const Overlay* o = find(id);
+        if(!o || !o->spec.visible || o->spec.cursor_x < 0 ||
+           o->spec.cursor_y < 0)
+            continue;
+        const Rect r = overlay_place(o->spec, v);
+        if(o->spec.cursor_x >= r.w || o->spec.cursor_y >= r.h) continue;
+        sx = r.x + o->spec.cursor_x;
+        sy = r.y + o->spec.cursor_y;
+        return true;
+    }
+    return false;
+}
 
 void overlay_clear(OverlayId id, Style bg) {
     if(Overlay* o = find(id))
@@ -108,10 +161,20 @@ int overlay_put(OverlayId id, int x, int y, std::string_view s, Style st) {
 bool overlay_key(int c) {
     for(const OverlayId id : top_down()) {
         Overlay* o = find(id);
-        if(!o || !o->spec.on_key) continue;
-        const auto fn =
-            o->spec.on_key;  // copy: the handler may close its own overlay
-        if(fn(c)) return true;
+        if(!o) continue;
+        const bool modal = o->spec.modal && o->spec.visible;
+        if(o->spec.on_key) {
+            const auto fn = o->spec.on_key;
+            if(fn(c)) return true;
+        }
+        if(modal) {
+            const Overlay* m = find(id);
+            if(!m) return true;
+            if(std::ranges::find(m->spec.pass, c) != m->spec.pass.end())
+                return false;
+            if(c == '\x1b' && m->spec.esc_closes) overlay_close(id);
+            return true;
+        }
     }
     if(c == '\x1b')
         for(const OverlayId id : top_down())
@@ -128,11 +191,19 @@ void overlay_tick() {
             overlay_close(id);
 }
 
-void overlay_draw(Screen& scr, const Viewport& v) {
+void overlay_draw(Screen& scr, const Viewport& v, bool prompt_active) {
     std::vector<OverlayId> ids = top_down();
+    const std::optional<Style> flt = theme_override("ui.float");
     for(auto it = ids.rbegin(); it != ids.rend(); ++it) {  // bottom first
         const Overlay* o = find(*it);
         if(!o || !o->spec.visible) continue;
+        if(prompt_active && !o->spec.show_in_prompt) continue;
+        if(const auto paint = o->spec.on_paint) {
+            paint(*it);
+            o = find(*it);
+            if(!o) continue;
+        }
+        paint_frame(*o);
         const Rect r = overlay_place(o->spec, v);
         const int limit = o->spec.cover_bars ? v.rows : v.text_rows;
         for(int row = 0; row < r.h; ++row) {
@@ -143,6 +214,11 @@ void overlay_draw(Screen& scr, const Viewport& v) {
                 const int sx = r.x + col;
                 if(sx < 0 || sx >= v.cols || sx >= scr.width()) continue;
                 Cell c = o->cells[static_cast<size_t>(row) * o->spec.w + col];
+                if(flt) {
+                    Style fs = *flt;
+                    style_patch(fs, c.style);
+                    c.style = fs;
+                }
                 // never leave half of a wide char at the overlay's edge
                 const bool right_clipped = sx + 1 >= v.cols || col + 1 >= r.w;
                 if((c.width == 2 && right_clipped) ||

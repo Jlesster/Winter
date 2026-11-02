@@ -243,3 +243,23 @@ std::optional<int> Syntax::indent_for(size_t line) const {
     }
     return std::max(indent, 0);
 }
+
+Syntax::LitSpan Syntax::literal_at(size_t byte) const {
+    if(!_tree) return {};
+    TSNode n =
+        ts_node_descendant_for_byte_range(ts_tree_root_node(_tree),
+                                          static_cast<uint32_t>(byte),
+                                          static_cast<uint32_t>(byte + 1));
+    for(int up = 0; up < 3 && !ts_node_is_null(n);
+        ++up, n = ts_node_parent(n)) {
+        const std::string_view t = ts_node_type(n);
+        Lit k = Lit::None;
+        if(t.contains("comment")) k = Lit::Comment;
+        else if(t.contains("string") || t.contains("char_literal") ||
+                t.contains("character_literal") || t == "character")
+            k = Lit::String;
+        if(k != Lit::None)
+            return {k, ts_node_start_byte(n), ts_node_end_byte(n)};
+    }
+    return {};
+}

@@ -1,4 +1,4 @@
-PHONY: clean run compile test all
+PHONY: clean run compile test install all
 
 all:
 

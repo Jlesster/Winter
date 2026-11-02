@@ -26,12 +26,21 @@ public:
     void parse(const PieceTable& pt, bool trailing_nl);
     std::string summary() const;
 
+    void on_edit(const TextEdit& e);
     void update(PieceTable& pt, bool trailing_nl);
     const std::vector<Span>& line_spans(size_t ls, size_t len);
 
     void rainbow_prepare(size_t lo, size_t hi);
 
     std::optional<int> indent_for(size_t line) const;
+
+    enum class Lit { None, Comment, String };
+    struct LitSpan {
+        Lit kind = Lit::None;
+        size_t start = 0, end = 0;
+    };
+    LitSpan literal_at(size_t byte) const;
+    void restyle();
 
 private:
     struct Pred {
@@ -75,26 +84,26 @@ private:
     void rb_emit(size_t s, size_t e, size_t depth);
     std::vector<Span> compute_spans(size_t ls, size_t len);
 
-    bool _nl = true;
-    uint64_t _seen_rev = ~0ULL;
-
-    TSQuery* _query = nullptr;
-    TSQueryCursor* _qc = nullptr;
-    const PieceTable* _pt = nullptr;
-    TSParser* _parser = nullptr;
-    TSTree* _tree = nullptr;
-
     static constexpr size_t kSpanCacheCap = 4096;
 
-    TSQuery* _iquery = nullptr;
-    std::vector<std::vector<Pred>> _ipreds;
-    std::vector<Meta> _imeta;
-    std::vector<std::vector<Pred>> _preds;
-    std::vector<std::optional<Style>> _cap_style;
-    std::map<size_t, CacheLine> _span_cache;
+    bool _nl = true;
+    bool _edited = false;
+    size_t _rb_lo = 0, _rb_hi = 0;
     std::string _err;
     std::string_view _name{};
+    uint64_t _seen_rev = ~0ULL;
+    TSQuery* _query = nullptr;
+    TSQueryCursor* _qc = nullptr;
+    TSParser* _parser = nullptr;
+    TSTree* _tree = nullptr;
+    TSQuery* _iquery = nullptr;
+    std::vector<Meta> _imeta;
     std::vector<Delim> _rb;
     std::vector<Span> _merged;
-    size_t _rb_lo = 0, _rb_hi = 0;
+    std::vector<std::vector<Pred>> _preds;
+    std::vector<std::optional<Style>> _cap_style;
+    std::vector<std::vector<Pred>> _ipreds;
+    std::map<size_t, CacheLine> _span_cache;
+    const PieceTable* _pt = nullptr;
 };
+std::optional<Style> syntax_theme(std::string_view capture);

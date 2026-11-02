@@ -9,6 +9,8 @@
 #include "loop.hpp"
 #include "render.hpp"
 #include "script.hpp"
+#include "snippet.hpp"
+#include "src/tree.hpp"
 #include "terminal.hpp"
 
 void init_editor() {
@@ -24,6 +26,7 @@ void init_editor() {
     int rows, cols;
     if(get_window_size(&rows, &cols) == -1) die("get_window_size");
     render_resize(rows, cols);
+    snippet_init();
 }
 
 int main(int argc, const char* argv[]) {

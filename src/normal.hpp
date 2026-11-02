@@ -7,6 +7,7 @@
 void normal_feed(int c);  // feed one key; everything in normal mode goes here
 void normal_reset();      // drop pending count / chord
 bool normal_chord_pending();  // chord waiting
+bool normal_input_pending();  // input waiting
 void normal_chord_timeout();  // resolve or timeout waiting chord
 
 void apply_motion(const Target& t);  // move the cursor (and goal column)

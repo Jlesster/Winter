@@ -6,7 +6,18 @@
 #include <cstdlib>
 #include <format>
 #include <iterator>
+#include "theme.hpp"
 #include "utf8.hpp"
+
+static Style under(const Style& base, const Style& s) {
+    constexpr uint32_t none = 0xFFFFFFFF;
+    Style o = base;
+    if(s.fg != none) o.fg = s.fg;
+    if(s.bg != none) o.bg = s.bg;
+    if(s.ul != none) o.ul = s.ul;
+    o.attrs = static_cast<uint16_t>(o.attrs | s.attrs);
+    return o;
+}
 
 static void emit_sgr(std::string& out, const Style& s) {
     out += "\x1b[0";
@@ -16,6 +27,7 @@ static void emit_sgr(std::string& out, const Style& s) {
     if(s.attrs & ATTR_UNDERCURL) out += ";4:3";
     else if(s.attrs & ATTR_UNDERLINE) out += ";4";
     if(s.attrs & ATTR_REVERSE) out += ";7";
+    if(s.attrs & ATTR_STRIKE) out += ";9";
     if(s.fg != 0xFFFFFFFF)
         std::format_to(std::back_inserter(out),
                        ";38;2;{};{};{}",
@@ -107,6 +119,8 @@ void Screen::try_scroll() {
 void Screen::flush() {
     out.clear();
     out += "\x1b[?2026h\x1b[?25l";
+    if(const auto base = theme_override("ui.normal"))
+        for(Cell& c : back) c.style = under(*base, c.style);
     if(scroll_rows > 0) try_scroll();
     int cx = -1, cy = -1;
     Style cur{};

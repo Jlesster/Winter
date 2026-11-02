@@ -7,6 +7,7 @@
 #include "normal.hpp"
 #include "options.hpp"
 #include "prompt.hpp"
+#include "theme.hpp"
 
 namespace {
 struct Pos {
@@ -54,6 +55,7 @@ void jump_to(Pos p) {
     E.cy = p.line;
     E.cx = p.col;
     if(off) E.row_offset = std::max(p.line - E.term_rows / 2, 0);
+    E.row_sub = 0;
     update_want();
 }
 
@@ -62,6 +64,7 @@ void restore_origin() {
     E.cy = g_origin.cy;
     E.col_offset = g_origin.col_offset;
     E.row_offset = g_origin.row_offset;
+    E.row_sub = 0;
 }
 
 void find_callback(std::string query, int key) {
@@ -127,11 +130,11 @@ void search_spans(int line, std::string_view text, std::vector<LineSpan>& out) {
     for(size_t at = text.find(g_hl); at != std::string_view::npos && n < 512;
         at = text.find(g_hl, at + g_hl.size()), ++n) {
         const bool cur = line == E.cy && static_cast<int>(at) == E.cx;
-        Style st{.bg = cur ? kSearchCurBg : kSearchBg};
-        if(cur) {
-            st.fg = kSearchCurFg;
-            st.attrs = ATTR_BOLD;
-        }
+        const Style st = cur ? theme_ui("ui.search.current",
+                                        Style{.fg = kSearchCurFg,
+                                              .bg = kSearchCurBg,
+                                              .attrs = ATTR_BOLD})
+                             : theme_ui("ui.search", Style{.bg = kSearchBg});
         out.push_back({at, at + g_hl.size(), kPrioSearch, st});
     }
 }

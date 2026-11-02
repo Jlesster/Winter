@@ -41,6 +41,7 @@ void switch_to(size_t idx) {
     E.cy = to.cy;
     E.want_rx = to.want_rx;
     E.row_offset = to.row_offset;
+    E.row_sub = 0;
     E.col_offset = to.col_offset;
     events_emit("buf_enter", {to.filename});
 }

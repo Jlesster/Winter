@@ -16,7 +16,15 @@ void Registry::add_action(std::string name, Action fn, bool wants_char) {
 bool Registry::run_action(std::string_view name, Ctx& ctx) const {
     const auto it = actions_.find(name);
     if(it == actions_.end()) return false;
-    it->second.fn(ctx);
+    const Action fn = it->second.fn;
+    fn(ctx);
+    return true;
+}
+
+bool Registry::remove_action(std::string_view name) {
+    const auto it = actions_.find(name);
+    if(it == actions_.end()) return false;
+    actions_.erase(it);
     return true;
 }
 

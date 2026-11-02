@@ -13,6 +13,7 @@
 #include "options.hpp"
 #include "parser.hpp"
 #include "piece.hpp"
+#include "theme.hpp"
 
 #define X(n) extern "C" const TSLanguage* tree_sitter_##n();
 WINTER_TS_LANGS(X)
@@ -132,10 +133,37 @@ const std::unordered_map<std::string_view, Style> kTheme = {
     {"operator", {.fg = SKY}},
     {"punctuation", {.fg = OV2}},
     {"comment", {.fg = OV0, .attrs = ATTR_ITALIC}},
+    {"variable.member", {.fg = LAV}},
+    {"keyword.directive", {.fg = PINK}},  // C/C++ #include, #define
+    {"function.macro", {.fg = MAUVE}},
+    {"string.regexp", {.fg = PEACH}},
+    {"string.special", {.fg = SAPPH}},
+    {"string.special.url", {.fg = SAPPH, .attrs = ATTR_UNDERLINE}},
+    {"character.special", {.fg = PINK}},
+    {"comment.error", {.fg = RED, .attrs = ATTR_BOLD}},
+    {"comment.warning", {.fg = YELLOW, .attrs = ATTR_BOLD}},
+    {"comment.todo", {.fg = BLUE, .attrs = ATTR_BOLD}},
+    {"comment.note", {.fg = BLUE, .attrs = ATTR_BOLD}},
+    {"tag", {.fg = MAUVE}},
+    {"tag.attribute", {.fg = YELLOW}},
+    {"tag.delimiter", {.fg = SKY}},
+    {"markup.heading", {.fg = BLUE, .attrs = ATTR_BOLD}},
+    {"markup.strong", {.attrs = ATTR_BOLD}},
+    {"markup.italic", {.attrs = ATTR_ITALIC}},
+    {"markup.strikethrough", {.attrs = ATTR_STRIKE}},
+    {"markup.link", {.fg = LAV, .attrs = ATTR_UNDERLINE}},
+    {"markup.link.url", {.fg = SAPPH, .attrs = ATTR_UNDERLINE}},
+    {"markup.raw", {.fg = GREEN}},
+    {"markup.list", {.fg = MAUVE}},
+    {"markup.quote", {.fg = OV2, .attrs = ATTR_ITALIC}},
+    {"diff.plus", {.fg = GREEN}},
+    {"diff.minus", {.fg = RED}},
+    {"diff.delta", {.fg = YELLOW}},
 };
 
 std::optional<Style> theme_for(std::string_view cap) {
     while(!cap.empty()) {
+        if(const auto u = theme_override(cap)) return u;
         if(const auto it = kTheme.find(cap); it != kTheme.end())
             return it->second;
         const auto dot = cap.rfind('.');
@@ -326,6 +354,16 @@ bool Syntax::load_query(const TSLanguage* lang, std::string_view name) {
     return true;
 }
 
+void Syntax::restyle() {
+    if(_query)
+        for(uint32_t i = 0; i < _cap_style.size(); ++i) {
+            uint32_t n;
+            const char* c = ts_query_capture_name_for_id(_query, i, &n);
+            _cap_style[i] = theme_for({c, n});
+        }
+    _span_cache.clear();
+}
+
 bool Syntax::load_indent_query(const TSLanguage* lang, std::string_view name) {
     if(_iquery) ts_query_delete(_iquery);
     _iquery = nullptr;
@@ -500,33 +538,34 @@ void Syntax::drop_tree() {
     _tree = nullptr;
 }
 
+void Syntax::on_edit(const TextEdit& e) {
+    if(!_tree) return;
+    const auto pt32 = [](const LineCol& p) {
+        return TSPoint{static_cast<uint32_t>(p.line),
+                       static_cast<uint32_t>(p.col)};
+    };
+    const TSInputEdit ie{static_cast<uint32_t>(e.start),
+                         static_cast<uint32_t>(e.old_end),
+                         static_cast<uint32_t>(e.new_end),
+                         pt32(e.start_pt),
+                         pt32(e.old_end_pt),
+                         pt32(e.new_end_pt)};
+    ts_tree_edit(_tree, &ie);
+    cache_apply_edit(e);
+    _edited = true;
+}
+
 void Syntax::update(PieceTable& pt, bool trailing_nl) {
     _pt = &pt;
-    const std::vector<TextEdit> edits = pt.drain_edits();
-    if(_name.empty()) return;
+    pt.drain_edits();
+    if(_name.empty()) {
+        _edited = false;
+        return;
+    }
 
     if(_tree && trailing_nl != _nl) drop_tree();
-    if(pt.revision() != _seen_rev && edits.empty()) drop_tree();
-
-    for(const TextEdit& e : edits) {
-        if(!_tree) break;
-        if(e.reset) {
-            drop_tree();
-            break;
-        }
-        const auto pt32 = [](const LineCol& p) {
-            return TSPoint{static_cast<uint32_t>(p.line),
-                           static_cast<uint32_t>(p.col)};
-        };
-        const TSInputEdit ie{static_cast<uint32_t>(e.start),
-                             static_cast<uint32_t>(e.old_end),
-                             static_cast<uint32_t>(e.new_end),
-                             pt32(e.start_pt),
-                             pt32(e.old_end_pt),
-                             pt32(e.new_end_pt)};
-        ts_tree_edit(_tree, &ie);
-        cache_apply_edit(e);
-    }
+    if(pt.revision() != _seen_rev && !_edited) drop_tree();
+    _edited = false;
     if(pt.revision() == _seen_rev) return;
     parse(pt, trailing_nl);
 }
@@ -630,9 +669,12 @@ const std::vector<Span>& Syntax::line_spans(size_t ls, size_t len) {
     auto it = std::ranges::lower_bound(_rb, ls, {}, &Delim::byte);
     if(it == _rb.end() || it->byte >= ls + len) return base;
     _merged = base;
+    const std::span<const uint32_t> user = theme_rainbow();
     for(; it != _rb.end() && it->byte < ls + len; ++it)
-        paint(
-            _merged, it->byte - ls, kRainbow[it->depth % std::size(kRainbow)]);
+        paint(_merged,
+              it->byte - ls,
+              user.empty() ? kRainbow[it->depth % std::size(kRainbow)]
+                           : user[it->depth % user.size()]);
     return _merged;
 }
 
@@ -698,4 +740,8 @@ std::string Syntax::summary() const {
                                   std::string_view(s).substr(0, 160));
     free(s);
     return out;
+}
+
+std::optional<Style> syntax_theme(std::string_view capture) {
+    return theme_for(capture);
 }
