@@ -14,6 +14,7 @@
 #include "parser.hpp"
 #include "piece.hpp"
 #include "theme.hpp"
+#include "virt.hpp"
 
 #define X(n) extern "C" const TSLanguage* tree_sitter_##n();
 WINTER_TS_LANGS(X)
@@ -81,9 +82,10 @@ std::string_view query_src(std::string_view n) {
     return {};
 }
 
-std::string query_text(std::string_view n) {
-    if(const auto s = query_src(n); !s.empty()) return std::string(s);
-    return parser_query(n);
+std::string query_text(std::string_view n,
+                       std::string_view kind = "highlights") {
+    if(auto s = parser_query(n, kind); !s.empty()) return s;
+    return kind == "highlights" ? std::string(query_src(n)) : std::string{};
 }
 
 std::string indent_text(std::string_view n) {
@@ -161,7 +163,12 @@ const std::unordered_map<std::string_view, Style> kTheme = {
     {"diff.delta", {.fg = YELLOW}},
 };
 
-std::optional<Style> theme_for(std::string_view cap) {
+std::optional<Style> theme_for(std::string_view cap,
+                               std::string_view lang = {}) {
+    if(!lang.empty())
+        if(const auto u =
+               theme_override(std::string(cap) + "." + std::string(lang)))
+            return u;
     while(!cap.empty()) {
         if(const auto u = theme_override(cap)) return u;
         if(const auto it = kTheme.find(cap); it != kTheme.end())
@@ -197,22 +204,67 @@ void paint(std::vector<Span>& v, size_t x, uint32_t fg) {
 
 std::string lua_to_ecma(std::string_view p) {
     std::string o;
+    bool in_set = false;
     for(size_t i = 0; i < p.size(); ++i) {
-        if(p[i] != '%' || i + 1 == p.size()) {
-            o += p[i];
+        const char c = p[i];
+        if(c == '%' && i + 1 < p.size()) {
+            switch(const char k = p[++i]) {
+                case 'a': o += in_set ? "A-Za-z" : "[A-Za-z]"; break;
+                case 'l': o += in_set ? "a-z" : "[a-z]"; break;
+                case 'u': o += in_set ? "A-Z" : "[A-Z]"; break;
+                case 'w': o += in_set ? "A-Za-z0-9" : "[A-Za-z0-9]"; break;
+                case 'd': o += "\\d"; break;
+                case 's': o += "\\s"; break;
+                default: o += '\\'; o += k;
+            }
             continue;
         }
-        switch(const char c = p[++i]) {
-            case 'a': o += "[A-Za-z]"; break;
-            case 'd': o += "\\d"; break;
-            case 'l': o += "[a-z]"; break;
-            case 'u': o += "[A-Z]"; break;
-            case 'w': o += "[A-Za-z0-9]"; break;
-            case 's': o += "\\s"; break;
-            default: o += '\\'; o += c;
-        }
+        if(c == '[') in_set = true;
+        else if(c == ']') in_set = false;
+        o += c;
     }
     return o;
+}
+
+// (B) helpers
+using MetaV = std::vector<std::pair<std::string, std::string>>;
+std::string meta_get(const MetaV& m, std::string_view k) {
+    for(const auto& [a, b] : m)
+        if(a == k) return b;
+    return {};
+}
+bool meta_has(const MetaV& m, std::string_view k) {
+    return std::ranges::any_of(m,
+                               [&](const auto& kv) { return kv.first == k; });
+}
+std::string_view capture_name(const TSQuery* q, uint32_t id) {
+    uint32_t n;
+    const char* c = ts_query_capture_name_for_id(q, id, &n);
+    return {c, n};
+}
+const TSLanguage* lang_by_name(std::string_view lang) {
+    for(const auto& l : kLangs)
+        if(l.name == lang) return l.fn();
+    return parser_load(lang);
+}
+std::string normalize_lang(std::string s) {
+    for(char& c : s)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    static constexpr std::pair<std::string_view, std::string_view> kAlias[] = {
+        {"sh", "bash"},
+        {"shell", "bash"},
+        {"zsh", "bash"},
+        {"js", "javascript"},
+        {"ts", "typescript"},
+        {"py", "python"},
+        {"c++", "cpp"},
+        {"cs", "c_sharp"},
+        {"yml", "yaml"},
+        {"rs", "rust"},
+        {"md", "markdown"}};
+    for(const auto& [a, b] : kAlias)
+        if(s == a) return std::string(b);
+    return s;
 }
 
 const char* ts_read(void* payload, uint32_t byte, TSPoint, uint32_t* n) {
@@ -238,6 +290,7 @@ Syntax::Syntax()
       _parser(ts_parser_new()) {}
 
 Syntax::~Syntax() {
+    free_layers();
     if(_iquery) ts_query_delete(_iquery);
     if(_query) ts_query_delete(_query);
     ts_query_cursor_delete(_qc);
@@ -264,6 +317,7 @@ std::string_view Syntax::detect(std::string_view path) {
 
 void Syntax::detach() {
     drop_tree();
+    free_layers();
     if(_iquery) ts_query_delete(_iquery);
     _iquery = nullptr;
     _ipreds.clear();
@@ -319,6 +373,11 @@ void Syntax::parse(const PieceTable& pt, bool trailing_nl) {
     _tree = t;
     _nl = trailing_nl;
     _seen_rev = pt.revision();
+    free_layers();
+    if(_tree)
+        if(LangHl* hl = hl_for(_name))
+            collect(ts_tree_root_node(_tree), *hl, 1, _layers);
+    _span_cache.clear();
 }
 
 bool Syntax::load_query(const TSLanguage* lang, std::string_view name) {
@@ -332,7 +391,8 @@ bool Syntax::load_query(const TSLanguage* lang, std::string_view name) {
     };
     std::string own = query_text(name), full;
     for(const auto& [from, base] : kInherits)
-        if(from == name) { full = query_text(base) + "\n"; }
+        if(from == name && !own.contains("; inherits:"))
+            full = query_text(base) + "\n";
     full += own;
     uint32_t off = 0;
     TSQueryError et{};
@@ -348,7 +408,7 @@ bool Syntax::load_query(const TSLanguage* lang, std::string_view name) {
     for(uint32_t i = 0; i < _cap_style.size(); ++i) {
         uint32_t n;
         const char* c = ts_query_capture_name_for_id(_query, i, &n);
-        _cap_style[i] = theme_for({c, n});
+        _cap_style[i] = theme_for({c, n}, _name);
     }
     build_preds(_query, _preds, nullptr);
     return true;
@@ -359,9 +419,117 @@ void Syntax::restyle() {
         for(uint32_t i = 0; i < _cap_style.size(); ++i) {
             uint32_t n;
             const char* c = ts_query_capture_name_for_id(_query, i, &n);
-            _cap_style[i] = theme_for({c, n});
+            _cap_style[i] = theme_for({c, n}, _name);
         }
     _span_cache.clear();
+}
+
+void Syntax::free_layers() {
+    for(Layer& L : _layers) {
+        if(L.tree) ts_tree_delete(L.tree);
+        if(L.parser) ts_parser_delete(L.parser);
+    }
+    _layers.clear();
+}
+
+Syntax::LangHl* Syntax::hl_for(std::string_view lang) {
+    static std::map<std::string, LangHl, std::less<>> g_hl;
+    auto it = g_hl.find(lang);
+    if(it == g_hl.end()) {
+        LangHl h;
+        if(const TSLanguage* tl = lang_by_name(lang)) {
+            const std::string src = query_text(lang);
+            uint32_t off = 0;
+            TSQueryError et{};
+            h.q = ts_query_new(
+                tl, src.data(), static_cast<uint32_t>(src.size()), &off, &et);
+            if(h.q) build_preds(h.q, h.preds, nullptr);
+            const std::string isrc = query_text(lang, "injections");
+            if(!isrc.empty()) {
+                h.inj = ts_query_new(tl,
+                                     isrc.data(),
+                                     static_cast<uint32_t>(isrc.size()),
+                                     &off,
+                                     &et);
+                if(h.inj) build_preds(h.inj, h.inj_preds, &h.inj_meta);
+            }
+        }
+        it = g_hl.emplace(std::string(lang), std::move(h)).first;
+    }
+    LangHl& h = it->second;
+    if(!h.q) return nullptr;
+    if(h.rev != theme_rev()) {
+        h.cap_style.assign(ts_query_capture_count(h.q), std::nullopt);
+        for(uint32_t i = 0; i < h.cap_style.size(); ++i) {
+            uint32_t n;
+            const char* c = ts_query_capture_name_for_id(h.q, i, &n);
+            h.cap_style[i] = theme_for({c, n}, lang);
+        }
+        h.rev = theme_rev();
+    }
+    return &h;
+}
+
+void Syntax::collect(TSNode root, LangHl& hl, size_t depth,
+                     std::vector<Layer>& out) {
+    if(!hl.inj || depth > 3) return;
+    TSQueryCursor* qc = ts_query_cursor_new();
+    ts_query_cursor_exec(qc, hl.inj, root);
+    std::map<std::pair<std::string, uint32_t>, std::vector<TSRange>> combined;
+    TSQueryMatch m;
+    while(ts_query_cursor_next_match(qc, &m)) {
+        if(!eval(hl.inj_preds, m)) continue;
+        const Meta& meta = hl.inj_meta[m.pattern_index];
+        std::string lang = meta_get(meta, "injection.language");
+        std::optional<TSNode> content;
+        for(uint16_t i = 0; i < m.capture_count; ++i) {
+            const auto cn = capture_name(hl.inj, m.captures[i].index);
+            if(cn == "injection.content") content = m.captures[i].node;
+            else if(cn == "injection.language") {
+                const uint32_t a = ts_node_start_byte(m.captures[i].node);
+                lang = _pt->text(a, ts_node_end_byte(m.captures[i].node) - a);
+            }
+        }
+        if(meta_has(meta, "injection.self")) lang = std::string(_name);
+        if(!content || lang.empty()) continue;
+        lang = normalize_lang(std::move(lang));
+        const TSRange r{ts_node_start_point(*content),
+                        ts_node_end_point(*content),
+                        ts_node_start_byte(*content),
+                        ts_node_end_byte(*content)};
+        if(meta_has(meta, "injection.combined"))
+            combined[{lang, m.pattern_index}].push_back(r);
+        else add_layer(lang, {r}, depth, out);
+    }
+    for(auto& [k, rs] : combined) add_layer(k.first, std::move(rs), depth, out);
+    ts_query_cursor_delete(qc);
+}
+
+void Syntax::add_layer(const std::string& lang, std::vector<TSRange> rs,
+                       size_t depth, std::vector<Layer>& out) {
+    LangHl* hl = hl_for(lang);
+    const TSLanguage* tl = lang_by_name(lang);
+    if(!hl || !tl || rs.empty()) return;
+    std::ranges::sort(rs, {}, &TSRange::start_byte);
+    TSParser* p = ts_parser_new();
+    if(!ts_parser_set_language(p, tl) ||
+       !ts_parser_set_included_ranges(
+           p, rs.data(), static_cast<uint32_t>(rs.size()))) {
+        ts_parser_delete(p);
+        return;
+    }
+    ReadCtx ctx{_pt, _nl};
+    const TSInput in{.payload = &ctx,
+                     .read = ts_read,
+                     .encoding = TSInputEncodingUTF8,
+                     .decode = nullptr};
+    TSTree* t = ts_parser_parse(p, nullptr, in);
+    if(!t) {
+        ts_parser_delete(p);
+        return;
+    }
+    out.push_back({lang, std::move(rs), p, t, hl});
+    collect(ts_tree_root_node(t), *hl, depth + 1, out);
 }
 
 bool Syntax::load_indent_query(const TSLanguage* lang, std::string_view name) {
@@ -370,9 +538,11 @@ bool Syntax::load_indent_query(const TSLanguage* lang, std::string_view name) {
     _ipreds.clear();
     _imeta.clear();
     std::string src;
+    const std::string own_i = indent_text(name);
     for(const auto& [from, base] : kInherits)
-        if(from == name) src = indent_text(base) + "\n";
-    src += indent_text(name);
+        if(from == name && !own_i.contains("; inherits:"))
+            src = indent_text(base) + "\n";
+    src += own_i;
     if(src.empty()) {
         _err = std::format("no indents query for {}, using heuristic", name);
         return false;
@@ -456,6 +626,9 @@ void Syntax::add_pred(TSQuery* q, std::vector<std::vector<Pred>>& out,
     } else if(name == "any-of?") {
         p.op = Pred::AnyOf;
         for(size_t i = 2; i < s.size(); ++i) p.any.push_back(str(s[i]));
+    } else if(name == "contains?" || name == "any-contains?") {
+        p.op = Pred::Contains;
+        for(size_t i = 2; i < s.size(); ++i) p.any.push_back(str(s[i]));
     } else if(name == "kind-eq?" || name == "has-parent?" ||
               name == "has-ancestor?") {
         p.op = name == "kind-eq?"      ? Pred::KindEq
@@ -519,6 +692,14 @@ bool Syntax::eval(const std::vector<std::vector<Pred>>& preds,
                 const auto lhs = text_of(p.cap);
                 if(!lhs) continue;
                 ok = std::regex_search(*lhs, p.re);
+                break;
+            }
+            case Pred::Contains: {
+                const auto lhs = text_of(p.cap);
+                if(!lhs) continue;
+                ok = std::ranges::any_of(p.any, [&](const std::string& s) {
+                    return lhs->contains(s);
+                });
                 break;
             }
             case Pred::AnyOf: {
@@ -684,8 +865,9 @@ std::vector<Span> Syntax::compute_spans(size_t ls, size_t len) {
 
     struct Cap {
         size_t s, e;
-        uint32_t pat;
+        uint64_t pat;
         Style st;
+        bool merge = false;
     };
     std::vector<Cap> caps;
     ts_query_cursor_set_byte_range(
@@ -706,13 +888,44 @@ std::vector<Span> Syntax::compute_spans(size_t ls, size_t len) {
         const size_t e = std::min<size_t>(ts_node_end_byte(c.node), ls + len);
         if(s < e) caps.push_back({s - ls, e - ls, m.pattern_index, *st});
     }
+    uint64_t order = 0;
+    for(const Layer& L : _layers) {
+        ++order;
+        if(L.ranges.back().end_byte <= ls ||
+           L.ranges.front().start_byte >= ls + len)
+            continue;
+        ts_query_cursor_set_byte_range(
+            _qc, static_cast<uint32_t>(ls), static_cast<uint32_t>(ls + len));
+        ts_query_cursor_exec(_qc, L.hl->q, ts_tree_root_node(L.tree));
+        TSQueryMatch lm;
+        uint32_t lci;
+        while(ts_query_cursor_next_capture(_qc, &lm, &lci)) {
+            if(!eval(L.hl->preds, lm)) {
+                ts_query_cursor_remove_match(_qc, lm.id);
+                continue;
+            }
+            const TSQueryCapture& c = lm.captures[lci];
+            const auto& st = L.hl->cap_style[c.index];
+            if(!st) continue;
+            const size_t s = std::max<size_t>(ts_node_start_byte(c.node), ls);
+            const size_t e =
+                std::min<size_t>(ts_node_end_byte(c.node), ls + len);
+            if(s < e)
+                caps.push_back({s - ls,
+                                e - ls,
+                                (order << 32) | lm.pattern_index,
+                                *st,
+                                true});
+        }
+    }
     std::ranges::stable_sort(caps, {}, &Cap::pat);
 
     std::vector<Style> bytes(len);
     std::vector<char> has(len, 0);
     for(const Cap& c : caps)
         for(size_t i = c.s; i < c.e; ++i) {
-            bytes[i] = c.st;
+            if(c.merge && has[i]) style_patch(bytes[i], c.st);
+            else bytes[i] = c.st;
             has[i] = 1;
         }
 

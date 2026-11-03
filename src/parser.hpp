@@ -6,6 +6,15 @@
 
 struct TSLanguage;
 
+struct ParserInfo {
+    std::string_view name, url, subdir, exts;
+};
+
+struct Meta {
+    const ParserInfo* info;
+    std::vector<std::string> types;
+};
+
 bool parser_known(std::string_view lang);
 bool parser_installed(std::string_view lang);
 std::string_view parser_lang_for_ext(std::string_view ext);

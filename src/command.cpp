@@ -30,6 +30,7 @@
 #include "normal.hpp"
 #include "options.hpp"
 #include "parser.hpp"
+#include "picker.hpp"
 #include "piece.hpp"
 #include "prompt.hpp"
 #include "quickfix.hpp"
@@ -38,7 +39,6 @@
 #include "syntax.hpp"
 #include "terminal.hpp"
 #include "theme.hpp"
-#include "tree.hpp"
 
 namespace {
 void skip_blanks(std::string_view& s) {
@@ -829,6 +829,7 @@ void register_builtin_commands() {
     qf_register_commands();
     build_register_builtin();
     build_register_commands();
+    picker_register_commands();
 }
 
 void editor_command_palette(std::string_view cmd) {
@@ -991,7 +992,7 @@ void pop_update(const std::string& buf, size_t pos) {
     g_pop.name_ctx = ctx.name;
     if(!g_pop.menu.is_open())
         g_pop.menu.open({.at = OverlaySpec::At::Screen,
-                         .x = tree_cols(),
+                         .x = 0,
                          .y = E.term_rows + 1,
                          .up = true,
                          .cover_bars = true,

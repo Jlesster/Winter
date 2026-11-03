@@ -5,7 +5,7 @@
 #include "core.hpp"
 #include "keys.hpp"
 #include "overlay.hpp"
-#include "src/columns.hpp"
+#include "columns.hpp"
 #include "theme.hpp"
 #include "utf8.hpp"
 
@@ -166,6 +166,7 @@ OverlayId input_open(InputSpec in) {
                          ? theme_ui("ui.input.border", Style{})
                          : st->spec.style;
     o.on_key = [st](int c) {
+        if(st->spec.on_key && st->spec.on_key(c)) return true;
         if(c == '\x1b') return false;
         st->key(c);
         return true;

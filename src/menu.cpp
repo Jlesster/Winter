@@ -5,6 +5,7 @@
 
 #include "columns.hpp"
 #include "editor.hpp"
+#include "overlay.hpp"
 #include "theme.hpp"
 #include "tree.hpp"
 #include "utf8.hpp"
@@ -76,9 +77,13 @@ const MenuItem* Menu::selected() const {
 // (Re)creates the overlay at the size the current items need. Overlay cells
 // are fixed at open time, so any change of size means close + open.
 void Menu::layout() {
-    const unsigned gen = ++gen_;
-    if(const OverlayId old = std::exchange(id_, 0)) overlay_close(old);
-    if(!want_ || items_.empty()) return;
+    const bool reuse = spec_.fixed && want_ && id_ != 0;
+    unsigned gen = ++gen_;
+    if(!reuse) {
+        gen = ++gen_;
+        if(const OverlayId old = std::exchange(id_, 0)) overlay_close(old);
+    }
+    if(!want_ || (items_.empty() && !spec_.fixed)) return;
 
     int lw = 0, dw = 0;
     kinds_ = false;
@@ -90,13 +95,18 @@ void Menu::layout() {
     off_ = spec_.framed ? 1 : 0;
     const int screen_w = E.term_cols + tree_cols();
     const int cap = std::max(4, std::min(spec_.max_w, screen_w) - 2 * off_);
-    dw_ = std::min(dw, cap / 3);
+    dw_ = spec_.fixed ? (dw ? cap / 3 : 0) : std::min(dw, cap / 3);
     const int kind_w = kinds_ ? 2 : 0;
     const int detail_w = dw_ ? 2 + dw_ : 0;
-    inner_ = std::clamp(
-        1 + kind_w + lw + detail_w + 1, std::min(spec_.min_w, cap), cap);
+    inner_ = spec_.fixed ? cap
+        : std::clamp(1 + kind_w + lw + detail_w + 1,
+                     std::min(spec_.min_w, cap),
+                     cap);
     lw_ = std::max(1, inner_ - 2 - kind_w - detail_w);
-    rows_ = std::min<int>(spec_.max_rows, static_cast<int>(items_.size()));
+    rows_ = spec_.fixed ? spec_.max_rows
+        : std::min<int>(spec_.max_rows,
+                        static_cast<int>(items_.size()));
+        if(reuse) return;  // same overlay, the next paint shows the new items
 
     OverlaySpec o;
     o.at = spec_.at;
@@ -140,12 +150,16 @@ void Menu::paint(OverlayId id) {
     const int label_x = x0 + (kinds_ ? 2 : 0);
     for(size_t r = 0; r < rows; ++r) {
         const size_t idx = top_ + r;
-        if(idx >= items_.size()) break;
+        const int y = off_ + static_cast<int>(r);
+        if(idx >= items_.size()) {  // only a fixed menu has empty rows
+            overlay_put(
+                id, off_, y, std::string(static_cast<size_t>(inner_), ' '), base);
+            continue;
+        }
         const MenuItem& it = items_[idx];
         Style row = base;
         if(idx == sel_) row = selected;
         else if(it.disabled) style_patch(row, off_st);
-        const int y = off_ + static_cast<int>(r);
 
         overlay_put(
             id, off_, y, std::string(static_cast<size_t>(inner_), ' '), row);

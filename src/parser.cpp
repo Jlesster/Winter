@@ -19,9 +19,6 @@
 #include "script.hpp"
 
 namespace {
-struct ParserInfo {
-    std::string_view name, url, subdir, exts;
-};
 constexpr ParserInfo kParsers[] = {
 #include "parsers.inc"
 };
@@ -68,10 +65,6 @@ std::string last_line(std::string_view s) {
     return std::string(nl == std::string_view::npos ? s : s.substr(nl + 1));
 }
 
-struct Meta {
-    const ParserInfo* info;
-    std::vector<std::string> types;
-};
 std::vector<Meta> g_meta;
 bool g_meta_ok = false;
 
@@ -143,6 +136,15 @@ export GIT_TERMINAL_PROMPT=0
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+D="${XDG_DATA_HOME:-$HOME/.local/share}/winter/queries"
+N=https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/main/runtime/queries
+for l in c cpp java lua rust ecma jsx html_tags; do
+    mkdir -p "$D/$l"
+    for k in highlights injections indents; do
+        curl -fsSL "$N/$l/$k.scm" -o "$D/$l/$k.scm" || rm -f "$D/$l/$k.scm"
+    done
+done
+
 echo "cloning $NAME"
 git clone --depth 1 -q "$URL" "$tmp/repo"
 root="$tmp/repo"
@@ -185,16 +187,16 @@ if [ -f "$q/highlights.scm" ]; then cp -f "$q/highlights.scm" "$DATA/queries/$NA
 echo "done $NAME"
 
 NVTS=https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/main/runtime/queries
-fetch_indents() {
-  qd="$DATA/queries/$1"; mkdir -p "$qd"
-  curl -fsSL --max-time 20 "$NVTS/$1/indents.scm" -o "$qd/indents.scm.new" 2>/dev/null \
-    || { rm -f "$qd/indents.scm.new"; echo "no indents query for $1"; return 0; }
-  mv -f "$qd/indents.scm.new" "$qd/indents.scm"
-  for b in $(sed -n 's/^; inherits: *//p' "$qd/indents.scm" | head -1 | tr ',?' '  '); do
-    [ -f "$DATA/queries/$b/indents.scm" ] || fetch_indents "$b"
-  done
+fetch_q() {
+    qd="$DATA/queries/$1"; mkdir -p "$qd"
+    curl -fsSL --max-time 20 "$NVTS/$1/$2.scm" -o "$qd/$2.scm.new" 2>/dev/null \
+        || { rm -f "$qd/$2.scm.new"; echo "no $2 query for $1"; return 0; }
+    mv -f "$qd/$2.scm.new" "$qd/$2.scm"
+    for b in $(sed -n 's/^; inherits: *//p' "$qd/$2.scm" | head -1 | tr ',?' '  '); do
+        [ -f "$DATA/queries/$b/$2.scm" ] || fetch_q "$b" "$2"
+    done
 }
-fetch_indents "$NAME"
+for k in indents highlights injections; do fetch_q "$NAME" "$k"; done
 )SH";
 
 std::string script(const ParserInfo& p) {

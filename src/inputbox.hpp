@@ -18,6 +18,7 @@ struct InputSpec {
     std::function<void(std::string_view)> on_change;
     std::function<void(std::string)> on_submit;
     std::function<void()> on_cancel;
+    std::function<bool(int)> on_key;
 };
 
 OverlayId input_open(InputSpec);

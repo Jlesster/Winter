@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 #include "buffer.hpp"
+#include "parser.hpp"
 #include "piece.hpp"
 
 class Syntax {
@@ -43,8 +44,17 @@ public:
     void restyle();
 
 private:
+    using Meta = std::vector<std::pair<std::string, std::string>>;
     struct Pred {
-        enum Op { Eq, Match, AnyOf, KindEq, HasParent, HasAncestor } op{};
+        enum Op {
+            Eq,
+            Match,
+            AnyOf,
+            Contains,
+            KindEq,
+            HasParent,
+            HasAncestor
+        } op{};
         bool negate = false;
         uint32_t cap = 0;
         bool rhs_is_cap = 0;
@@ -64,13 +74,30 @@ private:
         uint32_t depth;
     };
 
+    struct LangHl {
+        TSQuery* q = nullptr;
+        std::vector<std::vector<Pred>> preds;
+        std::vector<std::optional<Style>> cap_style;
+        TSQuery* inj = nullptr;
+        std::vector<std::vector<Pred>> inj_preds;
+        std::vector<Meta> inj_meta;
+        uint64_t rev = ~0ULL;
+    };
+
+    struct Layer {
+        std::string lang;
+        std::vector<TSRange> ranges;
+        TSParser* parser = nullptr;
+        TSTree* tree = nullptr;
+        LangHl* hl = nullptr;
+    };
+
     void cache_erase_range(size_t lo, size_t hi);
     void cache_apply_edit(const TextEdit& e);
 
     void drop_tree();
     void detach();
     bool load_query(const TSLanguage* lang, std::string_view name);
-    using Meta = std::vector<std::pair<std::string, std::string>>;
     bool load_indent_query(const TSLanguage* lang, std::string_view name);
     void build_preds(TSQuery* q, std::vector<std::vector<Pred>>& out,
                      std::vector<Meta>* meta);
@@ -83,6 +110,13 @@ private:
     void rb_walk(TSTreeCursor& c, size_t d, bool generic);
     void rb_emit(size_t s, size_t e, size_t depth);
     std::vector<Span> compute_spans(size_t ls, size_t len);
+
+    LangHl* hl_for(std::string_view lang);
+    void collect(TSNode root, LangHl& hl, size_t depth,
+                 std::vector<Layer>& out);
+    void add_layer(const std::string& lang, std::vector<TSRange> rs,
+                   size_t depth, std::vector<Layer>& out);
+    void free_layers();
 
     static constexpr size_t kSpanCacheCap = 4096;
 
@@ -103,6 +137,7 @@ private:
     std::vector<std::vector<Pred>> _preds;
     std::vector<std::optional<Style>> _cap_style;
     std::vector<std::vector<Pred>> _ipreds;
+    std::vector<Layer> _layers;
     std::map<size_t, CacheLine> _span_cache;
     const PieceTable* _pt = nullptr;
 };
