@@ -16,6 +16,7 @@
 #include "diag.hpp"
 #include "editor.hpp"
 #include "events.hpp"
+#include "glyphs.hpp"
 #include "gutter.hpp"
 #include "lsp_sync.hpp"
 #include "normal.hpp"
@@ -24,6 +25,7 @@
 #include "prompt.hpp"
 #include "search.hpp"
 #include "snippet.hpp"
+#include "statusline.hpp"
 #include "src/command.hpp"
 #include "terminal.hpp"
 #include "theme.hpp"
@@ -484,49 +486,83 @@ void editor_draw_tree() {
     }
 }
 
+namespace {
+constexpr uint32_t kUnset = 0xFFFFFFFF;
+
+// Draws (or just measures) one side of the bar. Left blocks are followed by
+// an arrow into the next block (or the bar), right blocks are preceded by one.
+int draw_side(int y, int x, const std::vector<StatusItem>& items,
+              uint32_t bar_bg, std::string_view glyph, bool left, bool draw) {
+    const int x0 = x;
+    uint32_t prev = left ? kUnset : bar_bg;
+    const auto boundary = [&](uint32_t from, uint32_t to) {
+        if(glyph.empty() || from == kUnset || to == kUnset || from == to)
+            return;
+        if(draw)
+            scr.at(x, y) = Cell{utf8_decode(glyph, 0).cp,
+                                1,
+                                left ? Style{.fg = from, .bg = to}
+                                     : Style{.fg = to, .bg = from}};
+        ++x;
+    };
+    const auto emit = [&](std::string_view text, const Style& st) {
+        if(draw) x = put_text(x, y, text, scr.width(), st);
+        else x += text_width(text);
+    };
+    for(const StatusItem& it : items) {
+        const StatusBlock& b = it.block;
+        boundary(prev, b.base.bg);
+        if(b.pad) emit(" ", b.base);
+        for(const StatusPiece& p : b.pieces) {
+            Style st = b.base;
+            style_patch(st, p.st);
+            emit(p.text, st);
+        }
+        if(b.pad) emit(" ", b.base);
+        prev = b.base.bg;
+    }
+    if(left) boundary(prev, bar_bg);
+    return x - x0;
+}
+
+// Drops the lowest-priority block of either side. False when nothing may go.
+bool drop_one(std::vector<StatusItem>& l, std::vector<StatusItem>& r) {
+    std::vector<StatusItem>* side = nullptr;
+    size_t at = 0;
+    int best = 100;  // 100+ (the mode pill) never goes
+    for(auto* v : {&l, &r})
+        for(size_t i = 0; i < v->size(); ++i)
+            if((*v)[i].block.prio < best) {
+                best = (*v)[i].block.prio;
+                side = v;
+                at = i;
+            }
+    if(!side) return false;
+    side->erase(side->begin() + static_cast<std::ptrdiff_t>(at));
+    return true;
+}
+}  // namespace
+
 void editor_draw_status_bar() {
     const int y = E.term_rows;
-    std::string_view mode = "NORMAL";
-    switch(E.mode) {
-        case INSERT: mode = "INSERT"; break;
-        case SEARCH: mode = "SEARCH"; break;
-        case NORMAL: mode = "NORMAL"; break;
-        case VISUAL: mode = E.v_line ? "V-LINE" : "VISUAL"; break;
-        case COMMAND: mode = "COMMAND"; break;
-        case REPLACE: mode = "REPLACE"; break;
-        case FILES: mode = "FILES"; break;
-        case OPPEND: break;
-    }
-    // ui.statusline.<mode> (normal insert visual vline replace command search
-    // files), falling back to ui.statusline
-    std::string mgroup = "ui.statusline.";
-    for(const char c : mode)
-        if(c != '-')
-            mgroup +=
-                static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    const Style bar = theme_ui(
-        mgroup, theme_ui("ui.statusline", Style{.attrs = ATTR_REVERSE}));
+    const Style bar = statusline_bar_style();
     for(int x = 0; x < scr.width(); ++x) scr.at(x, y) = Cell{U' ', 1, bar};
-    const std::string bufs =
-        E.buffers.size() > 1
-            ? std::format(" [{}/{}]", E.cur + 1, E.buffers.size())
-            : "";
-    std::string status =
-        std::format("{:.20}/ - {} lines {}{}",
-                    E.buf().filename.empty() ? "[No Name]" : E.buf().filename,
-                    E.num_rows(),
-                    E.buf().pt.modified() ? "[+]" : "",
-                    bufs);
-    std::string rstatus = std::format(
-        "{}{:.20} - {}/{}",
-        opts.diagnostics ? diag_summary(E.buf().diags) : std::string{},
-        mode,
-        E.cy + 1,
-        E.num_rows());
-    const int left_end = put_text(0, y, status, scr.width(), bar);
-    const int rw = text_width(rstatus);
-    if(scr.width() - rw >= left_end)
-        put_text(scr.width() - rw, y, rstatus, scr.width(), bar);
+    const StatusLayout& lay = statusline_layout();
+    if(!lay.enabled) return;
+
+    std::vector<StatusItem> L = statusline_eval(lay.left);
+    std::vector<StatusItem> R = statusline_eval(lay.right);
+    const std::string lg = statusline_sep(true), rg = statusline_sep(false);
+    const auto total = [&] {
+        return draw_side(y, 0, L, bar.bg, lg, true, false) +
+               draw_side(y, 0, R, bar.bg, rg, false, false);
+    };
+    while(total() + 1 > scr.width() && drop_one(L, R)) {}
+
+    const int lw = draw_side(y, 0, L, bar.bg, lg, true, true);
+    const int rw = draw_side(y, 0, R, bar.bg, rg, false, false);
+    if(scr.width() - rw >= lw)
+        draw_side(y, scr.width() - rw, R, bar.bg, rg, false, true);
 }
 
 void editor_draw_message_bar() {

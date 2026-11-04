@@ -81,5 +81,12 @@ OptResult set_option(std::string_view name, std::string_view value);
 std::optional<std::string> get_option(std::string_view name);
 std::vector<std::string_view> option_names();
 
+struct OptInfo {
+    std::string_view name, alias;
+    std::string_view type;  // "boolean" | "integer" | "cursor" | "border"
+    int lo = 0, hi = 0;     // integer range
+};
+std::optional<OptInfo> option_info(std::string_view name);
+
 // `:set` argument parsing: "ts=8 noet sw?" -> message to show ("" = nothing)
 std::string apply_set_command(std::string_view args);

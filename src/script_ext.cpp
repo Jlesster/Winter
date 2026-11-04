@@ -1,6 +1,7 @@
 // winter.keymap, winter.action, winter.cmd, winter.ext, winter.ev
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <format>
 #include <map>
 #include <memory>
@@ -169,8 +170,11 @@ int l_action_list(lua_State* L) {
 
 // ---- winter.cmd ------------------------------------------------------------
 
-// winter.cmd.add(Name, fn): defines :Name. fn gets
+// winter.cmd.add(Name, fn [, opts]): defines :Name. fn gets
 // {args=, bang=, range=, line1=, line2=}; names are letters only.
+// opts: desc = "...", bang = bool, range = bool, aliases = {"N", ...},
+//       nargs = "0" | "1" | "?" | "*" (default "*"),
+//       complete = fn(lead) -> { "text" | {text=, detail=}, ... }
 int l_cmd_add(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
@@ -180,7 +184,75 @@ int l_cmd_add(lua_State* L) {
                       std::isalpha(static_cast<unsigned char>(*p)),
                       1,
                       "command names are letters only");
-    command_add(name, [fn = lua_fn(L, 2)](const CmdLine& c) {
+    const int t = lua_table_arg(L, 3);
+    Nargs nargs = Nargs::Any;
+    if(t) {
+        lua_getfield(L, t, "nargs");
+        const char* n = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : nullptr;
+        if(n) {
+            if(!std::strcmp(n, "0")) nargs = Nargs::None;
+            else if(!std::strcmp(n, "1")) nargs = Nargs::One;
+            else if(!std::strcmp(n, "?")) nargs = Nargs::Opt;
+            else if(!std::strcmp(n, "*")) nargs = Nargs::Any;
+            else return luaL_argerror(L, 3, "nargs is \"0\", \"1\", \"?\" or \"*\"");
+        }
+        lua_pop(L, 1);
+    }
+    CmdSpec spec;
+    spec.name = name;
+    spec.range = lua_opt_bool(L, t, "range", true);
+    spec.bang = lua_opt_bool(L, t, "bang", true);
+    spec.nargs = nargs;
+    spec.raw = true;
+    if(t) {
+        lua_getfield(L, t, "desc");
+        if(lua_type(L, -1) == LUA_TSTRING) spec.desc = lua_tostring(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, t, "aliases");
+        if(lua_istable(L, -1)) {
+            const lua_Unsigned n = lua_rawlen(L, -1);
+            for(lua_Unsigned i = 1; i <= n; ++i) {
+                lua_rawgeti(L, -1, static_cast<lua_Integer>(i));
+                if(lua_type(L, -1) == LUA_TSTRING)
+                    spec.aliases.emplace_back(lua_tostring(L, -1));
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, t, "complete");
+        if(lua_isfunction(L, -1))
+            spec.complete = [fn = lua_fn(L, -1)](std::string_view lead) {
+                std::vector<CmdCand> out;
+                lua_State* L = script_state();
+                if(!L) return out;
+                const int top = lua_gettop(L);
+                fn->push();
+                lua_pushlstring(L, lead.data(), lead.size());
+                if(script_call(1, 1) && lua_istable(L, top + 1)) {
+                    const lua_Unsigned n = lua_rawlen(L, top + 1);
+                    for(lua_Unsigned i = 1; i <= n; ++i) {
+                        lua_rawgeti(L, top + 1, static_cast<lua_Integer>(i));
+                        CmdCand c;
+                        if(lua_type(L, -1) == LUA_TSTRING) {
+                            c.text = lua_tostring(L, -1);
+                        } else if(lua_istable(L, -1)) {
+                            lua_getfield(L, -1, "text");
+                            if(lua_type(L, -1) == LUA_TSTRING) c.text = lua_tostring(L, -1);
+                            lua_pop(L, 1);
+                            lua_getfield(L, -1, "detail");
+                            if(lua_type(L, -1) == LUA_TSTRING) c.detail = lua_tostring(L, -1);
+                            lua_pop(L, 1);
+                        }
+                        lua_pop(L, 1);
+                        if(!c.text.empty()) out.push_back(std::move(c));
+                    }
+                }
+                lua_settop(L, top);
+                return out;
+            };
+        lua_pop(L, 1);
+    }
+    spec.run = [fn = lua_fn(L, 2)](const CmdLine& c) {
         lua_State* L = script_state();
         if(!L) return;
         fn->push();
@@ -196,7 +268,8 @@ int l_cmd_add(lua_State* L) {
         lua_pushinteger(L, c.last);
         lua_setfield(L, -2, "line2");
         script_call(1);
-    });
+    };
+    command_add(std::move(spec));
     return 0;
 }
 
@@ -327,14 +400,20 @@ int l_ext_object(lua_State* L) {
 // names for the positional args of the built-in events
 const std::vector<const char*>& fields_for(std::string_view ev) {
     static const std::map<std::string, std::vector<const char*>, std::less<>>
-        known = {{"buf_enter", {"filename"}}, {"mode_changed", {"old", "new"}}};
+        known = {{"buf_enter", {"filename"}},
+                 {"mode_changed", {"old", "new"}},
+                 {"buf_write_pre", {"filename"}},
+                 {"buf_write_post", {"filename"}},
+                 {"file_type", {"filename", "lang"}}};
     static const std::vector<const char*> none;
     const auto it = known.find(ev);
     return it == known.end() ? none : it->second;
 }
 
 // winter.ev.on(event, fn [, {once=bool}]) -> id. fn gets {event=, [1]=, ...}
-// plus named fields: buf_enter {filename}, mode_changed {old, new}.
+// plus named fields: buf_enter/buf_write_pre/buf_write_post {filename},
+// file_type {filename, lang}, mode_changed {old, new}. Also emitted without
+// arguments: ready, quit, text_changed, cursor_moved.
 int l_ev_on(lua_State* L) {
     const char* event = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);

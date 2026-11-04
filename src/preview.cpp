@@ -117,7 +117,7 @@ void FilePreview::paint(OverlayId id, int w, int h, const std::string& want,
     const Style cur_nr =
         theme_ui("ui.linenr.cursor", Style{.attrs = ATTR_BOLD});
         const Style match_st =
-            theme_ui("ui.menu.match", Style{.attrs = ATTR_BOLD | ATTR_UNDERLINE});
+            theme_ui("ui.menu.match", Style{.fg = 0xfab387, .attrs = ATTR_BOLD});
 
             for(int r = 0; r < ih && top + r < lines; ++r) {
                 const int l = top + r;

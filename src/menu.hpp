@@ -14,6 +14,9 @@ struct MenuItem {
     bool disabled = false;
     std::vector<size_t> hl;
     size_t id = 0;
+    std::string icon;               // drawn before the label (e.g. a devicon)
+    uint32_t icon_fg = 0xFFFFFFFF;  // unset = same as the label
+    size_t dim_to = 0;              // label bytes [0, dim_to) drawn dimmed (dir part)
 };
 
 struct MenuSpec {
@@ -30,6 +33,7 @@ struct MenuSpec {
     std::function<bool(int)> on_key;
     bool modal = false;
     bool fixed = false;
+    Style border_style{};
 };
 
 class Menu {
@@ -46,6 +50,7 @@ public:
     void set_items(std::vector<MenuItem> items);
     bool move(int delta);
     void select(size_t i);
+    void set_footer(std::string s) { footer_ = std::move(s); }
 
     size_t size() const { return items_.size(); }
     size_t selected_index() const { return sel_; }
@@ -61,6 +66,7 @@ private:
     OverlayId id_ = 0;
     unsigned gen_ = 0;
     bool want_ = false;
-    int off_ = 0, lw_ = 0, dw_ = 0, inner_ = 0, rows_ = 0;
+    std::string footer_;
+    int off_ = 0, lw_ = 0, dw_ = 0, inner_ = 0, rows_ = 0, icon_w_ = 0;
     bool kinds_ = false;
 };

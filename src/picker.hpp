@@ -18,6 +18,7 @@ struct PickerSpec {
     std::string prompt;
     bool fuzzy = true;
     bool preview = false;
+    bool paths = false;  // items are file paths: icon + dimmed directory
     int max_results = 200;
     std::function<void(std::string_view)> on_query;
     std::function<void(const PickItem&)> on_accept;

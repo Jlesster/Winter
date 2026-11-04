@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -34,6 +35,10 @@ struct OverlaySpec {
     std::function<bool(int)> on_key;
     std::function<void()> on_close;
     std::function<void(OverlayId)> on_paint;
+
+    std::string title;         // drawn in the top border, framed only
+    std::string footer;        // drawn in the bottom border, right aligned
+    bool tee_bottom = false;   // bottom corners become tees (box continues below)
 };
 
 struct Viewport {
@@ -60,6 +65,8 @@ void overlay_tick();
 void overlay_draw(Screen& scr, const Viewport& v, bool prompt_active = false);
 
 bool overlay_modal();
+void overlay_set_title(OverlayId id, std::string title);
+void overlay_set_footer(OverlayId id, std::string footer);
 void overlay_set_cursor(OverlayId id, int x, int y);
 bool overlay_cursor(const Viewport& v, int& sx, int& sy);
 

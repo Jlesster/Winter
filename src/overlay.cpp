@@ -37,23 +37,57 @@ std::vector<OverlayId> top_down() {
     return ids;
 }
 
+// Fits s into w cells, ending in an ellipsis when it had to be cut.
+std::string clip_cells(std::string_view s, int w) {
+    if(text_width(s) <= w) return std::string(s);
+    std::string out;
+    int used = 0;
+    for(size_t i = 0; i < s.size();) {
+        const Decoded d = utf8_decode(s, i);
+        const int cw = cell_width(d.cp, 0);
+        if(used + cw > w - 1) break;
+        out.append(s.substr(i, d.len));
+        used += cw;
+        i += d.len;
+    }
+    return out + "\u2026";
+}
+
 void paint_frame(const Overlay& o) {
     const OverlaySpec& s = o.spec;
     if(!s.framed || s.w < 2 || s.h < 2) return;
-    const BorderSet& b = border_set(s.border.value_or(opts.border));
+    const Border kind = s.border.value_or(opts.border);
+    const BorderSet& b = border_set(kind);
     const int W = s.w, H = s.h;
     const Style bst = s.border_style == Style{}
-                          ? theme_ui("ui.float.border", Style{})
+                          ? theme_ui("ui.float.border", Style{.fg = 0x6c7086})
                           : s.border_style;
     const auto put = [&](int x, int y, std::string_view g) {
         overlay_put(o.id, x, y, g, bst);
     };
+    std::string_view bl = b.bl, br = b.br;
+    if(s.tee_bottom) {
+        if(kind == Border::Rounded || kind == Border::Straight)
+            bl = "\u251c", br = "\u2524";
+        else if(kind == Border::Double) bl = "\u2560", br = "\u2563";
+    }
     for(int x = 1; x < W - 1; ++x) put(x, 0, b.t), put(x, H - 1, b.b);
     for(int y = 1; y < H - 1; ++y) put(0, y, b.l), put(W - 1, y, b.r);
     put(0, 0, b.lt);
     put(W - 1, 0, b.tr);
-    put(0, H - 1, b.bl);
-    put(W - 1, H - 1, b.br);
+    put(0, H - 1, bl);
+    put(W - 1, H - 1, br);
+
+    if(!s.title.empty() && W > 6) {
+        Style ts = bst;
+        ts.attrs = static_cast<uint16_t>(ts.attrs | ATTR_BOLD);
+        style_patch(ts, theme_ui("ui.float.title", Style{}));
+        overlay_put(o.id, 2, 0, " " + clip_cells(s.title, W - 6) + " ", ts);
+    }
+    if(!s.footer.empty() && W > 6) {
+        const std::string f = " " + clip_cells(s.footer, W - 6) + " ";
+        overlay_put(o.id, W - 2 - text_width(f), H - 1, f, bst);
+    }
 }
 
 }  // namespace
@@ -108,6 +142,14 @@ bool overlay_modal() {
     for(const Overlay& o : g_ov)
         if(o.spec.modal && o.spec.visible) return true;
     return false;
+}
+
+void overlay_set_title(OverlayId id, std::string title) {
+    if(Overlay* o = find(id)) o->spec.title = std::move(title);
+}
+
+void overlay_set_footer(OverlayId id, std::string footer) {
+    if(Overlay* o = find(id)) o->spec.footer = std::move(footer);
 }
 
 void overlay_set_cursor(OverlayId id, int x, int y) {

@@ -87,9 +87,11 @@ void Menu::layout() {
 
     int lw = 0, dw = 0;
     kinds_ = false;
+    icon_w_ = 0;
     for(const MenuItem& it : items_) {
         lw = std::max(lw, text_width(it.label));
         dw = std::max(dw, text_width(it.detail));
+        icon_w_ = std::max(icon_w_, text_width(it.icon));
         kinds_ = kinds_ || it.kind != 0;
     }
     off_ = spec_.framed ? 1 : 0;
@@ -99,10 +101,10 @@ void Menu::layout() {
     const int kind_w = kinds_ ? 2 : 0;
     const int detail_w = dw_ ? 2 + dw_ : 0;
     inner_ = spec_.fixed ? cap
-        : std::clamp(1 + kind_w + lw + detail_w + 1,
+        : std::clamp(1 + kind_w + icon_w_ + lw + detail_w + 1,
                      std::min(spec_.min_w, cap),
                      cap);
-    lw_ = std::max(1, inner_ - 2 - kind_w - detail_w);
+    lw_ = std::max(1, inner_ - 2 - kind_w - icon_w_ - detail_w);
     rows_ = spec_.fixed ? spec_.max_rows
         : std::min<int>(spec_.max_rows,
                         static_cast<int>(items_.size()));
@@ -117,6 +119,7 @@ void Menu::layout() {
                                                             : spec_.y;
     o.z = spec_.z;
     o.framed = spec_.framed;
+    o.border_style = spec_.border_style;
     o.cover_bars = spec_.cover_bars;
     o.show_in_prompt = spec_.in_prompt;
     o.on_key = spec_.on_key;
@@ -132,22 +135,27 @@ void Menu::layout() {
 
 void Menu::paint(OverlayId id) {
     overlay_clear(id);
+    overlay_set_footer(id, footer_);
     const size_t rows = static_cast<size_t>(rows_);
     if(sel_ < top_) top_ = sel_;
     else if(sel_ >= top_ + rows) top_ = sel_ - rows + 1;
 
+    // Same Catppuccin Mocha palette as the buffer defaults (cursorline etc.)
     const Style base = theme_ui("ui.menu", Style{});
     const Style selected =
-        theme_ui("ui.menu.select", Style{.attrs = ATTR_REVERSE});
+        theme_ui("ui.menu.select", Style{.bg = 0x313244, .attrs = ATTR_BOLD});
+    const Style marker_st = theme_ui("ui.menu.marker", Style{.fg = 0xb4befe});
     const Style kind_st = theme_ui("ui.menu.kind", Style{.attrs = ATTR_BOLD});
     const Style detail_st =
-        theme_ui("ui.menu.detail", Style{.attrs = ATTR_DIM});
+        theme_ui("ui.menu.detail", Style{.fg = 0x6c7086});
+    const Style dir_st = theme_ui("ui.menu.dir", Style{.fg = 0x9399b2});
     const Style off_st = theme_ui("ui.menu.disabled", Style{.attrs = ATTR_DIM});
     const Style match_st =
-        theme_ui("ui.menu.match", Style{.attrs = ATTR_BOLD | ATTR_UNDERLINE});
+        theme_ui("ui.menu.match", Style{.fg = 0xfab387, .attrs = ATTR_BOLD});
 
     const int x0 = off_ + 1;
-    const int label_x = x0 + (kinds_ ? 2 : 0);
+    const int icon_x = x0 + (kinds_ ? 2 : 0);
+    const int label_x = icon_x + icon_w_;
     for(size_t r = 0; r < rows; ++r) {
         const size_t idx = top_ + r;
         const int y = off_ + static_cast<int>(r);
@@ -163,13 +171,29 @@ void Menu::paint(OverlayId id) {
 
         overlay_put(
             id, off_, y, std::string(static_cast<size_t>(inner_), ' '), row);
+        if(idx == sel_) {
+            Style mk = row;
+            style_patch(mk, marker_st);
+            overlay_put(id, off_, y, "\u258c", mk);
+        }
         if(kinds_ && it.kind) {
             Style k = row;
             style_patch(k, kind_st);
             overlay_put(id, x0, y, std::string(1, it.kind), k);
         }
+        if(icon_w_ && !it.icon.empty()) {
+            Style ic = row;
+            if(it.icon_fg != 0xFFFFFFFF) ic.fg = it.icon_fg;
+            overlay_put(id, icon_x, y, it.icon, ic);
+        }
         const std::string label = fit(it.label, lw_);
         overlay_put(id, label_x, y, label, row);
+        if(it.dim_to > 0) {  // "src/foo/" part of a path, dimmed
+            Style dd = row;
+            style_patch(dd, dir_st);
+            overlay_put(id, label_x, y,
+                        label.substr(0, std::min(it.dim_to, label.size())), dd);
+        }
         Style m = row;
         style_patch(m, match_st);
         for(const size_t o : it.hl) {

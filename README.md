@@ -1,62 +1,92 @@
 # ❄️ winter
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Language: C++20](https://img.shields.io/badge/Language-C%2B%2B20-blue.svg)](https://en.cppreference.com/w/cpp/20)
-[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-orange.svg)](https://www.kernel.org/)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/catppuccin/catppuccin latte/main/assets/logo.png" width="100" alt="Winter Logo" />
+</p>
 
-**winter** is a lightweight, modal TUI text editor written in C++20. It's designed with a focus on efficiency, utilizing a piece table for text manipulation and a double-buffered renderer for flicker-free terminal output.
+<p align="center">
+  <img src="https://img.shields.io/badge/language-C++23-8839ef?style=for-the-badge&logo=cplusplus&logoColor=white" alt="C++23" />
+  <img src="https://img.shields.io/badge/license-MIT-939ab7?style=for-the-badge&logo=opensourceinit&logoColor=white" alt="MIT License" />
+  <img src="https://img.shields.io/badge/build-meson-f5c2e7?style=for-the-badge&logo=meson&logoColor=white" alt="Meson" />
+  <img src="https://img.shields.io/badge/status-active-a6e3a1?style=for-the-badge" alt="Active" />
+</p>
+
+<p align="center">
+  <strong style="color: #cba6f7;">A high-performance, modal TUI editor built for the modern era.</strong><br/>
+  <em style="color: #bac2de;">Inspired by vis, Neovim, and the elegance of minimal design.</em>
+</p>
+
+---
 
 ## ✨ Features
 
-- ⌨️ **Modal Editing**: Inspired by `nvim` and `vis`.
-- 🧩 **Piece Table**: High-performance buffer management for large files.
-- ⚡ **Double Buffering**: Minimal terminal escape sequences and smooth redraws.
-- 🌙 **Lua Integration**: Extensible API for configuration and custom behavior.
-- 🔍 **Tree-sitter Support**: Robust syntax highlighting via `tree-sitter`.
-- 🛠️ **Vim Motions**: Familiar navigation and editing commands.
-- 💾 **Undo/Redo**: Robust history management.
+`winter` isn't just another text editor; it's a precision tool for developers who love their terminal.
+
+### 🚀 Core Engine
+
+- **Piece Table Buffer** $\rightarrow$ Blazing fast edits regardless of file size. Memory-efficient insertions and deletions.
+- **Double-Buffered Rendering** $\rightarrow$ Minimal terminal escape sequences via cell-diffing for a flicker-free experience.
+- **Synchronized Output** $\rightarrow$ Uses DEC mode 2026 to eliminate screen tearing.
+- **UTF-8 Native** $\rightarrow$ Full support for wide characters and grapheme boundaries.
+
+### 🧠 Intelligence
+
+- **Tree-sitter Integration** $\rightarrow$ Powerful structural syntax highlighting and indentation for dozens of languages.
+- **LSP Support** $\rightarrow$ Full Language Server Protocol implementation for:
+  - 🔍 **Goto Definition** & **References**
+  - ✏️ **Symbol Rename**
+  - ⚠️ **Real-time Diagnostics**
+  - 📋 **Smart Completions**
+- **Semantic Tokens** $\rightarrow$ Context-aware coloring provided by your LSP.
+
+### 🛠️ Workflow
+
+- **Modal Editing** $\rightarrow$ Efficient navigation and manipulation (Normal, Insert, Visual modes).
+- **Quickfix List** $\rightarrow$ Centralized error and search result management.
+- **Virtual Text** $\rightarrow$ UI overlays and inline hints for a richer editing experience.
+- **Custom Commands** $\rightarrow$ Extensible command-line interface.
+
+---
+
+## 🏗️ Architecture
+
+`winter` is built on a strict three-layer architecture to ensure stability and performance:
+
+1. **Document Model**: The `PieceTable` handles raw text manipulation without knowing about the screen.
+2. **Cell Grid**: A virtual grid of characters and styles (`front` vs `back` buffers).
+3. **Flush**: The diffing engine that translates cell changes into the most efficient VT100 sequences possible.
+
+---
 
 ## 🚀 Getting Started
 
 ### Prerequisites
 
-- A C++20 compatible compiler (GCC 10+ or Clang 10+)
-- `meson` and `ninja` build system
-- `lua` development headers
+- A C++23 compatible compiler (GCC 10+ or Clang 12+)
+- `meson` & `ninja`
+- `tree-sitter` libraries
 
 ### Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/winter.git
+git clone https://github.com/youruser/winter.git
 cd winter
-
-# Setup and build
 meson setup builddir
 ninja -C builddir
-
-# Run winter
-./builddir/winter <file_to_edit>
+./builddir/winter
 ```
 
-## ⌨️ Quick Start
+---
 
-| Command | Action |
-| :--- | :--- |
-| `CTRL-S` or `:w` | Save file |
-| `CTRL-Q` or `:q` | Quit editor |
-| `/` | Search |
+## 📜 Roadmap
 
-## 🛠️ Architecture
-
-`winter` is built on three primary layers:
-1. **Document Model**: A piece table that handles the raw text without knowing about the screen.
-2. **Cell Grid**: A back and front grid of cells used for rendering.
-3. **Flush**: A diffing engine that compares the grids and emits minimal ANSI escape sequences.
-
-## 📄 License
-
-This project is licensed under the MIT License.
+- [x] 📂 File explorer / Project tree
+- [ ] 🧩 Plugin system via Lua/WASM
+- [~] 🌗 Advanced Theme Engine
+- [~] ⌨️ Advanced key-chord support
 
 ---
-*Made with ❄️ and C++*
+
+<p align="center">
+  Made with ❤️  for the terminal community.
+</p>

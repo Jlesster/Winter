@@ -211,6 +211,23 @@ std::optional<std::string> get_option(std::string_view name) {
     return show(*o);
 }
 
+std::optional<OptInfo> option_info(std::string_view name) {
+    const Opt* o = find(name);
+    if(!o) return std::nullopt;
+    OptInfo i{.name = o->name, .alias = o->alias};
+    switch(o->kind) {
+        case Kind::Bool: i.type = "boolean"; break;
+        case Kind::Int:
+            i.type = "integer";
+            i.lo = o->lo;
+            i.hi = o->hi;
+            break;
+        case Kind::CursorSpec: i.type = "cursor"; break;
+        case Kind::BorderStyle: i.type = "border"; break;
+    }
+    return i;
+}
+
 std::vector<std::string_view> option_names() {
     std::vector<std::string_view> out;
     for(const Opt& o : kTable) out.push_back(o.name);

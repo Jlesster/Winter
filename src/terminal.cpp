@@ -1,4 +1,5 @@
 #include "terminal.hpp"
+#include "events.hpp"
 #include "buflist.hpp"
 #include "job.hpp"
 #include "loop.hpp"
@@ -89,6 +90,7 @@ bool resize_pending() { return g_resized != 0; }
 void resize_ack() { g_resized = 0; }
 
 void editor_quit() {
+    events_emit("quit");
     buffer_remember_cursor();
     job_kill_all();
     trux::ansi::leave_alt_screen();

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <memory>
 #include <optional>
 
@@ -16,14 +17,17 @@
 #include "jumplist.hpp"
 #include "editor.hpp"
 #include "fuzzy.hpp"
+#include "glyphs.hpp"
 #include "inputbox.hpp"
 #include "job.hpp"
 #include "keys.hpp"
 #include "loop.hpp"
 #include "menu.hpp"
+#include "options.hpp"
 #include "overlay.hpp"
 #include "piece.hpp"
 #include "preview.hpp"
+#include "theme.hpp"
 #include "tree.hpp"
 
 namespace {
@@ -49,6 +53,28 @@ struct Picker {
     unsigned serial = 0;
 } P;
 
+MenuItem make_item(const PickItem& it, size_t id, std::vector<size_t> hl = {}) {
+    MenuItem m{.label = it.text, .detail = it.detail, .hl = std::move(hl), .id = id};
+    if(!P.spec.paths) return m;
+    const size_t slash = it.text.rfind('/');
+    m.dim_to = slash == std::string::npos ? 0 : slash + 1;
+    if(opts.nerdicons) {
+        const std::string name = it.text.substr(m.dim_to);
+        m.icon = std::string(file_icon(name));
+        if(const auto c = file_icon_color(name)) m.icon_fg = *c;
+    }
+    return m;
+}
+
+// Hands the rows to the menu and puts "shown/total" in its bottom border.
+void show(std::vector<MenuItem> out, size_t matched) {
+    const size_t n = P.items.size();
+    if(n == 0) P.menu.set_footer("");
+    else if(P.spec.fuzzy) P.menu.set_footer(std::format("{}/{}", matched, n));
+    else P.menu.set_footer(std::format("{}", n));
+    P.menu.set_items(std::move(out));
+}
+
 void refilter() {
     P.timer = 0;
     const std::string& q = P.query;
@@ -58,14 +84,12 @@ void refilter() {
 
     if(!P.spec.fuzzy || q.empty()) {
         for(size_t i = 0; i < std::min(n, cap); ++i)
-            out.push_back({.label = P.items[i].text,
-                .detail = P.items[i].detail,
-                    .id = i});
+            out.push_back(make_item(P.items[i], i));
         P.cand.clear();
         P.cand_all = true;
         P.last_query = q;
         P.seen = n;
-        P.menu.set_items(std::move(out));
+        show(std::move(out), n);
         return;
     }
 
@@ -103,12 +127,9 @@ void refilter() {
     for(size_t k = 0; k < top; ++k) {
         const PickItem& it = P.items[hits[k].idx];
         fuzzy::match(it.text, q, m);
-        out.push_back({.label = it.text,
-            .detail = it.detail,
-                .hl = m.pos,
-                .id = hits[k].idx});
+        out.push_back(make_item(it, hits[k].idx, m.pos));
     }
-    P.menu.set_items(std::move(out));
+    show(std::move(out), hits.size());
 }
 
 void schedule_refilter(int ms) {
@@ -193,6 +214,10 @@ void preview_paint(OverlayId id) {
                 P.pv->load(P.want_path);
         });
     }
+    overlay_set_title(
+        id, P.want_path.empty()
+                ? std::string()
+                : std::filesystem::path(P.want_path).filename().string());
     P.pv->paint(id, P.prev_w, P.prev_h, P.want_path, P.want_line, P.want_col);
 }
 
@@ -388,13 +413,14 @@ void picker_open(PickerSpec spec) {
         : std::clamp(screen_w - 8, std::min(40, screen_w), 110);
         const int w = with_pv ? std::max(44, total * 9 / 20) : total;
         const int x = std::max(0, (screen_w - total) / 2);
-        const int y = std::max(0, (E.term_rows - 17) / 3);  // 3 input + 14 list rows
+        // 3 input rows + 14 list rows, minus the one border row they share
+        const int y = std::max(0, (E.term_rows - 16) / 3);
 
         if(with_pv) {
             const unsigned serial = P.serial;
             P.pv = std::make_unique<FilePreview>();
             P.prev_w = total - w;
-            P.prev_h = 17;
+            P.prev_h = 16;
             OverlaySpec o;
             o.at = OverlaySpec::At::Screen;
             o.x = x + w;
@@ -413,23 +439,35 @@ void picker_open(PickerSpec spec) {
         }
 
     P.menu.set_items({});  // nothing left over from the last picker
+    const Style frame = theme_ui("ui.picker.border", Style{.fg = 0xb4befe});
     P.menu.open({.at = OverlaySpec::At::Screen,
         .x = x,
-            .y = y + 3,
+            .y = y + 2,  // top border hides under the input's divider
             .framed = true,
             .max_rows = 12,
             .min_w = w - 2,
             .max_w = w,
-            .fixed = true});
-    P.input = input_open({.prompt = P.spec.prompt,
+            .fixed = true,
+            .border_style = frame});
+    // "Files> " -> title "Files"; the input line itself gets a glyph prompt
+    std::string title = P.spec.prompt;
+    while(!title.empty() &&
+          (title.back() == '>' || title.back() == ' ' || title.back() == ':'))
+        title.pop_back();
+    P.input = input_open({.prompt = opts.nerdicons ? "\uf002 " : "> ",
         .w = w,
             .at = OverlaySpec::At::Screen,
             .x = x,
             .y = y,
+            .prompt_style = theme_ui("ui.picker.prompt",
+                                     Style{.fg = 0xb4befe, .attrs = ATTR_BOLD}),
             .on_change = on_change,
             .on_submit = on_submit,
             .on_cancel = on_cancel,
-            .on_key = on_key});
+            .on_key = on_key,
+            .border_style = frame,
+            .title = std::move(title),
+            .join_below = true});
 }
 
 void picker_close() {
@@ -467,6 +505,7 @@ void picker_files() {
     s.prompt = "Files> ";
     s.fuzzy = true;
     s.preview = true;
+    s.paths = true;
     s.max_results = 200;
     s.on_accept = [](const PickItem& it) { open_at(it.text, 0, 0); };
     s.on_close = [] {

@@ -7,34 +7,46 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
+#include <optional>
+#include <vector>
 #include <format>
 #include <lua.hpp>
 #include <memory>
 #include <string>
 #include <string_view>
 
+#include "buflist.hpp"
 #include "columns.hpp"
 #include "command.hpp"
 #include "comment.hpp"
 #include "core.hpp"
 #include "editor.hpp"
+#include "diag.hpp"
 #include "events.hpp"
+#include "file.hpp"
 #include "glyphs.hpp"
 #include "inputbox.hpp"
 #include "json.hpp"
+#include "job.hpp"
 #include "jumplist.hpp"
 #include "keys.hpp"
 #include "lsp_config.hpp"
+#include "loop.hpp"
 #include "lsp_nav.hpp"
+#include "lsp_rename.hpp"
 #include "lua_json.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
 #include "options.hpp"
 #include "overlay.hpp"
+#include "picker.hpp"
 #include "registry.hpp"
 #include "script_internal.hpp"
 #include "snippet.hpp"
-#include "src/lsp_actions.hpp"
+#include "statusline.hpp"
+#include "syntax.hpp"
+#include "lsp_actions.hpp"
 #include "theme.hpp"
 #include "utf8.hpp"
 #include "virt.hpp"
@@ -407,6 +419,8 @@ int l_theme_link(lua_State* L) {
     return 0;
 }
 
+#include "script_ui.inc"
+
 const luaL_Reg kBuf[] = {{"replace", l_replace}, {nullptr, nullptr}};
 const luaL_Reg kUi[] = {
     {"input", l_input}, {"status", l_status}, {nullptr, nullptr}};
@@ -490,6 +504,16 @@ bool script_init() {
     script_register("lang", kLang);
     script_register("theme", kTheme);
     script_register("tree", kTreeLua);
+    script_register("statusline", kStatusline);
+    script_register("buf", kBufExt);
+    script_register("win", kWin);
+    script_register("job", kJob);
+    script_register("timer", kTimer);
+    script_register("picker", kPicker);
+    script_register("ui", kUiExt);
+    script_register("diag", kDiag);
+    script_register("options", kOptions);
+    script_register("lsp", kLspExt);
     script_open_buf();
     script_open_ext();
 

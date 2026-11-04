@@ -116,7 +116,7 @@ bool parse_cmdline(std::string_view s, CmdLine& out, std::string& err) {
         out.first = 1;
         out.last = E.num_rows();
         s.remove_prefix(1);
-    } else if(!s.starts_with("$ ")) {
+    } else if(!is_shell_cmd(s)) {
         const auto a = parse_addr(s, cur);
         skip_blanks(s);
         if(a || s.starts_with(',')) {
@@ -137,7 +137,7 @@ bool parse_cmdline(std::string_view s, CmdLine& out, std::string& err) {
         }
     }
     out.name_off = total - s.size();
-    if(s.starts_with("$ ")) {
+    if(is_shell_cmd(s)) {
         out.name = "$";
         s.remove_prefix(1);
     } else {
@@ -718,6 +718,11 @@ void register_builtin_commands() {
                  .desc = "Save the buffer",
                  .nargs = Nargs::None,
                  .run = [](const CmdLine&) { editor_save(); }});
+    command_add({.name = "wall",
+                .aliases = {"wa", "writeall"},
+                .desc = "Save all modified buffers",
+                .nargs = Nargs::None,
+                .run = [](const CmdLine&) { editor_save_all(); }});
     command_add({.name = "wq",
                  .aliases = {"x"},
                  .desc = "Save and quit",

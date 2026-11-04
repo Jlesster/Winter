@@ -162,9 +162,12 @@ OverlayId input_open(InputSpec in) {
     o.pass.clear();
     o.framed = true;
     o.border = st->spec.border;
-    o.border_style = st->spec.style == Style{}
+    o.border_style = st->spec.border_style != Style{} ? st->spec.border_style
+                     : st->spec.style == Style{}
                          ? theme_ui("ui.input.border", Style{})
                          : st->spec.style;
+    o.title = st->spec.title;
+    o.tee_bottom = st->spec.join_below;
     o.on_key = [st](int c) {
         if(st->spec.on_key && st->spec.on_key(c)) return true;
         if(c == '\x1b') return false;
