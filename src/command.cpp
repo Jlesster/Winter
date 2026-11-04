@@ -1,12 +1,11 @@
 #include "command.hpp"
+#include "external.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
 #include <filesystem>
 #include <format>
-#include <functional>
-#include <map>
 #include <memory>
 #include <optional>
 #include <regex>
@@ -17,9 +16,8 @@
 #include <vector>
 
 #include "buflist.hpp"
-#include "complete.hpp"
 #include "build.hpp"
-#include "lsp_rename.hpp"
+#include "complete.hpp"
 #include "core.hpp"
 #include "editor.hpp"
 #include "errparse.hpp"
@@ -27,7 +25,9 @@
 #include "fuzzy.hpp"
 #include "job.hpp"
 #include "lsp_actions.hpp"
+#include "lsp_config.hpp"
 #include "lsp_nav.hpp"
+#include "lsp_rename.hpp"
 #include "lsp_sync.hpp"
 #include "menu.hpp"
 #include "motion.hpp"
@@ -594,6 +594,36 @@ void cmd_tsinstall(const CmdLine& c) {
     if(!id) editor_set_status_message("TSInstall {}: already running", lang);
 }
 
+void cmd_lsp(const CmdLine& c) {
+    const std::string_view args = c.args;
+    const size_t sp = args.find(' ');
+    const std::string_view sub = args.substr(0, sp);
+    std::string_view name =
+        sp == std::string_view::npos ? std::string_view{} : args.substr(sp + 1);
+    skip_blanks(name);
+
+    if(sub != "start" && sub != "stop" && sub != "restart") {
+        std::string known;
+        for(const std::string& n : lsp_enabled_names())
+            known += (known.empty() ? "" : ", ") + n;
+        editor_set_status_message(
+            "usage: :lsp start|stop|restart [server] (registered: {})",
+            known.empty() ? "none" : known);
+        return;
+    }
+    const std::string cur =
+        name.empty() ? lsp_sync_server_of(E.buf()) : std::string{};
+    if(name.empty()) name = cur;
+    if(name.empty()) {
+        editor_set_status_message("lsp {}: no server for this buffer", sub);
+        return;
+    }
+    const std::string msg = sub == "start"  ? lsp_sync_server_start(name)
+                            : sub == "stop" ? lsp_sync_server_stop(name)
+                                            : lsp_sync_server_restart(name);
+    if(!msg.empty()) editor_set_status_message("{}", msg);
+}
+
 std::vector<std::unique_ptr<CmdSpec>>& specs() {
     static std::vector<std::unique_ptr<CmdSpec>> v;
     return v;
@@ -698,6 +728,15 @@ static std::vector<CmdCand> complete_buffers(std::string_view) {
     return out;
 }
 
+static std::vector<CmdCand> complete_lsp(std::string_view) {
+    std::vector<CmdCand> out = {{"start", "subcommand"},
+                                {"stop", "subcommand"},
+                                {"restart", "subcommand"}};
+    for(const std::string& n : lsp_enabled_names())
+        out.push_back({n, "server"});
+    return out;
+}
+
 void register_builtin_commands() {
     command_add({.name = "nohlsearch",
                  .aliases = {"noh"},
@@ -719,10 +758,10 @@ void register_builtin_commands() {
                  .nargs = Nargs::None,
                  .run = [](const CmdLine&) { editor_save(); }});
     command_add({.name = "wall",
-                .aliases = {"wa", "writeall"},
-                .desc = "Save all modified buffers",
-                .nargs = Nargs::None,
-                .run = [](const CmdLine&) { editor_save_all(); }});
+                 .aliases = {"wa", "writeall"},
+                 .desc = "Save all modified buffers",
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine&) { editor_save_all(); }});
     command_add({.name = "wq",
                  .aliases = {"x"},
                  .desc = "Save and quit",
@@ -735,11 +774,13 @@ void register_builtin_commands() {
     command_add({.name = "edit",
                  .aliases = {"e"},
                  .desc = "Open a file",
-                 .usage = ":e <file>",
+                 .usage = ":e <file> | :e[!]  (reload from disk)",
+                 .bang = true,
                  .nargs = Nargs::Opt,
                  .complete = complete_files,
                  .run = [](const CmdLine& c) {
-                     if(!c.argv.empty()) buffer_open(c.argv[0]);
+                     if(c.argv.empty()) external_reload(E.buf(), c.bang);
+                     else buffer_open(c.argv[0]);
                  }});
     command_add({.name = "ls",
                  .aliases = {"buffers"},
@@ -840,6 +881,13 @@ void register_builtin_commands() {
                  .nargs = Nargs::Opt,
                  .raw = true,
                  .run = cmd_tsinstall});
+    command_add({.name = "lsp",
+                 .desc = "Start, stop or restart LSP server",
+                 .usage = ":lsp start|stop|restart [server]",
+                 .nargs = Nargs::Any,
+                 .raw = true,
+                 .complete = complete_lsp,
+                 .run = cmd_lsp});
     errparser_register_builtin();
     qf_register_commands();
     build_register_builtin();

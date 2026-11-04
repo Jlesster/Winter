@@ -13,6 +13,8 @@
 
 #include "columns.hpp"
 #include "events.hpp"
+#include "external.hpp"
+#include "format.hpp"
 #include "editor.hpp"
 #include "lsp_sync.hpp"
 #include "options.hpp"
@@ -61,6 +63,9 @@ bool load_file(Buffer& b, const std::string& path) {
         b.orig.clear();
         b.eol = true;
         b.pt = PieceTable(std::string_view{});
+        b.wire();
+        b.disk_hash = state_hash("");
+        b.disk_size = 0;
         b.pt.set_history_limit(static_cast<size_t>(opts.undo_levels));
         buffer_detect_syntax(b);
         return true;
@@ -71,9 +76,12 @@ bool load_file(Buffer& b, const std::string& path) {
     b.orig.assign(std::istreambuf_iterator<char>(in),
                   std::istreambuf_iterator<char>());
     b.eol = b.orig.empty() || b.orig.back() == '\n';
+    b.disk_hash = state_hash(b.orig);
+    b.disk_size = b.orig.size();
     std::string_view view = b.orig;
     if(!b.orig.empty() && b.orig.back() == '\n') view.remove_suffix(1);
     b.pt = PieceTable(view);
+    b.wire();
     undofile_load(b);
     b.pt.set_history_limit(static_cast<size_t>(opts.undo_levels));
     buffer_detect_syntax(b);
@@ -113,7 +121,7 @@ int editor_write_file(Buffer& b, const std::string& path,
             n += chunk.size();
         });
     if(!err && b.eol &&
-       (b.pt.size() > 0 || !E.buf().orig.empty())) {
+       (b.pt.size() > 0 || !b.orig.empty())) {
         if(write_all(fd, "\n")) {
             h = state_hash("\n", h);
             ++n;
@@ -132,9 +140,13 @@ int editor_write_file(Buffer& b, const std::string& path,
 
 static int write_buffer(Buffer& b) {
     uint64_t dh = 0, ds = 0;
+    if(opts.format_on_save) format_on_save(b);
     events_emit("buf_write_pre", {b.filename});
     if(const int err = editor_write_file(b, b.filename, &dh, &ds)) return err;
     b.pt.mark_saved();
+    b.disk_hash = dh;  // so the fs echo of our own write is a no-op
+    b.disk_size = ds;
+    b.disk_changed = b.disk_gone = false;
     undofile_write(b, dh, ds);
     lsp_sync_saved(b);
     events_emit("buf_write_post", {b.filename});
@@ -154,13 +166,15 @@ void editor_save() {
             lsp_sync_attach(E.buf());
             return;
         }
+        external_watch(E.buf());
     }
-    const size_t len = E.buf().pt.size() + (E.buf().eol ? 1 : 0);
     if(const int err = write_buffer(E.buf())) {
         editor_set_status_message("Can't save! IO error: {}", strerror(err));
         return;
     }
-    editor_set_status_message("{} bytes written to disk", len);
+    const size_t len = E.buf().pt.size() + (E.buf().eol ? 1 : 0);
+    editor_set_status_message("{} bytes written to disk{}", len,
+                              format_take_note());
 }
 
 void editor_save_all() {
@@ -178,5 +192,6 @@ void editor_save_all() {
     std::string msg = std::format("{} buffer(s) written", saved);
     if(failed) msg += std::format(", {} failed", failed);
     if(unnamed) msg += std::format(", {} unnamed skipped", unnamed);
+    msg += format_take_note();
     editor_set_status_message("{}", msg);
 }

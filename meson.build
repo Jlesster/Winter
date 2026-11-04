@@ -52,6 +52,7 @@ deps = [
 ] + lang_deps + [lua_dep]
 
 sources = files(
+    'src/bufedit.cpp',
     'src/buffer.cpp',
     'src/buflist.cpp',
     'src/build.cpp',
@@ -68,7 +69,10 @@ sources = files(
     'src/errparse.cpp',
     'src/events.cpp',
     'src/extend.cpp',
+    'src/external.cpp',
     'src/file.cpp',
+    'src/format.cpp',
+    'src/format_run.cpp',
     'src/fuzzy.cpp',
     'src/glyphs.cpp',
     'src/gutter.cpp',
@@ -105,6 +109,7 @@ sources = files(
     'src/quickfix.cpp',
     'src/registry.cpp',
     'src/render.cpp',
+    'src/replace.cpp',
     'src/script.cpp',
     'src/script_buf.cpp',
     'src/script_ext.cpp',
@@ -120,6 +125,7 @@ sources = files(
     'src/tree.cpp',
     'src/undofile.cpp',
     'src/virt.cpp',
+    'src/watch.cpp',
 )
 
 incls = include_directories('.')

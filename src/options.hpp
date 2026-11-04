@@ -57,6 +57,8 @@ struct Options {
     int scrolloff = 5;      // scroll off padding
     int tab_stop = 4;       // display width of a '\t'
     int shift_width = 4;    // one indent level
+    bool format_on_save = false;  // run the formatter before every write
+    int format_timeout = 1000;    // ms a formatter may block a save
     int quit_times = 3;     // extra Ctrl-Q presses needed with unsaved changes
     int history = 500;      // history entries per file
     int number_width = 4;   // gutter width

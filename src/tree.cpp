@@ -23,13 +23,17 @@
 #include "inputbox.hpp"
 #include "job.hpp"
 #include "keys.hpp"
+#include "loop.hpp"
 #include "normal.hpp"
 #include "overlay.hpp"
 #include "registry.hpp"
 #include "theme.hpp"
 #include "virt.hpp"
+#include "watch.hpp"
 
 namespace fs = std::filesystem;
+
+void load_git_status();  // defined below at global scope
 
 namespace {
 
@@ -130,6 +134,8 @@ void flatten(Node* n, int depth, const std::string& prefix, bool last) {
         flatten(n->kids[i].get(), depth + 1, next, i + 1 == n->kids.size());
 }
 
+void sync_watches();
+
 void rebuild(const fs::path& keep) {
     g_rows.clear();
     flatten(g_root.get(), 0, "", true);
@@ -139,6 +145,7 @@ void rebuild(const fs::path& keep) {
             g_sel = i;
             break;
         }
+    sync_watches();
 }
 
 Node* cur() {
@@ -835,6 +842,8 @@ void tree_toggle() {
     }
     follow_init();
     g_shown = true;
+    refresh();  // catch up on anything that changed while hidden
+    load_git_status();
     focus(true);
     const Buffer& b = E.buf();
     if(!b.filename.empty() && !b.nofile) reveal(b.filename);
@@ -988,7 +997,7 @@ void load_git_status() {
     const std::string r = shell_quote(g_root->path.string());
     g_gstat_job = job_start({
         .cmd = "git -C " + r +
-               " rev-parse --show-prefix 2>/dev/null && git -C " + r +
+               " rev-parse --show-prefix 2>/dev/null && git --no-optional-locks -C " + r +
                " status --porcelain=v1 -z --untracked-files=normal 2>/dev/null",
         .on_exit =
             [gen](JobResult res) {
@@ -1000,6 +1009,65 @@ void load_git_status() {
             },
     });
 }
+
+// live fs reactivity: one inotify watch per *open* dir (not recursive)
+namespace {
+std::map<fs::path, WatchId> g_fsw;
+fs::path g_gitw_dir;
+WatchId g_gitw = 0;
+TimerId g_fs_timer = 0;
+bool g_fs_struct = false;
+
+void fs_event(const std::string& name, unsigned kind) {
+    if(!g_shown || !g_root) return;
+    if(name.ends_with(".winter.tmp")) return;  // our own atomic-save scratch
+    g_fs_struct |= (kind & WATCH_STRUCT) != 0;
+    if(g_fs_timer) return;  // throttle: at most one refresh per 120ms
+    g_fs_timer = loop_after(120, [] {
+        g_fs_timer = 0;
+        if(!g_root) return;
+        if(std::exchange(g_fs_struct, false)) refresh();
+        load_git_status();
+    });
+}
+
+void sync_watches() {
+    std::set<fs::path> want;
+    for(const Row& r : g_rows) {
+        if(!r.n->dir || !r.n->open) continue;
+        // .git churns on every `git status`; never watch inside it
+        if(std::ranges::any_of(r.n->path,
+                               [](const fs::path& c) { return c == ".git"; }))
+            continue;
+        want.insert(r.n->path);
+    }
+    for(auto it = g_fsw.begin(); it != g_fsw.end();) {
+        if(want.contains(it->first)) {
+            ++it;
+            continue;
+        }
+        watch_remove(it->second);
+        it = g_fsw.erase(it);
+    }
+    for(const fs::path& p : want)
+        if(!g_fsw.contains(p))
+            if(const WatchId id = watch_dir(p.string(), fs_event))
+                g_fsw[p] = id;
+
+    // stage/commit/checkout from another terminal only touches .git/index|HEAD
+    const fs::path gd = g_root ? g_root->path / ".git" : fs::path{};
+    if(gd != g_gitw_dir) {
+        if(g_gitw) watch_remove(g_gitw);
+        g_gitw = gd.empty() ? 0
+                            : watch_dir(gd.string(),
+                                        [](const std::string& n, unsigned) {
+                                            if(n == "index" || n == "HEAD")
+                                                fs_event("", 0);
+                                        });
+        g_gitw_dir = gd;
+    }
+}
+}  // namespace
 
 struct GitLook {
     const char* group;

@@ -16,7 +16,9 @@
 
 // data
 struct Buffer {
-    Buffer() {
+    Buffer() { wire(); }
+    // PieceTable's move-assign wipes the sinks; call after `pt = PieceTable(..)`
+    void wire() {
         pt.set_edit_sink([this](const TextEdit& e, Origin o) {
             syntax.on_edit(e);
             edit_emit(make_event(pt, e, o));
@@ -37,6 +39,9 @@ struct Buffer {
     int want_rx = 0;
     int row_offset = 0;
     int col_offset = 0;
+    uint64_t disk_hash = 0, disk_size = 0;  // bytes as last read/written by us
+    bool disk_changed = false;  // changed on disk while we hold unsaved edits
+    bool disk_gone = false;
 
     void sync_anchors() {
         for(const TextEdit& e : pt.drain_deco_edits()) {

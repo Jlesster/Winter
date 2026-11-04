@@ -2,8 +2,9 @@
 
 add provider map to clipboard utils
 lsp formatting and format on save
-updating buffers
+lsp command palette
 
 # bugs
 
-NO BUGS YET :D
+case unindent shifts back a space
+chords lacking

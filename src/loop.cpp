@@ -28,6 +28,7 @@ std::vector<Timer> g_timers;
 std::vector<Watch> g_watch;
 std::deque<std::function<void()>> g_tasks;
 std::function<void()> g_wake_hook;
+bool g_mask_stdin = false;
 }  // namespace
 
 void loop_init() {
@@ -108,7 +109,7 @@ bool loop_wait(int timeout_ms) {
         if(const int n = next_timer_ms(); n >= 0 && (t < 0 || n < t)) t = n;
         if(!g_tasks.empty()) t = 0;
         std::vector<pollfd> fds;
-        fds.push_back({STDIN_FILENO, POLLIN, 0});
+        fds.push_back({g_mask_stdin ? -1 : STDIN_FILENO, POLLIN, 0});
         fds.push_back({g_wake[0], POLLIN, 0});
         for(const Watch& w : g_watch) fds.push_back({w.fd, w.events, 0});
         const int r = poll(fds.data(), fds.size(), t);
@@ -138,4 +139,19 @@ bool loop_wait(int timeout_ms) {
         if(fired) return false;
         if(r == 0 && timeout_ms >= 0 && t == timeout_ms) return false;
     }
+}
+
+bool loop_pump_until(const std::function<bool()>& done, int timeout_ms) {
+    const auto end = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    const bool was = g_mask_stdin;
+    g_mask_stdin = true;
+    while(!done()) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              end - Clock::now())
+                              .count();
+        if(left <= 0) break;
+        loop_wait(static_cast<int>(left));
+    }
+    g_mask_stdin = was;
+    return done();
 }

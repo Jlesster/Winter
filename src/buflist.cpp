@@ -5,6 +5,7 @@
 #include <optional>
 #include "editor.hpp"
 #include "events.hpp"
+#include "external.hpp"
 #include "file.hpp"
 #include "lsp_sync.hpp"
 #include "motion.hpp"
@@ -82,6 +83,7 @@ size_t buffer_open(const std::string& path) {
     }
     E.buffers.push_back(std::move(b));
     lsp_sync_attach(*E.buffers.back());
+    external_watch(*E.buffers.back());
     buffer_switch(E.buffers.size() - 1);
     return E.cur;
 }
@@ -94,6 +96,7 @@ Buffer* buffer_get(const std::string& path) {
     if(!load_file(*b, path)) return nullptr;
     E.buffers.push_back(std::move(b));
     lsp_sync_attach(*E.buffers.back());
+    external_watch(*E.buffers.back());
     return E.buffers.back().get();
 }
 
@@ -109,6 +112,7 @@ bool buffer_close(size_t idx, bool force) {
         return false;
     }
     lsp_sync_detach(*E.buffers[idx]);
+    external_unwatch(*E.buffers[idx]);
     if(E.buffers.size() == 1) {
         set_mode(EditorMode::NORMAL);
         remember(*E.buffers[0], E.cy, E.cx);
@@ -205,6 +209,7 @@ void fill(Buffer& b, const std::string& text) {
     std::string_view v = b.orig;
     if(!b.orig.empty() && b.orig.back() == '\n') v.remove_suffix(1);
     b.pt = PieceTable(v);
+    b.wire();
     b.cx = b.cy = b.want_rx = b.row_offset = b.col_offset = 0;
 }
 

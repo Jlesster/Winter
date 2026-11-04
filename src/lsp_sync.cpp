@@ -67,6 +67,7 @@ struct Server {
     std::string name;
     LspId id = 0;
     bool dead = false;
+    bool restart = false;
     std::vector<Buffer*> waiting;
 };
 std::deque<Server> g_servers;
@@ -484,6 +485,14 @@ void on_exit(LspId id, std::string_view why) {
             d.buf->decos.clear_ns(deco_ns("lsp.refs"));
             d.buf->pt.lsp_track(false);
         }
+    if(s->restart) {
+        editor_set_status_message("lsp {}: restarting", s->name);
+        std::erase_if(g_servers, [id](const Server& x) { return x.id == id; });
+        loop_after(0, [] {
+            for(auto& b : E.buffers) lsp_sync_attach(*b);
+        });
+        return;
+    }
     std::erase_if(g_docs, [&](const Doc& d) { return d.server == id; });
     editor_set_status_message(
         "lsp {} exited: {}", s->name, why.substr(0, why.find('\n')));
@@ -574,6 +583,47 @@ void lsp_sync_attach(Buffer& b) {
     }
 }
 
+std::string lsp_sync_server_of(Buffer& b) {
+    if(const Doc* d = find(b))
+        if(const Server* s = by_id(d->server)) return s->name;
+    for(const Server& s : g_servers)
+        if(std::ranges::find(s.waiting, &b) != s.waiting.end()) return s.name;
+    return {};
+}
+
+std::string lsp_sync_server_start(std::string_view name) {
+    if(!lsp_enabled(name))
+        return std::format("lsp {}: not in the registry, or disabled", name);
+    for(const Server& s : g_servers)
+        if(s.name == name && !s.dead)
+            return std::format("lsp {}: already running", name);
+    std::erase_if(g_servers, [&](const Server& s) { return s.name == name; });
+    const Json cfg = lsp_resolve(name, builtin_for(name));
+    if(!ensure_server(std::string(name), cfg)) return {};
+    for(auto& b : E.buffers) lsp_sync_attach(*b);
+    return std::format("lsp {}: starting", name);
+}
+
+std::string lsp_sync_server_stop(std::string_view name) {
+    for(Server& s : g_servers)
+        if(s.name == name && !s.dead) {
+            s.restart = false;
+            lsp_stop(s.id);
+            return std::format("lsp {}: stopping", name);
+        }
+    return std::format("lsp {}: not running", name);
+}
+
+std::string lsp_sync_server_restart(std::string_view name) {
+    for(Server& s : g_servers)
+        if(s.name == name && !s.dead) {
+            s.restart = true;
+            lsp_stop(s.id);
+            return std::format("lsp {}: restarting", name);
+        }
+    return lsp_sync_server_start(name);
+}
+
 void lsp_sync_tick() {
     ref_tick();
     for(Doc& d : g_docs)
@@ -609,7 +659,7 @@ void lsp_sync_detach(Buffer& b) {
     std::erase_if(g_docs, [&](const Doc& x) { return x.buf == &b; });
 }
 
-std::optional<int> lsp_sync_version(Buffer &b) {
+std::optional<int> lsp_sync_version(Buffer& b) {
     Doc* d = find(b);
     if(!d) return std::nullopt;
     flush(*d);

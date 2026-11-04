@@ -3,7 +3,9 @@
 #include "builtin.hpp"
 #include "editor.hpp"
 #include "events.hpp"
+#include "external.hpp"
 #include "file.hpp"
+#include "format.hpp"
 #include "input.hpp"
 #include "job.hpp"
 #include "loop.hpp"
@@ -12,6 +14,7 @@
 #include "snippet.hpp"
 #include "src/tree.hpp"
 #include "terminal.hpp"
+#include "watch.hpp"
 
 void init_editor() {
     E.buffers.push_back(std::make_unique<Buffer>());
@@ -34,9 +37,12 @@ int main(int argc, const char* argv[]) {
     init_editor();
     loop_init();
     job_init();
+    watch_init();
+    external_init();
     install_winch_handler();
     register_builtins();
     const bool lua_ok = script_init();
+    format_init();
     if(lua_ok) script_load_config();
     bool open_config = false;
     std::vector<std::string> files;

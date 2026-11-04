@@ -43,6 +43,8 @@ Opt kTable[] = {
     {"remember_cursor", "", Kind::Bool, &opts.remember_cursor, 0, 1},
     {"undofile", "udf", Kind::Bool, &opts.undofile, 0, 1},
     {"undolevels", "ul", Kind::Int, &opts.undo_levels, 0, 100000},
+    {"formatonsave", "fos", Kind::Bool, &opts.format_on_save, 0, 1},
+    {"formattimeout", "fto", Kind::Int, &opts.format_timeout, 50, 60000},
     {"timeoutlen", "tm", Kind::Int, &opts.timeoutlen, 0, 60000},
     {"hlsearch", "hls", Kind::Bool, &opts.hlsearch, 0, 1},
     {"paste_indent", "pi", Kind::Bool, &opts.paste_indent, 0, 1},
