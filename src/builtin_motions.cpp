@@ -106,7 +106,10 @@ void register_builtin_motions() {
     bind_op_motion("motion.up", motion::up, "k");
     bind_op_motion("motion.right", motion::right_op, "");
     bind_motion("motion.left", motion::left, "h");
-    bind_motion("motion.right", motion::right, "l");
+    registry().add_action("motion.right", [](Ctx& c) {
+        apply_motion(motion::right(E.buf().pt, cursor_offset(), c.count));
+    });
+    map_shared("motion.right", "l");
     bind_motion("motion.line_start", motion::to_line_start, "0");
     bind_motion("motion.first_nonblank", motion::to_first_nonblank, "^");
     bind_motion("motion.line_end", motion::to_line_end, "$");

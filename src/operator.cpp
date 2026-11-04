@@ -298,7 +298,7 @@ void paste_over(const Range& r, int count, bool swap_reg) {
     const size_t at = r.start;
     size_t n = r.end - r.start;
     if(r.linewise) {
-        if(n && pt.at(r.end - 1)) --n;
+        if(n && pt.at(r.end - 1) == '\n') --n;
         if(src.linewise) s.pop_back();
     } else if(src.linewise) {
         s.insert(0, "\n");

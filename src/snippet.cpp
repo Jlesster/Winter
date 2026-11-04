@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdio>
+#include <filesystem>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -54,49 +55,162 @@ struct Parsed {
     std::vector<std::tuple<int, size_t, size_t>> ph;
 };
 
+class Parser {
+public:
+    Parser(std::string_view b, std::string_view base, const std::string& unit)
+        : b_(b), base_(base), unit_(unit) {}
+
+        Parsed run() {
+            seq(false);
+            return std::move(o_);
+        }
+
+private:
+    std::string_view b_, base_;
+    const std::string& unit_;
+    size_t i_ = 0;
+    Parsed o_;
+
+    bool peek(char c) const { return i_ < b_.size() && b_[i_] == c; }
+
+    void put(char ch) {
+        if(ch == '\n') {
+            o_.text += '\n';
+            o_.text.append(base_);
+        } else if(ch == '\t') o_.text += unit_;
+        else o_.text += ch;
+    }
+
+    static bool escapable(char c) { return c == '$' || c == '}' || c == '\\'; }
+
+    int number() {
+        int n = 0;
+        while(i_ < b_.size() &&
+              std::isdigit(static_cast<unsigned char>(b_[i_])))
+            n = n * 10 + (b_[i_++] - '0');
+        return n;
+    }
+
+    // text and $-constructs up to an unescaped '}' (nested) or end of input
+    void seq(bool nested) {
+        while(i_ < b_.size()) {
+            const char c = b_[i_];
+            if(nested && c == '}') return;
+            if(c == '\\' && i_ + 1 < b_.size() && escapable(b_[i_ + 1])) {
+                put(b_[i_ + 1]);
+                i_ += 2;
+            } else if(c == '$') {
+                dollar();
+            } else {
+                put(c);
+                ++i_;
+            }
+        }
+    }
+
+    // consume up to (not including) the matching '}', e.g. a ${1/re/fmt/} transform
+    void skip_close() {
+        int depth = 0;
+        while(i_ < b_.size()) {
+            const char c = b_[i_];
+            if(c == '\\') {
+                i_ += 2;
+                continue;
+            }
+            if(c == '{') ++depth;
+            else if(c == '}') {
+                if(depth == 0) return;
+                --depth;
+            }
+            ++i_;
+        }
+    }
+
+    // ${1|a,b,c|}: no choice UI, so the first choice becomes the default text
+    void choice() {
+        bool first = true;
+        while(i_ < b_.size()) {
+            const char c = b_[i_];
+            if(c == '|' && i_ + 1 < b_.size() && b_[i_ + 1] == '}') {
+                ++i_;
+                return;
+            }
+            if(c == '\\' && i_ + 1 < b_.size()) {
+                if(first) put(b_[i_ + 1]);
+                i_ += 2;
+                continue;
+            }
+            if(c == ',') first = false;
+            else if(first) put(c);
+            ++i_;
+        }
+    }
+
+    static bool variable(const std::string& n, std::string& out) {
+        namespace fs = std::filesystem;
+        const std::string& f = E.buf().filename;
+        if(n == "TM_FILENAME") out = fs::path(f).filename().string();
+        else if(n == "TM_FILENAME_BASE") out = fs::path(f).stem().string();
+        else if(n == "TM_DIRECTORY") out = fs::path(f).parent_path().string();
+        else if(n == "TM_FILEPATH") out = f;
+        else if(n == "TM_LINE_INDEX") out = std::to_string(E.cy);
+        else if(n == "TM_LINE_NUMBER") out = std::to_string(E.cy + 1);
+        else if(n == "TM_SELECTED_TEXT" || n == "CLIPBOARD") out.clear();
+        else return false;
+        return true;
+    }
+
+    void dollar() {
+        const size_t at = i_++;
+        const bool brace = peek('{');
+        if(brace) ++i_;
+
+        if(i_ < b_.size() && std::isdigit(static_cast<unsigned char>(b_[i_]))) {
+            const int n = number();
+            const size_t s = o_.text.size();
+            if(brace) {
+                if(peek(':')) {
+                    ++i_;
+                    seq(true);
+                } else if(peek('|')) {
+                    ++i_;
+                    choice();
+                } else skip_close();
+                if(peek('}')) ++i_;
+            }
+            o_.ph.emplace_back(n, s, o_.text.size());
+            return;
+        }
+
+        size_t k = i_;
+        while(k < b_.size() &&
+              (std::isalnum(static_cast<unsigned char>(b_[k])) || b_[k] == '_'))
+            ++k;
+        if(k == i_) {  // lone '$': literal
+            o_.text += '$';
+            i_ = at + 1;
+            return;
+        }
+        const std::string name(b_.substr(i_, k - i_));
+        i_ = k;
+        std::string val;
+        const bool known = variable(name, val);
+        if(brace) {
+            if(peek(':')) {
+                ++i_;
+                if(known) skip_close();
+                else seq(true);  // unknown variable: its default text
+            } else skip_close();
+            if(peek('}')) ++i_;
+        }
+        if(known)
+            for(const char ch : val) put(ch);
+    }
+};
+
 Parsed parse(std::string_view b, std::string_view base,
              const std::string& unit) {
-    Parsed o;
-    const auto put = [&](char ch) {
-        if(ch == '\n') {
-            o.text += '\n';
-            o.text.append(base);
-        } else if(ch == '\t') o.text += unit;
-        else o.text += ch;
-    };
-    for(size_t i = 0; i < b.size(); ++i) {
-        const char c = b[i];
-        if(c == '\\' && i + 1 < b.size()) {
-            put(b[++i]);
-            continue;
-        }
-        if(c != '$') {
-            put(c);
-            continue;
-        }
-        size_t j = i + 1;
-        const bool brace = j < b.size() && b[j] == '{';
-        if(brace) ++j;
-        size_t k = j;
-        int n = 0;
-        while(k < b.size() && std::isdigit(static_cast<unsigned char>(b[k])))
-            n = n * 10 + (b[k++] - '0');
-        if(k == j) {
-            o.text += c;
-            continue;
-        }
-        const size_t s = o.text.size();
-        if(brace) {
-            if(k < b.size() && b[k] == ':') {
-                ++k;
-                while(k < b.size() && b[k] != '}') put(b[k++]);
-            }
-            if(k < b.size() && b[k] == '}') ++k;
-        }
-        o.ph.emplace_back(n, s, o.text.size());
-        i = k - 1;
-    }
-    return o;
+    return Parser(b, base, unit).run();
 }
 
 void go_to(int idx) {

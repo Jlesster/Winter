@@ -14,6 +14,7 @@
 #include "keys.hpp"
 #include "menu.hpp"
 #include "piece.hpp"
+#include "jumplist.hpp"
 
 namespace {
 
@@ -227,6 +228,7 @@ QfCounts qf_counts() {
 bool qf_jump(size_t idx) {
     if(idx >= g_list.items.size()) return false;
     const QfEntry e = g_list.items[idx];
+    jump_push();
     buffer_open(e.file);
     // buffer_open stays on the current buffer when the file can't be loaded
     if(E.buf().filename.empty() || !same_file(E.buf().filename, e.file))

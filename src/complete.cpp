@@ -5,11 +5,14 @@
 #include <cstdint>
 #include <functional>
 #include <iterator>
+#include <format>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "columns.hpp"
+#include "buflist.hpp"
+#include "command.hpp"
 #include "core.hpp"
 #include "diag.hpp"
 #include "editor.hpp"
@@ -46,7 +49,7 @@ struct Item {
     std::string text;
     bool snippet = false;
     size_t start = 0;
-    size_t end = PieceTable::npos;
+    size_t tail = 0;
     std::vector<Edit> extra;
     int rank = 0;
     std::string doc;
@@ -76,6 +79,7 @@ Session S;
 unsigned g_seq = 0;
 TimerId g_timer = 0;
 TimerId g_rtimer = 0;
+std::string g_last;
 
 bool word_byte(unsigned char c) {
     return std::isalnum(c) || c == '_' || c >= 0x80;
@@ -86,19 +90,6 @@ size_t word_start_at(const PieceTable& pt, size_t cursor) {
     size_t s = cursor;
     while(s > ls && word_byte(static_cast<unsigned char>(pt.at(s - 1)))) --s;
     return s;
-}
-
-size_t lsp_col(const PieceTable& pt, size_t offset, bool utf16) {
-    const size_t ls = pt.line_start(pt.line_of(offset));
-    const std::string text = pt.text(ls, offset - ls);
-    if(!utf16) return text.size();
-    size_t units = 0;
-    for(size_t i = 0; i < text.size();) {
-        const Decoded d = utf8_decode(text, i);
-        units += d.cp >= 0x10000 ? 2 : 1;
-        i += d.len;
-    }
-    return units;
 }
 
 std::string fit(std::string_view s, int w) {
@@ -113,31 +104,6 @@ std::string fit(std::string_view s, int w) {
         i += d.len;
     }
     return out;
-}
-
-bool snippet_supported(std::string_view b) {
-    bool in_ph = false;
-    for(size_t i = 0; i < b.size(); ++i) {
-        const char c = b[i];
-        if(c == '\\') {
-            ++i;
-            continue;
-        }
-        if(c == '}') in_ph = false;
-        if(c != '$') continue;
-        const bool brace = i + 1 < b.size() && b[i + 1] == '{';
-        const size_t d = i + (brace ? 2 : 1);
-        if(d >= b.size() || !std::isdigit(static_cast<unsigned char>(b[d])))
-            return false;
-        if(!brace) continue;
-        if(in_ph) return false;
-        in_ph = true;
-        size_t k = d;
-        while(k < b.size() && std::isdigit(static_cast<unsigned char>(b[k])))
-            ++k;
-        if(k < b.size() && b[k] == '|') return false;
-    }
-    return true;
 }
 
 std::string doc_text(const Json& d) {
@@ -215,12 +181,12 @@ std::ptrdiff_t apply_extras(PieceTable& pt, std::vector<Edit> extra) {
 }
 
 Item parse_item(const Json& j, const PieceTable& pt, bool utf16,
-                size_t word_start) {
+                size_t word_start, size_t cursor) {
     Item it;
     it.raw = j;
     it.label = std::string(j["label"].as_str());
     it.label.erase(0, it.label.find_first_not_of(' '));
-    it.filter = std::string(j["filter"].as_str(it.label));
+    it.filter = std::string(j["filterText"].as_str(it.label));
     it.sort = std::string(j["sortText"].as_str(it.label));
     it.detail = std::string(j["detail"].as_str());
     if(it.detail.empty())
@@ -231,26 +197,25 @@ Item parse_item(const Json& j, const PieceTable& pt, bool utf16,
     const Json& te = j["textEdit"];
     it.text =
         std::string(te["newText"].as_str(j["insertText"].as_str(it.label)));
-    it.start = word_start;
-    if(te["range"].is_object()) {
-        const Json& s = te["range"];
-        it.start = lsp_offset(pt,
-                              s["start"]["line"].as_int(),
-                              s["start"]["character"].as_int(),
-                              utf16);
-        it.end = lsp_offset(pt,
-                            s["end"]["line"].as_int(),
-                            s["end"]["character"].as_int(),
-                            utf16);
-    } else {
         it.start = word_start;
-    }
-    if(it.snippet && !snippet_supported(it.text)) {
-        it.snippet = false;
-        it.text = it.label;
-    }
-    it.extra = parse_extras(j["additionalTextEdits"], pt, utf16, it.start);
-    return it;
+        // plain TextEdit has "range"; InsertReplaceEdit has "insert"+"replace".
+        // We take "replace" so no tail of the word is left behind; use
+        // te["insert"] here instead for VS Code's default insert behaviour.
+        const Json& rg = te["range"].is_object() ? te["range"] : te["replace"];
+        if(rg.is_object()) {
+            it.start = lsp_offset(pt,
+                                  rg["start"]["line"].as_int(),
+                                  rg["start"]["character"].as_int(),
+                                  utf16);
+            const size_t end = lsp_offset(pt,
+                                          rg["end"]["line"].as_int(),
+                                          rg["end"]["character"].as_int(),
+                                          utf16);
+            it.tail = end > cursor ? end - cursor : 0;
+        }
+        it.start = std::min(it.start, cursor);
+        it.extra = parse_extras(j["additionalTextEdits"], pt, utf16, it.start);
+        return it;
 }
 
 bool has_upper(std::string_view s) {
@@ -293,12 +258,15 @@ int rank(std::string_view f, std::string_view q) {
 }
 
 bool refilter() {
-    const std::string q =
-        S.buf->pt.text(S.word_start, cursor_offset() - S.word_start);
+    const PieceTable& pt = S.buf->pt;
+    const size_t cur = cursor_offset();
+    const std::string q = pt.text(S.word_start, cur - S.word_start);
     S.shown.clear();
     for(size_t i = 0; i < S.items.size(); ++i) {
-        S.items[i].rank = rank(S.items[i].filter, q);
-        if(S.items[i].rank >= 0) S.shown.push_back(i);
+        Item& it = S.items[i];
+        const bool own = it.start != S.word_start && it.start <= cur;
+        it.rank = rank(it.filter, own ? pt.text(it.start, cur - it.start) : q);
+        if(it.rank >= 0) S.shown.push_back(i);
     }
     std::ranges::stable_sort(S.shown, [](size_t a, size_t b) {
         const Item &x = S.items[a], &y = S.items[b];
@@ -322,10 +290,13 @@ void reset() {
     S.incomplete = false;
 }
 
+void cancel_pending();
+
 void close() {
     const OverlayId id = S.id;
     ++S.gen;
     ++g_seq;
+    cancel_pending();
     reset();
     if(id) overlay_close(id);
 }
@@ -395,39 +366,40 @@ void accept() {
     const bool utf16 = S.utf16;
     const bool late = S.can_resolve && !it.resolved && it.extra.empty();
     PieceTable& pt = buf->pt;
-    const size_t cur = cursor_offset();
+    const auto cur = static_cast<std::ptrdiff_t>(cursor_offset());
     close();
 
     size_t start;
     {
         PieceTable::Group g(pt);
         const std::ptrdiff_t shift = apply_extras(pt, std::move(it.extra));
-        start =
-            static_cast<size_t>(static_cast<std::ptrdiff_t>(it.start) + shift);
-        const std::ptrdiff_t cur_now =
-            static_cast<std::ptrdiff_t>(cursor_offset()) + shift;
-        std::ptrdiff_t end =
-            it.end == PieceTable::npos
-                ? cur_now
-                : std::max(static_cast<std::ptrdiff_t>(it.end) + shift,
-                           cur_now);
-        end =
-            std::clamp<std::ptrdiff_t>(end,
-                                       static_cast<std::ptrdiff_t>(start),
-                                       static_cast<std::ptrdiff_t>(pt.size()));
+        start = static_cast<size_t>(static_cast<std::ptrdiff_t>(it.start) + shift);
+        std::ptrdiff_t end = std::clamp<std::ptrdiff_t>(
+            cur + shift + static_cast<std::ptrdiff_t>(it.tail),
+            static_cast<std::ptrdiff_t>(start),
+            static_cast<std::ptrdiff_t>(pt.size()));
         if(!it.text.empty() && end < static_cast<std::ptrdiff_t>(pt.size()) &&
            pt.at(static_cast<size_t>(end)) == it.text.back() &&
-           has_unmatched_tail(it.text))
+               has_unmatched_tail(it.text))
             ++end;
-        if(end > static_cast<std::ptrdiff_t>(start))
-            pt.remove(start, static_cast<size_t>(end) - start);
-        if(it.snippet) {
-            set_cursor_offset(start);
-            snippet_expand(it.text);
-        } else {
-            pt.insert(start, it.text);
-            set_cursor_offset(start + it.text.size());
-        }
+        const std::string gone =
+            end > static_cast<std::ptrdiff_t>(start)
+            ? pt.text(start, static_cast<size_t>(end) - start)
+            : std::string();
+            g_last = std::format(
+                "label   : {}\nstart   : {}  tail: {}  cursor: {}  extras shift: {}\n"
+                "replaced: [{}]\ninserted: [{}]  snippet: {}\nraw item: {}\n",
+                it.label, start, it.tail, cur, shift, gone, it.text, it.snippet,
+                it.raw.dump());
+            if(end > static_cast<std::ptrdiff_t>(start))
+                pt.remove(start, static_cast<size_t>(end) - start);
+            if(it.snippet) {
+                set_cursor_offset(start);
+                snippet_expand(it.text);
+            } else {
+                pt.insert(start, it.text);
+                set_cursor_offset(start + it.text.size());
+            }
     }
     if(late) resolve_late(buf, server, utf16, it, start);
 }
@@ -601,11 +573,11 @@ bool is_trigger(LspId s, int c) {
 }
 
 void on_reply(unsigned seq, uint64_t rev, Buffer* buf, LspId server,
-              size_t word_start, bool utf16, const Json& result,
+              size_t word_start, size_t cur, bool utf16, const Json& result,
               const Json& error) {
     if(seq != g_seq || buf != &E.buf() || E.mode != EditorMode::INSERT) return;
     if(!error.is_null()) return;
-    if(buf->pt.revision() != rev) return;
+    if(buf->pt.revision() != rev || cursor_offset() != cur) return;
     const Json& list = result.is_array() ? result : result["items"];
     if(!list.is_array()) return close();
     S.items.clear();
@@ -616,7 +588,7 @@ void on_reply(unsigned seq, uint64_t rev, Buffer* buf, LspId server,
             .as_bool(false);
     for(const Json& j : list.items()) {
         if(S.items.size() >= kMaxItems) break;
-        S.items.push_back(parse_item(j, buf->pt, utf16, word_start));
+        S.items.push_back(parse_item(j, buf->pt, utf16, word_start, cur));
         S.items.back().resolved = !S.can_resolve;
     }
     S.server = server;
@@ -652,7 +624,7 @@ void request(int kind, const std::string& trigger) {
                                {"character", lsp_col(pt, cur, utf16)}})},
                    {"context", ctx}}),
         [=](const Json& result, const Json& error) {
-            on_reply(seq, rev, buf, server, ws, utf16, result, error);
+            on_reply(seq, rev, buf, server, ws, cur, utf16, result, error);
         });
 }
 
@@ -766,4 +738,15 @@ void completion_post_key(int c) {
         return schedule(2, std::string(1, static_cast<char>(c)));
     if(typed_word && cur - ws >= kMinPrefix) return schedule(1);
     cancel_pending();
+}
+
+void completion_register_commands() {
+    command_add({.name = "CompletionLast",
+        .desc = "Show the last accepted LSP completion",
+            .nargs = Nargs::None,
+            .run = [](const CmdLine&) {
+                buffer_show_text(
+                    "[completion]",
+                    g_last.empty() ? "nothing accepted yet\n" : g_last);
+            }});
 }

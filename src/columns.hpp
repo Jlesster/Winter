@@ -1,5 +1,4 @@
 #pragma once
-// Pure text-geometry helpers: bytes <-> display columns. No editor state.
 
 #include <string_view>
 

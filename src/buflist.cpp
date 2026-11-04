@@ -86,6 +86,17 @@ size_t buffer_open(const std::string& path) {
     return E.cur;
 }
 
+Buffer* buffer_get(const std::string& path) {
+    for(const auto& b : E.buffers)
+        if(!b->filename.empty() && norm(b->filename) == norm(path))
+            return b.get();
+    auto b = std::make_unique<Buffer>();
+    if(!load_file(*b, path)) return nullptr;
+    E.buffers.push_back(std::move(b));
+    lsp_sync_attach(*E.buffers.back());
+    return E.buffers.back().get();
+}
+
 void buffer_remember_cursor() { remember(E.buf(), E.cy, E.cx); }
 
 bool buffer_close(size_t idx, bool force) {

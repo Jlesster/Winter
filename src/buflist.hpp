@@ -5,8 +5,11 @@
 #include <string>
 #include <string_view>
 
+struct Buffer;
+
 void buffer_switch(size_t idx);
 size_t buffer_open(const std::string& path);
+Buffer* buffer_get(const std::string& path);
 bool buffer_close(size_t idx, bool force);
 void buffer_cycle(int step);
 void buffer_goto_alt();

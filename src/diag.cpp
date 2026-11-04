@@ -29,6 +29,19 @@ size_t lsp_offset(const PieceTable& pt, int64_t line, int64_t character,
     return ls + i;
 }
 
+size_t lsp_col(const PieceTable& pt, size_t offset, bool utf16) {
+    const size_t ls = pt.line_start(pt.line_of(offset));
+    const std::string text = pt.text(ls, offset - ls);
+    if(!utf16) return text.size();
+    size_t units = 0;
+    for(size_t i = 0; i < text.size();) {
+        const Decoded d = utf8_decode(text, i);
+        units += d.cp >= 0x10000 ? 2 : 1;
+        i += d.len;
+    }
+    return units;
+}
+
 std::vector<Diag> diag_from_lsp(const PieceTable& pt, const Json& list,
                                 bool utf16) {
     std::vector<Diag> out;
@@ -49,6 +62,7 @@ std::vector<Diag> diag_from_lsp(const PieceTable& pt, const Json& list,
             std::clamp<int64_t>(j["severity"].as_int(1), 1, 4));
         d.msg = std::string(j["message"].as_str());
         d.source = std::string(j["source"].as_str());
+        d.raw = j;
         out.push_back(std::move(d));
     }
     std::ranges::sort(out, [](const Diag& a, const Diag& b) {

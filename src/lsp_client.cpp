@@ -36,6 +36,8 @@ struct Client {
 std::vector<std::unique_ptr<Client>> g_clients;
 LspId g_next_id = 0;
 std::map<std::string, LspNotify, std::less<>> g_notify;
+std::map<std::string, LspRequestFn, std::less<>> g_reqh;
+std::map<std::string, LspAsyncRequestFn, std::less<>> g_areqh;
 const Json kNone;
 
 Client* get(LspId id) {
@@ -125,6 +127,16 @@ void on_server_request(Client& c, const Json& m) {
               method == "client/unregisterCapability" ||
               method == "window/workDoneProgress/create") {
         reply(c, id, Json());
+    } else if(const auto it = g_areqh.find(method); it != g_areqh.end()) {
+        const LspAsyncRequestFn fn = it->second;
+        const LspId cid = c.id;
+        const Json rid = id;
+        fn(cid, m["params"], [cid, rid](Json result) {
+            if(Client* cl = get(cid)) reply(*cl, rid, std::move(result));
+        });
+    } else if(const auto it = g_reqh.find(method); it != g_reqh.end()) {
+        const LspRequestFn fn = it->second;
+        reply(c, id, fn(c.id, m["params"]));
     } else {
         reply_error(c, id, -32601, "method not found");
     }
@@ -203,6 +215,34 @@ void send_initialize(Client& c) {
               {{"synchronization", Json::obj({{"didSave", true}})},
                {"publishDiagnostics", Json::obj()},
                {"documentHighlight", Json::obj()},
+               {"hover",
+                Json::obj({{"contentFormat", Json::arr({"plaintext"})}})},
+               {"definition", Json::obj({{"linkSupport", true}})},
+               {"declaration", Json::obj({{"linkSupport", true}})},
+               {"typeDefinition", Json::obj({{"linkSupport", true}})},
+               {"implementation", Json::obj({{"linkSupport", true}})},
+               {"references", Json::obj()},
+               {"rename", Json::obj({{"prepareSupport", true}})},
+               {"codeAction",
+                Json::obj(
+                    {{"codeActionLiteralSupport",
+                      Json::obj(
+                          {{"codeActionKind",
+                            Json::obj({{"valueSet",
+                                        Json::arr({"",
+                                                   "quickfix",
+                                                   "refactor",
+                                                   "refactor.extract",
+                                                   "refactor.inline",
+                                                   "refactor.rewrite",
+                                                   "source",
+                                                   "source.organizeImports",
+                                                   "source.fixAll"})}})}})},
+                     {"isPreferredSupport", true},
+                     {"disabledSupport", true},
+                     {"dataSupport", true},
+                     {"resolveSupport",
+                      Json::obj({{"properties", Json::arr({"edit"})}})}})},
                {"semanticTokens",
                 Json::obj(
                     {{"requests", Json::obj({{"full", true}})},
@@ -242,7 +282,21 @@ void send_initialize(Client& c) {
                                        "detail",
                                        "additionalTextEdits"})}})}})}})}})},
          {"workspace",
-          Json::obj({{"configuration", true}, {"workspaceFolders", true}})}});
+             Json::obj(
+                 {{"configuration", true},
+                     {"workspaceFolders", true},
+                     {"applyEdit", true},
+                     {"workspaceEdit",
+                         Json::obj({{"documentChanges", true},
+                             {"resourceOperations",
+                                 Json::arr({"create", "rename", "delete"})},
+                             {"failureHandling", "abort"}})}})},
+         {"window",
+             Json::obj(
+                 {{"showMessage",
+                     Json::obj({{"messageActionItem",
+                         Json::obj({{"additionalPropertiesSupport", false}})}})},
+                     {"showDocument", Json::obj({{"support", true}})}})}});
     Json p;
     p.set("processId", static_cast<int64_t>(getpid()));
     p.set("clientInfo", Json::obj({{"name", "winter"}}));
@@ -345,6 +399,14 @@ void lsp_stop(LspId id) {
 
 void lsp_on(std::string_view method, LspNotify fn) {
     g_notify[std::string(method)] = std::move(fn);
+}
+
+void lsp_on_request(std::string_view method, LspRequestFn fn) {
+    g_reqh[std::string(method)] = std::move(fn);
+}
+
+void lsp_on_request_async(std::string_view method, LspAsyncRequestFn fn) {
+    g_areqh[std::string(method)] = std::move(fn);
 }
 
 bool lsp_ready(LspId id) {

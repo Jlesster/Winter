@@ -609,6 +609,13 @@ void lsp_sync_detach(Buffer& b) {
     std::erase_if(g_docs, [&](const Doc& x) { return x.buf == &b; });
 }
 
+std::optional<int> lsp_sync_version(Buffer &b) {
+    Doc* d = find(b);
+    if(!d) return std::nullopt;
+    flush(*d);
+    return d->version;
+}
+
 void lsp_sync_saved(Buffer& b) {
     Doc* d = find(b);
     if(!d) return;
@@ -624,7 +631,8 @@ std::optional<LspDoc> lsp_sync_doc(Buffer& b, bool flush_pending) {
     Doc* d = find(b);
     if(!d || !lsp_ready(d->server)) return std::nullopt;
     if(flush_pending) flush(*d);
-    return LspDoc{d->server, d->uri, d->utf16};
+    const Server* sv = by_id(d->server);
+    return LspDoc{d->server, d->uri, d->utf16, sv ? sv->name : std::string{}};
 }
 
 bool lsp_sync_semantic_debug(Buffer& b) {

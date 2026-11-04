@@ -13,6 +13,7 @@
 #include "buflist.hpp"
 #include "command.hpp"
 #include "core.hpp"
+#include "jumplist.hpp"
 #include "editor.hpp"
 #include "fuzzy.hpp"
 #include "inputbox.hpp"
@@ -214,6 +215,7 @@ bool on_key(int c) {
 }
 
 void open_at(const std::string& path, int line, int col) {
+    jump_push();
     buffer_open(path);
     if(line <= 0) return;
     std::error_code ec;

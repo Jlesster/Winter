@@ -22,8 +22,10 @@
 #include "glyphs.hpp"
 #include "inputbox.hpp"
 #include "json.hpp"
+#include "jumplist.hpp"
 #include "keys.hpp"
 #include "lsp_config.hpp"
+#include "lsp_nav.hpp"
 #include "lua_json.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
@@ -32,6 +34,7 @@
 #include "registry.hpp"
 #include "script_internal.hpp"
 #include "snippet.hpp"
+#include "src/lsp_actions.hpp"
 #include "theme.hpp"
 #include "utf8.hpp"
 #include "virt.hpp"
@@ -215,6 +218,37 @@ int l_lsp(lua_State* L) {
     return ok ? 0 : lua_error(L);
 }
 
+int l_lsp_goto(lua_State* L) {
+    NavKind kind{};
+    if(!nav_kind_from_name(luaL_checkstring(L, 1), kind))
+        return luaL_argerror(
+            L,
+            1,
+            "definition|declaration|type_definition|implementation|references");
+    lsp_goto(kind);
+    return 0;
+}
+
+int l_lsp_switch(lua_State*) {
+    lsp_switch_source_header();
+    return 0;
+}
+
+int l_lsp_code_action(lua_State* L) {
+    lsp_code_action();
+    return 0;
+}
+
+int l_jump_older(lua_State* L) {
+    jump_older(static_cast<int>(luaL_optinteger(L, 1, 1)));
+    return 0;
+}
+
+int l_jump_newer(lua_State* L) {
+    jump_newer(static_cast<int>(luaL_optinteger(L, 1, 1)));
+    return 0;
+}
+
 #include "script_deco.inc"
 
 bool color_at(lua_State* L, int idx, uint32_t* out) {
@@ -387,7 +421,13 @@ const luaL_Reg kDeco[] = {{"ns", l_ns},
                           {"eol", l_eol},
                           {"clear", l_clear_ns},
                           {nullptr, nullptr}};
-const luaL_Reg kLsp[] = {{"setup", l_lsp}, {nullptr, nullptr}};
+const luaL_Reg kLsp[] = {{"setup", l_lsp},
+                         {"goto", l_lsp_goto},
+                         {"switch_source_header", l_lsp_switch},
+                         {"code_action", l_lsp_code_action},
+                         {nullptr, nullptr}};
+const luaL_Reg kJump[] = {
+    {"older", l_jump_older}, {"newer", l_jump_newer}, {nullptr, nullptr}};
 const luaL_Reg kSnippet[] = {
     {"expand", l_snippet}, {"add", l_snippet_add}, {nullptr, nullptr}};
 const luaL_Reg kLang[] = {{"comment", l_comment}, {nullptr, nullptr}};
@@ -445,6 +485,7 @@ bool script_init() {
     script_register("float", kFloat);
     script_register("deco", kDeco);
     script_register("lsp", kLsp);
+    script_register("jump", kJump);
     script_register("snippet", kSnippet);
     script_register("lang", kLang);
     script_register("theme", kTheme);

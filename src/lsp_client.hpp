@@ -8,6 +8,10 @@
 using LspId = int;
 using LspReply = std::function<void(const Json& result, const Json& error)>;
 using LspNotify = std::function<void(LspId, const Json& params)>;
+using LspRequestFn = std::function<Json(LspId, const Json& params)>;
+using LspRespond = std::function<void(Json)>;
+using LspAsyncRequestFn =
+    std::function<void(LspId, const Json& params, LspRespond)>;
 
 struct LspSpec {
     std::string name;
@@ -27,6 +31,8 @@ void lsp_request(LspId id, std::string_view method, Json params,
 void lsp_notify(LspId id, std::string_view method, Json params = {});
 
 void lsp_on(std::string_view method, LspNotify fn);
+void lsp_on_request(std::string_view method, LspRequestFn fn);
+void lsp_on_request_async(std::string_view method, LspAsyncRequestFn fn);
 
 bool lsp_ready(LspId id);
 const Json& lsp_capabilities(LspId id);

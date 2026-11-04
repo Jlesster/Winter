@@ -9,6 +9,10 @@
 #include "diag.hpp"
 #include "edit.hpp"
 #include "editor.hpp"
+#include "jumplist.hpp"
+#include "lsp_actions.hpp"
+#include "lsp_rename.hpp"
+#include "lsp_nav.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
 #include "registry.hpp"
@@ -223,6 +227,27 @@ void register_builtin_actions() {
         ":");
 
     bind("lsp.hover", [](Ctx&) { hover_show(); }, "K");
+    bind("lsp.definition", [](Ctx&) { lsp_goto(NavKind::Definition); }, "gd");
+    bind("lsp.definition", [](Ctx&) { lsp_goto(NavKind::Declaration); }, "gD");
+    bind(
+        "lsp.type_definition",
+        [](Ctx&) { lsp_goto(NavKind::TypeDefinition); },
+        "gy");
+    bind(
+        "lsp.implementation",
+        [](Ctx&) { lsp_goto(NavKind::Implementation); },
+        "gi");
+    bind("lsp.references", [](Ctx&) { lsp_goto(NavKind::References); }, "gr");
+    bind(
+        "lsp.switch_source_header",
+        [](Ctx&) { lsp_switch_source_header(); },
+        "gh");
+    bind("lsp.code_action", [](Ctx&) { lsp_code_action(); }, "<space>la");
+    bind_visual(
+        "lsp.code_action_visual", [](Ctx&) { lsp_code_action(); }, "<space>la");
+    bind("lsp.rename", [](Ctx&) { lsp_rename(); }, "<space>lr");
+    bind("jump.older", [](Ctx& c) { jump_older(c.count); }, "<C-o>");
+    bind("jump.newer", [](Ctx& c) { jump_newer(c.count); }, "<Tab>");
     bind_visual(
         "visual.dup",
         [](Ctx&) {

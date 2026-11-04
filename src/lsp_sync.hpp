@@ -10,10 +10,12 @@ struct LspDoc {
     LspId server;
     std::string uri;
     bool utf16;
+    std::string server_name;
 };
 
 void lsp_sync_attach(Buffer& b);
 void lsp_sync_detach(Buffer& b);
+std::optional<int> lsp_sync_version(Buffer& b);
 void lsp_sync_saved(Buffer& b);
 void lsp_sync_tick();
 void lsp_sync_flush();

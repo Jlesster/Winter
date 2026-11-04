@@ -8,22 +8,26 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <utility>
 #include <optional>
 #include <regex>
-#include <system_error>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 #include "buflist.hpp"
-#include "core.hpp"
+#include "complete.hpp"
 #include "build.hpp"
+#include "lsp_rename.hpp"
+#include "core.hpp"
 #include "editor.hpp"
 #include "errparse.hpp"
 #include "file.hpp"
 #include "fuzzy.hpp"
 #include "job.hpp"
+#include "lsp_actions.hpp"
+#include "lsp_nav.hpp"
 #include "lsp_sync.hpp"
 #include "menu.hpp"
 #include "motion.hpp"
@@ -43,6 +47,12 @@
 namespace {
 void skip_blanks(std::string_view& s) {
     while(!s.empty() && s.front() == ' ') s.remove_prefix(1);
+}
+
+bool is_shell_cmd(std::string_view s) {
+    if(s.size() < 2 || s.front() != '$') return false;
+    const char n = s[1];
+    return n != '+' && n != '-' && n != ',';
 }
 
 std::optional<long> parse_addr(std::string_view& s, long base) {
@@ -606,7 +616,8 @@ void command_add(CmdSpec spec) {
             break;
         }
     if(slot) {  // re-registration: drop old names, overwrite in place
-        std::erase_if(idx, [slot](const auto& kv) { return kv.second == slot; });
+        std::erase_if(idx,
+                      [slot](const auto& kv) { return kv.second == slot; });
         *slot = std::move(spec);
     } else {
         specs().push_back(std::make_unique<CmdSpec>(std::move(spec)));
@@ -661,10 +672,11 @@ static std::vector<CmdCand> complete_files(std::string_view lead) {
     namespace fs = std::filesystem;
     std::vector<CmdCand> out;
     const size_t slash = lead.rfind('/');
-    const std::string dir =
-        slash == std::string_view::npos ? "" : std::string(lead.substr(0, slash + 1));
-    const std::string stem(slash == std::string_view::npos ? lead
-                                                           : lead.substr(slash + 1));
+    const std::string dir = slash == std::string_view::npos
+                                ? ""
+                                : std::string(lead.substr(0, slash + 1));
+    const std::string stem(
+        slash == std::string_view::npos ? lead : lead.substr(slash + 1));
     std::error_code ec;
     fs::directory_iterator it(dir.empty() ? "." : dir, ec);
     if(ec) return out;
@@ -746,9 +758,7 @@ void register_builtin_commands() {
                  .desc = "Close buffer",
                  .bang = true,
                  .nargs = Nargs::None,
-                 .run = [](const CmdLine& c) {
-                     buffer_close(E.cur, c.bang);
-                 }});
+                 .run = [](const CmdLine& c) { buffer_close(E.cur, c.bang); }});
     command_add({.name = "buffer",
                  .aliases = {"b"},
                  .desc = "Go to buffer",
@@ -830,6 +840,10 @@ void register_builtin_commands() {
     build_register_builtin();
     build_register_commands();
     picker_register_commands();
+    lsp_nav_register_commands();
+    lsp_actions_register();
+    lsp_rename_register();
+    completion_register_commands();
 }
 
 void editor_command_palette(std::string_view cmd) {
@@ -914,7 +928,8 @@ bool pop_context(const std::string& buf, size_t pos, PopCtx& ctx) {
     const CmdMatch m = command_find(c.name);
     if(!m.spec || !m.spec->complete) return false;
     const size_t ws = head.find_last_of(' ');
-    ctx.from = std::max(c.args_off, ws == std::string::npos ? size_t{0} : ws + 1);
+    ctx.from =
+        std::max(c.args_off, ws == std::string::npos ? size_t{0} : ws + 1);
     ctx.to = pos;
     while(ctx.to < buf.size() && buf[ctx.to] != ' ') ++ctx.to;
     ctx.lead = head.substr(ctx.from);
@@ -947,10 +962,12 @@ void pop_update(const std::string& buf, size_t pos) {
                     hl = m.pos;
                 }
                 for(const std::string& a : sp->aliases)
-                    if(fuzzy::match(a, ctx.lead, m) && (!ok || m.score > best)) {
+                    if(fuzzy::match(a, ctx.lead, m) &&
+                       (!ok || m.score > best)) {
                         ok = true;
                         best = m.score;
-                        hl.clear();  // the match was on the alias, not the label
+                        hl.clear();  // the match was on the alias, not the
+                                     // label
                     }
                 if(!ok) continue;
             }
@@ -1052,13 +1069,13 @@ void popup_after_key(const std::string& buf, size_t pos, int key, bool edited) {
 void editor_command_prompt() {
     PromptHooks hooks;
     hooks.pre_key = popup_pre_key;
-    hooks.after_key = [](const std::string& buf, size_t pos, int key,
-                         bool edited) {
-        subst_preview_key(buf, key);
-        popup_after_key(buf, pos, key, edited);
-    };
-    std::string cmd = editor_prompt(
-        ":", hooks, std::exchange(E.cmd_prefill, std::string{}));
+    hooks.after_key =
+        [](const std::string& buf, size_t pos, int key, bool edited) {
+            subst_preview_key(buf, key);
+            popup_after_key(buf, pos, key, edited);
+        };
+    std::string cmd =
+        editor_prompt(":", hooks, std::exchange(E.cmd_prefill, std::string{}));
     pop_reset();
     E.cmd_sel = false;
     set_mode(NORMAL);
