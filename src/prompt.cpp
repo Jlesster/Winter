@@ -1,10 +1,13 @@
 #include "prompt.hpp"
 
+#include <chrono>
 #include <ctime>
 #include <format>
 #include <map>
+#include <optional>
 #include <vector>
 
+#include "chord.hpp"
 #include "columns.hpp"
 #include "core.hpp"
 #include "edit.hpp"
@@ -88,6 +91,32 @@ std::string editor_prompt(std::string_view prompt, const PromptHooks& hooks,
     std::string typed;  // the half-typed line, kept while browsing history
     const int pw = text_width(prompt);
 
+    Chord chord;
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    bool submit = false;  // a replayed <S-CR>/<C-CR>/<A-CR> acts like Enter
+    const auto emit_literal = [&](int key) {
+        const int c = key_text(key);
+        if(c == '\r') {
+            submit = true;
+            return;
+        }
+        if(c < 32 || c >= 256) return;
+        buf.insert(pos, 1, static_cast<char>(c));
+        ++pos;
+        hidx = hist.size();  // editing leaves history browsing
+        if(hooks.after_key) hooks.after_key(buf, pos, c, true);
+    };
+    const auto submit_if_requested = [&] {
+        if(!submit) return false;
+        submit = false;
+        if(buf.empty()) return false;  // plain Enter ignores an empty prompt too
+        history_add(hist, buf);
+        state_history_append(prompt, buf);
+        editor_set_status_message("");
+        if(hooks.after_key) hooks.after_key(buf, pos, '\r', false);
+        return true;
+    };
+
     for(;;) {
         // line outgrew the bar: drop leading chars so the cursor stays visible
         const std::string_view sv = buf;
@@ -100,8 +129,54 @@ std::string editor_prompt(std::string_view prompt, const PromptHooks& hooks,
         g_view.col = pw + text_width(sv.substr(first, pos - first));
         editor_refresh_screen();
 
-        const int c = editor_read_key();
-        if(c == NONE) continue;  // resize / unknown escape: just redraw
+        int wait_ms = -1;
+        if(hooks.keymap_mode && chord.pending() && opts.timeoutlen > 0) {
+            if(!deadline)
+                deadline = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(opts.timeoutlen);
+
+            const auto left =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    *deadline - std::chrono::steady_clock::now())
+                    .count();
+
+            if(left <= 0) {
+                deadline.reset();
+                chord.timeout(emit_literal);
+                if(submit_if_requested()) return buf;
+                continue;
+            }
+            wait_ms = static_cast<int>(left);
+        } else if(!chord.pending()) {
+            deadline.reset();
+        }
+
+        int c = editor_read_key_timeout(true, wait_ms);
+        if(c == NONE) {
+            // NONE can also mean "a timer woke the loop", so only resolve the
+            // chord when the deadline has really passed.
+            if(wait_ms >= 0 && deadline &&
+               std::chrono::steady_clock::now() >= *deadline) {
+                deadline.reset();
+                chord.timeout(emit_literal);
+                if(submit_if_requested()) return buf;
+            }
+            continue;  // resize / unknown escape / chord timeout
+        }
+        deadline.reset();
+
+        if(hooks.keymap_mode) {
+            const Chord::Result r =
+                chord.feed(*hooks.keymap_mode, c, emit_literal);
+            if(submit_if_requested()) return buf;
+            if(r != Chord::Result::Pass) continue;
+        }
+
+        if(key_mods(c)) {
+            c = key_text(c);
+            if(c == NONE) continue;
+        }
+
         if(hooks.pre_key && hooks.pre_key(c, buf, pos)) {
             if(pos > buf.size()) pos = buf.size();
             hidx = hist.size();

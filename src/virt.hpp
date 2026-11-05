@@ -56,4 +56,5 @@ public:
 private:
     std::vector<EolDeco> _eol;
     std::vector<SpanDeco> _spans;
+    size_t _max_len = 0;
 };

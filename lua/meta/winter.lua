@@ -53,9 +53,15 @@ function winter.selection() end
 ---@field reverse? boolean
 ---@field strikethrough? boolean
 
----Mode letters for keymaps: any of `n` normal, `i` insert, `r` replace,
----`v`/`x` visual, `c` command, `s` search, `f` file tree. `"nv"` = several.
----@alias winter.Modes string
+---Mode words accepted by keymaps. `"visual"` covers `v` and `x`.
+---@alias winter.ModeName "normal"|"insert"|"replace"|"visual"|"command"|"search"|"files"
+
+---Where a keymap applies. Any of:
+---  letters: `n` normal, `i` insert, `r` replace, `v`/`x` visual, `c` command,
+---           `s` search, `f` file tree; `"nv"` = several
+---  a word:  `"normal"`
+---  a table of either: `{ "n", "x" }`, `{ "normal", "visual" }`, `{ "nx", "i" }`
+---@alias winter.Modes string|(string|winter.ModeName)[]
 
 ---@alias winter.Border "rounded"|"straight"|"double"|"block"
 
@@ -129,7 +135,16 @@ function winter.selection() end
 ---@field cc integer Alias of `colorcolumn`.
 ---@field hlreference boolean Highlight other uses of the symbol under the cursor (LSP) (default false)
 ---@field hlr boolean Alias of `hlreference`.
-
+---@field formatonsave boolean Run the formatter before every write (default false). `winter.format.setup{ on_save = ... }` and `:format on|off|toggle` set it too.
+---@field fos boolean Alias of `formatonsave`.
+---@field formattimeout integer Ms a formatter may block a save (range 50..60000, default 1000)
+---@field fto integer Alias of `formattimeout`.
+---@field indentnamespace integer Indent inside `namespace` blocks: 0 flat, 1 indent, 2 follow the block's first line (range 0..2, default 2)
+---@field inam integer Alias of `indentnamespace`.
+---@field indentcase integer Indent `case` labels in a `switch`: 0 flat, 1 indent, 2 follow the block's first line (range 0..2, default 2)
+---@field icase integer Alias of `indentcase`.
+---@field hotreload boolean Reload the config when a `.lua` file under the config dir changes (default true)
+---@field hr boolean Alias of `hotreload`.
 
 ---Typed access to every option by name. Aliases (`ts`, `sw`, `et`, ...) work.
 ---@class winter.options
@@ -322,9 +337,29 @@ function winter.jump.newer(count) end
 --------------------------------------------------------------------------
 
 ---Key notation: `<C-x>`, `<esc>`, `<cr>`, `<tab>`, `<bs>`, `<space>`, `<lt>`;
----everything else is typed literally (`gd`, `<space>f`, `]d`). There is no
----`<leader>`.
+---everything else is typed literally (`gd`, `<space>f`, `]d`). Modifiers stack
+---as `<C-S-x>`, `<A-Space>`, `<S-Space>`. There is no `<leader>`.
+---
+---Mappings are active in normal (`n`), insert (`i`), replace (`r`), visual
+---(`v`), command (`c`) and search (`s`) modes. In text-entry modes a key that
+---does not start or continue a mapping falls back to its text: an unmapped
+---`<S-Space>` types a space, an unmapped `<C-Space>` types nothing, and an
+---unmapped `<S-CR>`, `<C-CR>` or `<A-CR>` acts like Enter.
 ---@alias winter.Keys string
+
+---Built-in action names usable in `winter.keymap.set`. Not exhaustive:
+---`winter.action.list()` has the full set.
+---@alias winter.BuiltinAction
+---| "lsp.definition" | "lsp.type_definition" | "lsp.implementation" | "lsp.references"
+---| "lsp.hover" | "lsp.rename" | "lsp.code_action" | "lsp.code_action_visual"
+---| "lsp.switch_source_header"
+---| "tree.toggle"
+---| "buffer.next" | "buffer.prev" | "buffer.alt"
+---| "diag.next" | "diag.prev"
+---| "jump.older" | "jump.newer"
+---| "search.next" | "search.prev"
+---| "mode.insert" | "mode.append" | "mode.append_eol" | "mode.insert_bol"
+---| "mode.replace" | "mode.visual" | "mode.visual_line" | "mode.command" | "mode.search"
 
 ---@class winter.ActionCtx
 ---@field count integer Typed count, 0 if none.
@@ -339,11 +374,11 @@ winter.keymap = {}
 ---or a Lua function. Mapping over an existing key replaces it.
 ---@param modes winter.Modes
 ---@param keys winter.Keys
----@param action string|winter.ActionFn
+---@param action winter.BuiltinAction|string|winter.ActionFn
 ---@param opts? { wants_char?: boolean } `wants_char`: read one more key and pass it as `ctx.arg`.
 function winter.keymap.set(modes, keys, action, opts) end
 
----Remove a mapping. Returns whether anything was mapped.
+---Remove a mapping. Returns whether anything was mapped (in any of `modes`).
 ---@param modes winter.Modes
 ---@param keys winter.Keys
 ---@return boolean
@@ -448,6 +483,9 @@ function winter.ext.object(name, fn, keys) end
 ---@field filename string
 ---@field lang string
 
+---`buf_reload` has no named fields: the filename is `ev[1]`.
+---@class winter.BufReloadEvent: winter.Event
+
 ---@class winter.ModeEvent: winter.Event
 ---@field old string
 ---@field new string
@@ -456,13 +494,21 @@ function winter.ext.object(name, fn, keys) end
 winter.ev = {}
 
 ---Subscribe. Built-in events:
---- `ready` (config loaded), `quit`, `text_changed`, `cursor_moved` (these fire
---- often: keep handlers cheap), `buf_enter`, `buf_write_pre`,
---- `buf_write_post` (all `{filename}`), `file_type` (`{filename, lang}`),
---- `mode_changed` (`{old, new}`). Any other name is a custom event for
---- `winter.ev.emit`. Returns an id for `winter.ev.off`.
+--- `ready` (first config load; does not fire again on reload), `reload` (after
+--- a config reload, `:reload` or hot reload; handlers from the new config see
+--- it), `quit`, `text_changed`, `cursor_moved` (these fire often: keep
+--- handlers cheap), `buf_enter`, `buf_write_pre`, `buf_write_post` (all
+--- `{filename}`), `buf_reload` (buffer re-read after the file changed on disk;
+--- filename is `ev[1]`), `file_type` (`{filename, lang}`), `mode_changed`
+--- `{old, new}`. Any other name is a custom event for `winter.ev.emit`.
+---
+--- A reload drops every handler, command, keymap, timer and option the config
+--- made, then runs init.lua again: register things unconditionally in init.lua
+--- and use `ready` + `reload` for one-time setup that should survive it.
+--- Returns an id for `winter.ev.off`.
 ---@overload fun(event: "buf_enter"|"buf_write_pre"|"buf_write_post", fn: fun(ev: winter.BufEvent), opts?: { once?: boolean }): integer
 ---@overload fun(event: "file_type", fn: fun(ev: winter.FileTypeEvent), opts?: { once?: boolean }): integer
+---@overload fun(event: "buf_reload", fn: fun(ev: winter.BufReloadEvent), opts?: { once?: boolean }): integer
 ---@overload fun(event: "mode_changed", fn: fun(ev: winter.ModeEvent), opts?: { once?: boolean }): integer
 ---@param event string
 ---@param fn fun(ev: winter.Event)
@@ -862,12 +908,15 @@ function winter.diag.count(bufnr) end
 ---@param count? integer
 function winter.diag.jump(dir, count) end
 
+---A server starts when a buffer of one of its `filetypes` is opened; it needs
+---`cmd`, either given here or read from `<lspconfig>/lsp/<name>.lua`. Calling
+---`setup` also enables the server (`enabled = false` turns it off).
 ---@class winter.LspServer
 ---@field cmd? string[] Command line. Required unless `lspconfig` supplies it.
 ---@field filetypes? string[] Tree-sitter language names.
----@field settings? table
----@field init_options? table
----@field enabled? boolean
+---@field settings? table Served to the server's `workspace/configuration` requests.
+---@field init_options? table Sent as `initializationOptions`.
+---@field enabled? boolean Default true. Not allowed for `"*"`.
 ---Directory of an nvim-lspconfig checkout to read server definitions from.
 ---@field lspconfig? string
 ---@field [string] any
@@ -878,8 +927,9 @@ function winter.diag.jump(dir, count) end
 ---@field ["goto"] fun(kind: "definition"|"declaration"|"type_definition"|"implementation"|"references") Jump to a symbol's definition, references, etc. via the language server.
 winter.lsp = {}
 
----Configure a server by name; settings merge over earlier calls. The name
----`"*"` sets defaults for every server.
+---Configure (and enable) a server by name; tables merge deeply over earlier
+---calls and over the lspconfig definition. The name `"*"` sets defaults for
+---every server. Raises on a bad option.
 ---@param name string
 ---@param opts? winter.LspServer
 function winter.lsp.setup(name, opts) end
@@ -892,6 +942,44 @@ function winter.lsp.code_action() end
 ---Rename the symbol under the cursor; `preset` pre-fills the prompt.
 ---@param preset? string
 function winter.lsp.rename(preset) end
+
+--------------------------------------------------------------------------
+-- Formatting
+--------------------------------------------------------------------------
+
+---A formatter: reads the buffer on stdin, writes the result to stdout.
+---`$FILENAME`, `$DIRNAME`, `$BASENAME` and `$EXT` are expanded in `cmd`/`cwd`.
+---@class winter.FormatterDef
+---@field cmd string[]
+---@field cwd? string Default `"$DIRNAME"`.
+
+---Formatters to run for one filetype, in order, each fed the previous output.
+---`"lsp"` is a valid name (the server's formatter).
+---@class winter.FormatRule
+---@field [integer] string
+---@field stop_after_first? boolean Run only the first formatter that is installed.
+
+---@class winter.FormatSetup
+---@field on_save? boolean Same as the `formatonsave` option.
+---@field lsp_fallback? boolean Use the server's formatter when nothing is configured for the file (default true).
+---@field timeout? integer Same as `formattimeout`.
+---Add or override formatters by name. Built in: `stylua` `prettier`
+---`prettierd` `clang-format` `rustfmt` `gofmt` `goimports` `black` `shfmt`
+---`google-java-format`.
+---@field formatters? table<string, winter.FormatterDef>
+---Per tree-sitter language (`"lua"`) or extension (`".h"`); the language wins.
+---`false` disables formatting for that key.
+---@field by_ft? table<string, winter.FormatRule|false>
+
+---@class winter.format
+winter.format = {}
+
+---Only the keys you pass change.
+---@param cfg winter.FormatSetup
+function winter.format.setup(cfg) end
+
+---Format the current buffer now (same as `:format`).
+function winter.format.run() end
 
 --------------------------------------------------------------------------
 -- Snippets, languages, tree

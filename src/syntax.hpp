@@ -78,6 +78,7 @@ private:
         TSQuery* q = nullptr;
         std::vector<std::vector<Pred>> preds;
         std::vector<std::optional<Style>> cap_style;
+        std::vector<int> prio;
         TSQuery* inj = nullptr;
         std::vector<std::vector<Pred>> inj_preds;
         std::vector<Meta> inj_meta;
@@ -136,6 +137,7 @@ private:
     std::vector<Span> _merged;
     std::vector<std::vector<Pred>> _preds;
     std::vector<std::optional<Style>> _cap_style;
+    std::vector<int> _prio;
     std::vector<std::vector<Pred>> _ipreds;
     std::vector<Layer> _layers;
     std::map<size_t, CacheLine> _span_cache;

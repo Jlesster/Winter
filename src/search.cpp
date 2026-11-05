@@ -98,7 +98,12 @@ void editor_find() {
     g_origin = {E.cx, E.cy, E.col_offset, E.row_offset};
     g_saved_hl = g_hl;
     g_found = g_wrapped = false;
-    editor_prompt("Search: ", find_callback);
+    PromptHooks hooks;
+    hooks.keymap_mode = SEARCH;
+    hooks.after_key = [](const std::string& buf, size_t, int key, bool) {
+        find_callback(buf, key);
+    };
+    editor_prompt("Search: ", hooks);
     set_mode(NORMAL);
 }
 

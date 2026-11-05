@@ -394,7 +394,7 @@ std::optional<size_t> PieceTable::redo() {
     const Revision& rev = _hist[_head++];
     for(const Edit& e : rev.edits) {
         const size_t del = span_len(e.removed);
-        const TextEdit te = span_edit(e.pos, del, e.removed);
+        const TextEdit te = span_edit(e.pos, del, e.inserted);
         replace_span(e.pos, del, e.inserted);
         note_deco_replace(e.pos, del, span_len(e.inserted));
         if(_on_edit) _on_edit(te, Origin::Redo);

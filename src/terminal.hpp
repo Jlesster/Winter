@@ -18,6 +18,7 @@ void enable_raw_mode();
 void disable_raw_mode();
 int editor_read_key(bool want_mods = false);  // blocks; returns an EditorKey
                                               // (keys.hpp) or a byte
+int editor_read_key_timeout(bool want_mods, int timeout_ms);
 std::string editor_take_paste();
 
 int get_window_size(int* rows, int* cols);

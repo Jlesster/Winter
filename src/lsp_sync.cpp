@@ -32,6 +32,7 @@ constexpr int kDebounceMs = 150;
 
 struct SemTok {
     size_t start, end, type;
+    uint32_t mods = 0;
 };
 
 struct SemStats {
@@ -42,6 +43,9 @@ struct SemStats {
     std::string last_err;
     std::vector<size_t> counts;  // tokens per legend type id
     std::vector<SemTok> toks;    // every token as of got_ver, sorted by start
+    std::string result_id;
+    std::vector<int64_t> data;
+    int deltas = 0, resyncs = 0;
 };
 
 struct Doc {
@@ -102,6 +106,13 @@ bool g_sem_debug = false;
 
 std::optional<Style> token_style(std::string_view type) {
     if(const auto u = theme_override("lsp." + std::string(type))) return u;
+    if(type == "parameter") {
+        if(const auto v = theme_override("lsp.variable")) {
+            Style st = syntax_theme("variable.parameter").value_or(Style{});
+            style_patch(st, *v);
+            return st;
+        }
+    }
     static constexpr std::pair<std::string_view, std::string_view> k[] = {
         {"namespace", "namespace"},
         {"type", "type"},
@@ -119,6 +130,22 @@ std::optional<Style> token_style(std::string_view type) {
         {"macro", "define"},
         {"decorator", "attribute"},
         {"label", "label"},
+        {"typeAlias", "type"},
+        {"union", "type"},
+        {"trait", "type"},
+        {"generic", "type"},
+        {"builtinType", "type.builtin"},
+        {"selfKeyword", "variable.builtin"},
+        {"selfTypeKeyword", "type.builtin"},
+        {"lifetime", "label"},
+        {"derive", "attribute"},
+        {"deriveHelper", "attribute"},
+        {"builtinAttribute", "attribute"},
+        {"attribute", "attribute"},
+        {"escapeSequence", "string.escape"},
+        {"formatSpecifier", "string.escape"},
+        {"boolean", "boolean"},
+
     };
     for(const auto& [name, cap] : k)
         if(name == type) return syntax_theme(cap);
@@ -126,7 +153,7 @@ std::optional<Style> token_style(std::string_view type) {
 }
 
 struct Legend {
-    bool ok = false, built = false;
+    bool ok = false, built = false, delta = false;
     uint64_t rev = 0;
     std::vector<std::string> names;
     std::vector<std::optional<Style>> style;
@@ -145,6 +172,7 @@ const Legend* legend_for(LspId id) {
         const Json& full = p["full"];
         lg.ok = p.is_object() &&
                 (full.is_bool() ? full.as_bool() : full.is_object());
+        lg.delta = lg.ok && full.is_object() && full["delta"].as_bool();
         const Json& mods = p["legend"]["tokenModifiers"];
         if(lg.ok && mods.is_array())
             for(const Json& m : mods.items()) lg.mods.emplace_back(m.as_str());
@@ -191,6 +219,10 @@ std::optional<Style> token_style_mods(const Legend& lg, size_t ty,
     std::optional<Style> out = lg.style[ty];
     for(size_t i = 0; i < lg.mods.size() && i < 32; ++i) {
         if(!((bits >> i) & 1)) continue;
+        if(lg.mods[i] == "deprecated") {
+            if(!out) out = Style{};
+            out->attrs = static_cast<uint16_t>(out->attrs | ATTR_STRIKE);
+        }
         for(const std::string& g :
             {"lsp." + lg.names[ty] + "." + lg.mods[i], "lsp.mod." + lg.mods[i]})
             if(const auto m = theme_override(g)) {
@@ -201,7 +233,45 @@ std::optional<Style> token_style_mods(const Legend& lg, size_t ty,
     return lg.combo.emplace(key, out).first->second;
 }
 
-void apply_tokens(Doc& d, const Legend& lg, const Json& data) {
+std::vector<int64_t> to_ints(const Json& data) {
+    std::vector<int64_t> v;
+    if(data.is_array())
+        for(const Json& n : data.items()) v.push_back(n.as_int());
+    return v;
+}
+
+// textDocument/semanticTokens/full/delta: splice `edits` into `old`. Edit
+// offsets index the previous integer array; they must not overlap.
+bool apply_delta(const std::vector<int64_t>& old, const Json& edits,
+                 std::vector<int64_t>& out) {
+    struct E {
+        size_t start, del;
+        const Json* data;
+    };
+    std::vector<E> es;
+    for(const Json& e : edits.items()) {
+        const int64_t s = e["start"].as_int(-1),
+                      dc = e["deleteCount"].as_int(0);
+        if(s < 0 || dc < 0) return false;
+        es.push_back(
+            {static_cast<size_t>(s), static_cast<size_t>(dc), &e["data"]});
+    }
+    std::ranges::stable_sort(es, {}, &E::start);
+    out.clear();
+    out.reserve(old.size());
+    size_t at = 0;
+    for(const E& e : es) {
+        if(e.start < at || e.start + e.del > old.size()) return false;
+        out.insert(out.end(), old.begin() + at, old.begin() + e.start);
+        if(e.data->is_array())
+            for(const Json& n : e.data->items()) out.push_back(n.as_int());
+        at = e.start + e.del;
+    }
+    out.insert(out.end(), old.begin() + at, old.end());
+    return true;
+}
+
+void apply_tokens(Doc& d, const Legend& lg, const std::vector<int64_t>& v) {
     Buffer& b = *d.buf;
     SemStats& st = d.sem;
     b.sync_anchors();  // flush pending deco shifts BEFORE adding new spans
@@ -210,9 +280,6 @@ void apply_tokens(Doc& d, const Legend& lg, const Json& data) {
     st.raw = st.applied = st.unmapped = 0;
     st.counts.assign(lg.style.size(), 0);
     st.toks.clear();
-    if(!data.is_array()) return;
-    std::vector<int64_t> v;
-    for(const Json& n : data.items()) v.push_back(n.as_int());
 
     LineCur cur{b.pt, d.utf16};
     size_t line = 0, col = 0;
@@ -233,7 +300,8 @@ void apply_tokens(Doc& d, const Legend& lg, const Json& data) {
         const size_t s = cur.at(col);
         const size_t e = cur.at(col + static_cast<size_t>(v[k + 2]));
         if(e <= s) continue;
-        st.toks.push_back({s, e, ty});
+        st.toks.push_back(
+            {s, e, ty, static_cast<uint32_t>(v[k + 4] & 0xFFFFFFFF)});
         const auto base =
             token_style_mods(lg, ty, static_cast<uint64_t>(v[k + 4]));
         if(!base) {
@@ -254,41 +322,79 @@ void request_tokens(Doc& d) {
         b->decos.clear_ns(deco_ns("lsp.semantic"));
         return;
     }
-    if(!legend_for(d.server)) return;
+    const Legend* leg = legend_for(d.server);
+    if(!leg) return;
     const int ver = d.version;
     d.sem.req_ver = ver;
     ++d.sem.sent;
+    const bool use_delta = leg->delta && !d.sem.result_id.empty();
+    const std::string base_id = use_delta ? d.sem.result_id : std::string{};
+    Json params = Json::obj({{"textDocument", Json::obj({{"uri", d.uri}})}});
+    if(use_delta) params.set("previousResultId", base_id);
     const auto t0 = std::chrono::steady_clock::now();
-    lsp_request(d.server,
-                "textDocument/semanticTokens/full",
-                Json::obj({{"textDocument", Json::obj({{"uri", d.uri}})}}),
-                [b, ver, t0](const Json& result, const Json& error) {
-                    Doc* d = find(*b);  // the buffer may have been closed
-                    if(!d) return;
-                    SemStats& st = d->sem;
-                    // stale: text moved on since we asked; the next flush
-                    // re-asks
-                    if(d->version != ver || b->pt.lsp_dirty()) {
-                        ++st.stale;
-                        return;
-                    }
-                    if(!error.is_null()) {
-                        ++st.err;
-                        st.last_err = std::string(error["message"].as_str("?"));
-                        return;
-                    }
-                    if(!result.is_object()) {
-                        ++st.empty;
-                        return;
-                    }
-                    st.ms = std::chrono::duration<double, std::milli>(
-                                std::chrono::steady_clock::now() - t0)
-                                .count();
-                    st.got_ver = ver;
-                    ++st.ok;
-                    if(const Legend* lg = legend_for(d->server))
-                        apply_tokens(*d, *lg, result["data"]);
-                });
+    lsp_request(
+        d.server,
+        use_delta ? "textDocument/semanticTokens/full/delta"
+                  : "textDocument/semanticTokens/full",
+        std::move(params),
+        [b, ver, t0, use_delta, base_id](const Json& result,
+                                         const Json& error) {
+            Doc* d = find(*b);  // the buffer may have been closed
+            if(!d) return;
+            SemStats& st = d->sem;
+            // stale: text moved on since we asked; the next flush re-asks.
+            // The chain below still advances so the next delta has a base.
+            const bool stale = d->version != ver || b->pt.lsp_dirty();
+            const auto drop_chain = [&] {
+                st.result_id.clear();
+                st.data.clear();
+            };
+            if(!error.is_null()) {
+                drop_chain();
+                if(stale) {
+                    ++st.stale;
+                    return;
+                }
+                ++st.err;
+                st.last_err = std::string(error["message"].as_str("?"));
+                return;
+            }
+            if(!result.is_object()) {
+                drop_chain();
+                ++(stale ? st.stale : st.empty);
+                return;
+            }
+            std::vector<int64_t> nd;
+            bool ok = false;
+            if(result["edits"].is_array()) {
+                ok = use_delta && st.result_id == base_id &&
+                     apply_delta(st.data, result["edits"], nd);
+                if(ok) ++st.deltas;
+            } else if(result["data"].is_array()) {
+                nd = to_ints(result["data"]);
+                ok = true;
+            }
+            if(!ok) {  // delta against a base we no longer hold: resync
+                drop_chain();
+                ++st.resyncs;
+                if(stale) ++st.stale;
+                else request_tokens(*d);  // full this time (chain is empty)
+                return;
+            }
+            st.data = std::move(nd);
+            st.result_id = std::string(result["resultId"].as_str());
+            if(stale) {
+                ++st.stale;
+                return;
+            }
+            st.ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+            st.got_ver = ver;
+            ++st.ok;
+            if(const Legend* lg = legend_for(d->server))
+                apply_tokens(*d, *lg, st.data);
+        });
 }
 
 constexpr int kRefDelayMs = 120;  // idle time before asking the server
@@ -758,6 +864,11 @@ std::string lsp_sync_semantic_report(Buffer& b) {
                      st.req_ver,
                      st.got_ver,
                      st.ms);
+    o += std::format("delta                 : {} ({} applied, {} resyncs)\n",
+                     lg && lg->delta ? "supported" : "not offered by server",
+                     st.deltas,
+                     st.resyncs);
+
     if(!st.last_err.empty())
         o += std::format("last error            : {}\n", st.last_err);
     o += std::format(
@@ -774,10 +885,23 @@ std::string lsp_sync_semantic_report(Buffer& b) {
         if(it != st.toks.begin() && cur < std::prev(it)->end) {
             const SemTok& t = *std::prev(it);
             const auto& sty = lg ? lg->style[t.type] : std::nullopt;
+            std::string mods;
+            if(lg)
+                for(size_t i = 0; i < lg->mods.size() && i < 32; ++i)
+                    if((t.mods >> i) & 1)
+                        mods += (mods.empty() ? "" : ",") + lg->mods[i];
+            const auto fin =
+                lg ? token_style_mods(*lg, t.type, t.mods) : std::nullopt;
             o += std::format(
-                "cursor token          : '{}' type={} -> {}{}\n",
+                "cursor token          : '{}' type={} mods=[{}] final={}\n"
+                "                        base ->",
                 b.pt.text(t.start, t.end - t.start),
                 lg ? lg->names[t.type] : "?",
+                mods,
+                fin ? std::format("#{:06x}", fin->fg & 0xFFFFFF)
+                    : "none (tree-sitter)");
+            o += std::format(
+                " {}{}\n",
                 sty ? std::format("painted #{:06x}", sty->fg & 0xFFFFFF)
                     : "unmapped (tree-sitter colour)",
                 st.got_ver != d->version ? "  [tokens are stale]" : "");

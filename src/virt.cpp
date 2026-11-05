@@ -15,12 +15,16 @@ void DecoStore::apply(const TextEdit& e) {
     if(e.reset) {
         _eol.clear();
         _spans.clear();
+        _max_len = 0;
         return;
     }
+    size_t mx = 0;
     for(SpanDeco& s : _spans) {
         s.start = shift_pos(s.start, e, false);
         s.end = std::max(shift_pos(s.end, e, true), s.start);
+        mx = std::max(mx, s.end - s.start);
     }
+    _max_len = mx;
     auto it = std::ranges::upper_bound(_eol, e.start, {}, &EolDeco::pos);
     for(; it != _eol.end(); ++it) it->pos = shift_pos(it->pos, e, false);
 }
@@ -43,6 +47,7 @@ void DecoStore::eol_on_line(size_t ls, size_t len,
 }
 
 void DecoStore::add_span(SpanDeco d) {
+    _max_len = std::max(_max_len, d.end > d.start ? d.end - d.start : 0);
     const auto it =
         std::ranges::upper_bound(_spans, d.start, {}, &SpanDeco::start);
     _spans.insert(it, std::move(d));
@@ -51,7 +56,11 @@ void DecoStore::add_span(SpanDeco d) {
 void DecoStore::spans_on_line(size_t ls, size_t len,
                               std::vector<LineSpan>& out) const {
     const size_t le = ls + len;
-    for(const SpanDeco& s : _spans) {
+    const size_t from = ls > _max_len ? ls - _max_len : 0;
+    const auto first =
+        std::ranges::lower_bound(_spans, from, {}, &SpanDeco::start);
+    for(auto it = first; it != _spans.end(); ++it) {
+        const SpanDeco& s = *it;
         if(s.start > le) break;
         if(s.end <= ls) continue;
         const size_t lo = std::max(s.start, ls) - ls;

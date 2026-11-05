@@ -143,7 +143,7 @@ int legacy_key(int k) {
     return key_mods(k) ? NONE : k;
 }
 
-int read_key(bool want_mods) {
+int read_key(bool want_mods, int timeout_ms) {
     static int pushed = -1;
     if(pushed != -1) {
         const int k = pushed;
@@ -152,7 +152,7 @@ int read_key(bool want_mods) {
     }
     char c;
     for(;;) {
-        if(!loop_wait(-1)) return NONE;
+        if(!loop_wait(timeout_ms)) return NONE;
         const ssize_t n = read(STDIN_FILENO, &c, 1);
         if(n == 1) break;
         if(n == -1 && errno != EAGAIN && errno != EINTR) die("read");
@@ -244,7 +244,12 @@ int read_key(bool want_mods) {
 }  // namespace
 
 int editor_read_key(bool want_mods) {
-    const int k = read_key(want_mods);
+    const int k = read_key(want_mods, -1);
+    return want_mods ? k : legacy_key(k);
+}
+
+int editor_read_key_timeout(bool want_mods, int timeout_ms) {
+    const int k = read_key(want_mods, timeout_ms);
     return want_mods ? k : legacy_key(k);
 }
 

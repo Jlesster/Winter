@@ -2,6 +2,7 @@
 
 add provider map to clipboard utils
 markdown rendering
+:colorscheme command
 
 # bugs
 

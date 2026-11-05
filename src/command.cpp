@@ -1156,6 +1156,7 @@ void popup_after_key(const std::string& buf, size_t pos, int key, bool edited) {
 
 void editor_command_prompt() {
     PromptHooks hooks;
+    hooks.keymap_mode = COMMAND;
     hooks.pre_key = popup_pre_key;
     hooks.after_key =
         [](const std::string& buf, size_t pos, int key, bool edited) {

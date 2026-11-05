@@ -2,8 +2,11 @@
 
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
+
+#include "core.hpp"
 
 struct PromptView {
     bool active = false;
@@ -12,6 +15,9 @@ struct PromptView {
 PromptView& prompt_view();
 
 struct PromptHooks {
+    // Keymaps to use while reading (COMMAND / SEARCH). Empty = plain text.
+    std::optional<EditorMode> keymap_mode;
+
     // Sees every key before the prompt does. Return true to consume it; it
     // may edit `buf` / `pos`. after_key is NOT called for consumed keys.
     std::function<bool(int key, std::string& buf, size_t& pos)> pre_key;

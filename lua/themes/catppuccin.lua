@@ -412,29 +412,10 @@ local function build(C, O)
     ['ui.statusline.command'] = { fg = C.base, bg = C.peach, bold = true },
     ['ui.statusline.search'] = { fg = C.base, bg = C.yellow, bold = true },
     ['ui.statusline.files'] = { fg = C.base, bg = C.lavender, bold = true },
-    -- nvim's custom statusline: filename bold on the bar, position in the
-    -- mode pill. The position override is static (normal-mode blue); winter's
-    -- ui.statusline.percent is the one that follows the mode dynamically.
-    -- ['ui.statusline.file'] = {
-    --   fg = C.text,
-    --   bg = (not none) and C.mantle or nil,
-    --   bold = true,
-    -- },
-    -- ['ui.statusline.position'] = { fg = C.base, bg = C.blue, bold = true },
-    -- ['ui.statusline.modified'] = { fg = C.text },
-    -- -- nvim renders the filetype/indent chunks with StlDim (Comment fg)
-    -- ['ui.statusline.filetype'] = {
-    --   fg = C.overlay2,
-    --   bg = (not none) and C.mantle or nil,
-    -- },
-    -- ['ui.statusline.indent'] = {
-    --   fg = C.overlay2,
-    --   bg = (not none) and C.mantle or nil,
-    -- },
 
     -- floats / menus / input (Pmenu*, NormalFloat, FloatBorder)
     ['ui.float'] = { fg = C.text, bg = (not none) and C.mantle or nil },
-    ['ui.float.border'] = { fg = C.surface2, bg = (not none) and C.mantle or nil },
+    ['ui.float.border'] = { fg = C.cyan, bg = (not none) and C.mantle or nil },
     ['ui.float.title'] = { fg = C.crust, bg = C.lavender },
     ['ui.menu'] = { fg = C.overlay2, bg = (not none) and C.mantle or nil },
     ['ui.menu.select'] = { bg = C.surface0, bold = true },

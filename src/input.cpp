@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 
+#include "chord.hpp"
 #include "command.hpp"
 #include "complete.hpp"
 #include "core.hpp"
@@ -21,8 +22,66 @@
 #include "tree.hpp"
 #include "utf8.hpp"
 
+namespace {
+
+Chord g_insert_chord;
+
+// The old INSERT/REPLACE body, extracted so chord replay uses the same path.
+void insert_literal(int c) {
+    if(c == '\t') {
+        if(snippet_active()) {
+            snippet_next();
+            return;
+        }
+        if(snippet_try_trigger()) return;
+    }
+    if(snippet_pre_key(c)) return;
+    if(E.mode == REPLACE && replace_key(c)) return;
+
+    switch(c) {
+        case '\r': editor_insert_newline(); break;
+        case BACKSPACE: editor_delete_char(); break;
+        case CTRL_BACKSPACE:
+        case CTRL_KEY('h'):
+        case CTRL_KEY('w'): editor_delete_word_back(); break;
+        case DELETE: editor_delete_forward(); break;
+        case ARROW_UP:
+        case ARROW_DOWN:
+        case ARROW_LEFT:
+        case ARROW_RIGHT:
+        case HOME:
+        case END:
+        case PAGE_UP:
+        case PAGE_DOWN:
+            E.buf().pt.end_group();
+            E.buf().pt.begin_group();
+            break;
+        default:
+            if(c >= 32 && c < 127) editor_type_char(c);
+            else if(c == '\t') editor_insert_tab();
+            else if(c >= 0x80 && c < 0x100) editor_insert_char(c);
+            break;
+    }
+}
+
+// Replay a pending chord key as text, with the normal insert-mode hooks.
+void insert_replay(int key) {
+    const int c = key_text(key);
+    if(c == NONE) return;
+
+    const EditorMode before = E.mode;
+    const uint64_t rev = E.buf().pt.revision();
+    insert_literal(c);
+    snippet_post_key();
+    completion_post_key(c);
+    dot_after_key(c, before, rev);
+}
+
+}  // namespace
+
 void editor_handle_key(int c) {
     if(c == PASTE) {
+        g_insert_chord.reset();
         if(overlay_modal()) {
             editor_take_paste();
             return;
@@ -35,13 +94,26 @@ void editor_handle_key(int c) {
         dot_after_key(c, before, rev);
         return;
     }
+
+    // Text-entry mappings run before the modifier gate, so <S-Space> and
+    // <C-Space> can start a chord.
+    if(!overlay_modal() && insertish(E.mode)) {
+        if(g_insert_chord.feed(E.mode, c, insert_replay) != Chord::Result::Pass)
+            return;
+    }
+
     if(key_mods(c)) {
         const bool keymapped =
             !overlay_modal() &&
             (E.mode == NORMAL || E.mode == VISUAL || E.mode == FILES);
         if(!(keymapped && normal_accepts(c))) {
-            c = key_base(c) >= ARROW_LEFT ? key_base(c) : NONE;
-            if(c == NONE) return;
+            if(insertish(E.mode)) {
+                c = key_text(c);
+                if(c == NONE) return;
+            } else {
+                c = key_base(c) >= ARROW_LEFT ? key_base(c) : NONE;
+                if(c == NONE) return;
+            }
         }
     }
     if(c != PASTE && overlay_key(c)) return;
@@ -89,39 +161,7 @@ void editor_handle_key(int c) {
     switch(E.mode) {
         case INSERT:
         case REPLACE:
-            if(c == '\t') {
-                if(snippet_active()) {
-                    snippet_next();
-                    break;
-                }
-                if(snippet_try_trigger()) break;
-            }
-            if(snippet_pre_key(c)) break;
-            if(E.mode == REPLACE && replace_key(c)) break;
-            switch(c) {
-                case '\r': editor_insert_newline(); break;
-                case BACKSPACE: editor_delete_char(); break;
-                case CTRL_BACKSPACE:
-                case CTRL_KEY('h'):
-                case CTRL_KEY('w'): editor_delete_word_back(); break;
-                case DELETE: editor_delete_forward(); break;
-                case ARROW_UP:
-                case ARROW_DOWN:
-                case ARROW_LEFT:
-                case ARROW_RIGHT:
-                case HOME:
-                case END:
-                case PAGE_UP:
-                case PAGE_DOWN:
-                    E.buf().pt.end_group();
-                    E.buf().pt.begin_group();
-                    break;
-                default:
-                    if(c >= 32 && c < 127) editor_type_char(c);
-                    else if(c == '\t') editor_insert_tab();
-                    else if(c >= 0x80 && c < 0x100) editor_insert_char(c);
-                    break;
-            }
+            insert_literal(c);
             break;
         case NORMAL:
             normal_feed(c);  // keys -> registry -> action: see builtin_*.cpp
@@ -149,7 +189,9 @@ void editor_process_key() {
     }
     using clock = std::chrono::steady_clock;
     static std::optional<clock::time_point> deadline;
-    if(opts.timeoutlen > 0 && normal_chord_pending()) {
+    const bool chord_pending =
+        normal_chord_pending() || g_insert_chord.pending();
+    if(opts.timeoutlen > 0 && chord_pending) {
         if(!deadline)
             deadline =
                 clock::now() + std::chrono::milliseconds(opts.timeoutlen);
@@ -158,7 +200,8 @@ void editor_process_key() {
                               .count();
         if(left <= 0) {
             deadline.reset();
-            normal_chord_timeout();
+            if(normal_chord_pending()) normal_chord_timeout();
+            else g_insert_chord.timeout(insert_replay);
             return;
         }
         if(!loop_wait(static_cast<int>(left))) return;

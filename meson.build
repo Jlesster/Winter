@@ -64,6 +64,7 @@ sources = files(
     'src/columns.cpp',
     'src/command.cpp',
     'src/comment.cpp',
+    'src/chord.cpp',
     'src/complete.cpp',
     'src/diag.cpp',
     'src/edit.cpp',

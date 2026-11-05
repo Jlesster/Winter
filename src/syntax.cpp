@@ -180,6 +180,37 @@ std::optional<Style> theme_for(std::string_view cap,
     return std::nullopt;
 }
 
+// Per-pattern `(#set! priority N)`, default 100 like neovim. Captures are
+// layered by (priority, tree-sitter's capture order), not by pattern index:
+// a capture that starts at the same byte as, and encloses, another one is
+// handed out first, so the inner one wins (`&` inside a reference parameter).
+std::vector<int> pattern_priorities(TSQuery* q) {
+    const uint32_t pc = ts_query_pattern_count(q);
+    std::vector<int> out(pc, 100);
+    for(uint32_t p = 0; p < pc; ++p) {
+        uint32_t n;
+        const TSQueryPredicateStep* s =
+            ts_query_predicates_for_pattern(q, p, &n);
+        std::vector<std::string> cur;
+        bool ok = true;
+        for(uint32_t i = 0; i < n; ++i) {
+            if(s[i].type == TSQueryPredicateStepTypeDone) {
+                if(ok && cur.size() >= 3 && cur[0] == "set!" &&
+                   cur[1] == "priority")
+                    out[p] = std::atoi(cur[2].c_str());
+                cur.clear();
+                ok = true;
+            } else if(s[i].type == TSQueryPredicateStepTypeString) {
+                uint32_t l;
+                const char* v =
+                    ts_query_string_value_for_id(q, s[i].value_id, &l);
+                cur.emplace_back(v, l);
+            } else ok = false;  // not a plain set
+        }
+    }
+    return out;
+}
+
 constexpr uint32_t kRainbow[] = {RED, PEACH, YELLOW, GREEN, SKY, BLUE, MAUVE};
 
 bool is_generic(std::string_view t) {
@@ -411,6 +442,7 @@ bool Syntax::load_query(const TSLanguage* lang, std::string_view name) {
         _cap_style[i] = theme_for({c, n}, _name);
     }
     build_preds(_query, _preds, nullptr);
+    _prio = pattern_priorities(_query);
     return true;
 }
 
@@ -443,7 +475,10 @@ Syntax::LangHl* Syntax::hl_for(std::string_view lang) {
             TSQueryError et{};
             h.q = ts_query_new(
                 tl, src.data(), static_cast<uint32_t>(src.size()), &off, &et);
-            if(h.q) build_preds(h.q, h.preds, nullptr);
+            if(h.q) {
+                build_preds(h.q, h.preds, nullptr);
+                h.prio = pattern_priorities(h.q);
+            }
             const std::string isrc = query_text(lang, "injections");
             if(!isrc.empty()) {
                 h.inj = ts_query_new(tl,
@@ -865,11 +900,18 @@ std::vector<Span> Syntax::compute_spans(size_t ls, size_t len) {
 
     struct Cap {
         size_t s, e;
-        uint64_t pat;
+        uint64_t key;
         Style st;
         bool merge = false;
     };
     std::vector<Cap> caps;
+    uint64_t seq = 0;
+    const auto key =
+        [&](uint64_t layer, const std::vector<int>& prio, uint32_t pat) {
+            const uint64_t pr =
+                pat < prio.size() ? uint64_t(prio[pat]) & 0xFFFF : 100;
+            return (layer << 56) | (pr << 40) | (seq++ & 0xFFFFFFFFFFULL);
+        };
     ts_query_cursor_set_byte_range(
         _qc, static_cast<uint32_t>(ls), static_cast<uint32_t>(ls + len));
     ts_query_cursor_exec(_qc, _query, ts_tree_root_node(_tree));
@@ -886,7 +928,9 @@ std::vector<Span> Syntax::compute_spans(size_t ls, size_t len) {
         if(!st) continue;
         const size_t s = std::max<size_t>(ts_node_start_byte(c.node), ls);
         const size_t e = std::min<size_t>(ts_node_end_byte(c.node), ls + len);
-        if(s < e) caps.push_back({s - ls, e - ls, m.pattern_index, *st});
+        if(s < e)
+            caps.push_back(
+                {s - ls, e - ls, key(0, _prio, m.pattern_index), *st});
     }
     uint64_t order = 0;
     for(const Layer& L : _layers) {
@@ -913,12 +957,12 @@ std::vector<Span> Syntax::compute_spans(size_t ls, size_t len) {
             if(s < e)
                 caps.push_back({s - ls,
                                 e - ls,
-                                (order << 32) | lm.pattern_index,
+                                key(order, L.hl->prio, lm.pattern_index),
                                 *st,
                                 true});
         }
     }
-    std::ranges::stable_sort(caps, {}, &Cap::pat);
+    std::ranges::stable_sort(caps, {}, &Cap::key);
 
     std::vector<Style> bytes(len);
     std::vector<char> has(len, 0);
