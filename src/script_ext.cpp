@@ -110,6 +110,8 @@ Action make_action(LuaFn fn) {
 // key is unmapped or remapped.
 int g_next_anon = 1;
 std::map<std::string, int, std::less<>> g_anon_uses;
+std::vector<int> g_lua_subs;
+std::vector<std::string> g_lua_cmds;
 
 void anon_release(std::string_view action) {
     const auto it = g_anon_uses.find(action);
@@ -316,6 +318,7 @@ int l_cmd_add(lua_State* L) {
         lua_setfield(L, -2, "line2");
         script_call(1);
     };
+    g_lua_cmds.push_back(spec.name);
     command_add(std::move(spec));
     return 0;
 }
@@ -488,6 +491,7 @@ int l_ev_on(lua_State* L) {
                         }
                         script_call(1);
                     });
+    g_lua_subs.push_back(*id);
     lua_pushinteger(L, *id);
     return 1;
 }
@@ -546,4 +550,14 @@ void script_open_ext() {
     script_register("cmd", kCmd);
     script_register("ext", kExt);
     script_register("ev", kEv);
+}
+
+void script_ext_reset() {
+    for(const int id : g_lua_subs) events_off(id);
+    g_lua_subs.clear();
+    for(const std::string& n : g_lua_cmds) command_remove(n);
+    g_lua_cmds.clear();
+    register_builtin_commands();
+    g_anon_uses.clear();
+    registry_restore();
 }

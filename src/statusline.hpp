@@ -42,6 +42,7 @@ struct StatusItem {
 
 void statusline_add(std::string name, StatusFn fn);  // add or replace
 bool statusline_remove(std::string_view name);
+void statusline_reset();
 bool statusline_has(std::string_view name);
 std::vector<std::string> statusline_names();
 
@@ -51,5 +52,5 @@ void statusline_reset_layout();
 // The blocks for one side, in order; hidden components are dropped.
 std::vector<StatusItem> statusline_eval(const std::vector<std::string>& names);
 
-Style statusline_bar_style();                // ui.statusline
-std::string statusline_sep(bool left);       // resolved glyph, "" = none
+Style statusline_bar_style();           // ui.statusline
+std::string statusline_sep(bool left);  // resolved glyph, "" = none

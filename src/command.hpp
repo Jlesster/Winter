@@ -29,10 +29,10 @@ struct CmdLine {
     std::string name;
     bool bang = false;
     std::string args;
-    const CmdSpec* spec = nullptr;    // set by the dispatcher
-    size_t name_off = 0;              // byte offset of the name in the input line
-    size_t args_off = 0;              // byte offset of args in the input line
-    std::vector<std::string> argv;    // filled for non-raw commands only
+    const CmdSpec* spec = nullptr;  // set by the dispatcher
+    size_t name_off = 0;            // byte offset of the name in the input line
+    size_t args_off = 0;            // byte offset of args in the input line
+    std::vector<std::string> argv;  // filled for non-raw commands only
 };
 
 using CmdFn = std::function<void(const CmdLine&)>;
@@ -65,6 +65,7 @@ struct CmdMatch {
 
 void command_add(CmdSpec spec);
 void command_add(std::string name, CmdFn fn);  // legacy wrapper, Lua uses it
+bool command_remove(std::string_view name);
 CmdMatch command_find(std::string_view name);
 
 void editor_command_palette(std::string_view cmd);

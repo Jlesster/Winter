@@ -76,6 +76,9 @@ private:
 
 Registry& registry();
 
+void registry_snapshot();
+void registry_restore();
+
 // "<C-r>gg<Esc>" -> key sequence. Inside <>: optional C- A- (or M-) S-
 // prefixes, then one character or a name: Esc CR Enter Tab BS Space lt Up Down
 // Left Right Home End PageUp PageDown Del. Unknown <names> are typed literally.

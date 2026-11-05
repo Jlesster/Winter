@@ -13,5 +13,6 @@ bool snippet_pre_key(int c);
 void snippet_post_key();
 void snippet_end();
 void snippet_add(std::string trigger, std::string body);
+void snippet_clear();
 bool snippet_try_trigger();
 void snippet_spans(size_t ls, size_t len, std::vector<LineSpan>& out);

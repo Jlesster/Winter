@@ -51,6 +51,7 @@ struct Options {
     bool matchparen = false;      // highlight the matching bracket
     bool hl_trailing = false;     // highlight trailing whitespace
     bool format_on_save = false;  // run the formatter before every write
+    bool hot_reload = true;       // config auto reload on file watch
     int indent_namespace = 2;     // 0 flat, 1 indent 2 follow block first line
     int indent_case = 2;          // 0 flat, 1 indent 2 follow block first line
     int colorcolumn = 0;          // 1-based display column to tint, 0 = off

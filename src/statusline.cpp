@@ -77,7 +77,8 @@ StatusBlock c_mode() {
     b.pad = false;
     b.prio = 100;
     b.base = theme_ui(
-        group, Style{.fg = kCrust, .bg = mode_accent(mode), .attrs = ATTR_BOLD});
+        group,
+        Style{.fg = kCrust, .bg = mode_accent(mode), .attrs = ATTR_BOLD});
     b.pieces.push_back({std::format(" {} ", mode), {}});
     return b;
 }
@@ -96,13 +97,14 @@ StatusBlock c_file() {
         if(const auto c = file_icon_color(base)) ic.fg = *c;
         b.pieces.push_back({std::string(file_icon(base)), ic});
     }
-    b.pieces.push_back(
-        {fname.empty() ? std::string("[No Name]")
-                       : clip_left(fname, std::max(12, E.term_cols / 3)),
-         {}});
+    b.pieces.push_back({fname.empty()
+                            ? std::string("[No Name]")
+                            : clip_left(fname, std::max(12, E.term_cols / 3)),
+                        {}});
     if(buf.pt.modified())
         b.pieces.push_back(
-            {" \u25cf", theme_ui("ui.statusline.modified", Style{.fg = kPeach})});
+            {" \u25cf",
+             theme_ui("ui.statusline.modified", Style{.fg = kPeach})});
     return b;
 }
 
@@ -119,7 +121,8 @@ StatusBlock c_buffers() {
     if(E.buffers.size() <= 1) return b;
     b.prio = 30;
     b.base = on_bar("ui.statusline.buffers");
-    b.pieces.push_back({std::format("[{}/{}]", E.cur + 1, E.buffers.size()), {}});
+    b.pieces.push_back(
+        {std::format("[{}/{}]", E.cur + 1, E.buffers.size()), {}});
     return b;
 }
 
@@ -133,9 +136,13 @@ StatusBlock c_diagnostics() {
     size_t i = 0;
     while(i < ds.size()) {
         const size_t e = ds.find(' ', i);
-        const std::string tok = ds.substr(i, e == std::string::npos ? e : e - i);
+        const std::string tok =
+            ds.substr(i, e == std::string::npos ? e : e - i);
         if(!tok.empty()) {
-            const int sev = tok[0] == 'E' ? 1 : tok[0] == 'W' ? 2 : tok[0] == 'I' ? 3 : 4;
+            const int sev = tok[0] == 'E'   ? 1
+                            : tok[0] == 'W' ? 2
+                            : tok[0] == 'I' ? 3
+                                            : 4;
             Style st{};
             st.fg = diag_color(sev);
             b.pieces.push_back({tok + " ", st});
@@ -178,14 +185,15 @@ StatusBlock c_percent() {
     const int rows = static_cast<int>(E.num_rows());
     StatusBlock b;
     b.prio = 70;
-    b.base = theme_ui("ui.statusline.percent",
-                      Style{.fg = kCrust,
-                            .bg = mode_accent(mode_text()),
-                            .attrs = ATTR_BOLD});
+    b.base = theme_ui(
+        "ui.statusline.percent",
+        Style{
+            .fg = kCrust, .bg = mode_accent(mode_text()), .attrs = ATTR_BOLD});
     b.pieces.push_back(
-        {E.cy == 0          ? std::string("Top")
-         : E.cy + 1 >= rows ? std::string("Bot")
-                            : std::format("{}%", (E.cy * 100) / std::max(1, rows - 1)),
+        {E.cy == 0 ? std::string("Top")
+         : E.cy + 1 >= rows
+             ? std::string("Bot")
+             : std::format("{}%", (E.cy * 100) / std::max(1, rows - 1)),
          {}});
     return b;
 }
@@ -199,8 +207,10 @@ StatusBlock c_gap() {
     return b;
 }
 
-std::map<std::string, StatusFn, std::less<>>& comps() {
-    static std::map<std::string, StatusFn, std::less<>> m = {
+using CompMap = std::map<std::string, StatusFn, std::less<>>;
+
+CompMap builtin_comps() {
+    return {
         {"mode", c_mode},
         {"file", c_file},
         {"lines", c_lines},
@@ -212,6 +222,10 @@ std::map<std::string, StatusFn, std::less<>>& comps() {
         {"percent", c_percent},
         {"gap", c_gap},
     };
+}
+
+CompMap& comps() {
+    static CompMap m = builtin_comps();
     return m;
 }
 
@@ -252,6 +266,11 @@ std::vector<std::string> statusline_names() {
 
 StatusLayout& statusline_layout() { return layout_ref(); }
 void statusline_reset_layout() { layout_ref() = default_layout(); }
+
+void statusline_reset() {
+    comps() = builtin_comps();
+    statusline_reset_layout();
+}
 
 std::vector<StatusItem> statusline_eval(const std::vector<std::string>& names) {
     std::vector<StatusItem> out;

@@ -216,3 +216,17 @@ ObjectFn Registry::object(std::string_view name) const {
     const auto it = objects_.find(name);
     return it == objects_.end() ? nullptr : it->second;
 }
+
+namespace {
+Registry g_builtin;
+bool g_have_builtin = false;
+}  // namespace
+
+void registry_snapshot() {
+    g_builtin = registry();
+    g_have_builtin = true;
+}
+
+void registry_restore() {
+    if(g_have_builtin) registry() = g_builtin;
+}

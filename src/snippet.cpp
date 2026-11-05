@@ -58,12 +58,14 @@ struct Parsed {
 class Parser {
 public:
     Parser(std::string_view b, std::string_view base, const std::string& unit)
-        : b_(b), base_(base), unit_(unit) {}
+        : b_(b),
+          base_(base),
+          unit_(unit) {}
 
-        Parsed run() {
-            seq(false);
-            return std::move(o_);
-        }
+    Parsed run() {
+        seq(false);
+        return std::move(o_);
+    }
 
 private:
     std::string_view b_, base_;
@@ -108,7 +110,8 @@ private:
         }
     }
 
-    // consume up to (not including) the matching '}', e.g. a ${1/re/fmt/} transform
+    // consume up to (not including) the matching '}', e.g. a ${1/re/fmt/}
+    // transform
     void skip_close() {
         int depth = 0;
         while(i_ < b_.size()) {
@@ -372,6 +375,8 @@ void snippet_post_key() {
 void snippet_add(std::string trigger, std::string body) {
     g_snips[std::move(trigger)] = std::move(body);
 }
+
+void snippet_clear() { g_snips.clear(); }
 
 bool snippet_try_trigger() {
     if(E.mode != EditorMode::INSERT || S) return false;

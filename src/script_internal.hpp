@@ -6,6 +6,7 @@
 lua_State* script_state();
 bool script_call(int nargs, int nresults = 0);
 void script_register(const char* group, const luaL_Reg* funcs);
+void script_ext_reset();
 
 class LuaRef {
 public:
@@ -14,7 +15,8 @@ public:
         ref_ = luaL_ref(L, LUA_REGISTRYINDEX);
     }
     ~LuaRef() {
-        if(lua_State* L = script_state()) luaL_unref(L, LUA_REGISTRYINDEX, ref_);
+        if(lua_State* L = script_state())
+            luaL_unref(L, LUA_REGISTRYINDEX, ref_);
     }
     LuaRef(const LuaRef&) = delete;
     LuaRef& operator=(const LuaRef&) = delete;

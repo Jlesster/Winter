@@ -669,6 +669,18 @@ void command_add(std::string name, CmdFn fn) {
                         .run = std::move(fn)});
 }
 
+bool command_remove(std::string_view name) {
+    auto& v = specs();
+    const auto it = std::find_if(
+        v.begin(), v.end(), [&](const auto& p) { return p->name == name; });
+    if(it == v.end()) return false;
+    const CmdSpec* slot = it->get();
+    std::erase_if(index(),
+                  [slot](const auto& kv) { return kv.second == slot; });
+    v.erase(it);
+    return true;
+}
+
 CmdMatch command_find(std::string_view name) {
     CmdMatch m;
     if(name.empty()) return m;
@@ -831,6 +843,25 @@ void register_builtin_commands() {
                  .nargs = Nargs::One,
                  .raw = true,
                  .run = [](const CmdLine& c) { script_eval(c.args); }});
+    command_add({.name = "source",
+                 .desc = "Run a Lua file (no reset); default: this buffer",
+                 .usage = ":source [file]",
+                 .nargs = Nargs::Opt,
+                 .raw = true,
+                 .run = [](const CmdLine& c) {
+                     const std::string path =
+                         c.args.empty() ? E.buf().filename : c.args;
+                     if(path.empty()) {
+                         editor_set_status_message("source: no file");
+                         return;
+                     }
+                     if(script_source(path))
+                         editor_set_status_message("Sourced {}", path);
+                 }});
+    command_add({.name = "reload",
+                 .desc = "Reset the config state and re-run init.lua",
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine&) { script_reload_later(); }});
     command_add({.name = "semstat",
                  .desc = "LSP semantic token report",
                  .nargs = Nargs::Opt,

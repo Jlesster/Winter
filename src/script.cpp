@@ -51,10 +51,19 @@
 #include "utf8.hpp"
 #include "virt.hpp"
 
+#include <set>
+#include <vector>
+
+#include "events.hpp"
+#include "loop.hpp"
+#include "terminal.hpp"
+#include "watch.hpp"
+
 namespace {
 
 lua_State* g_L = nullptr;
 std::string g_last_error;
+int g_call_depth = 0;  // Lua calls currently on the stack; a reload waits for 0
 
 void report(const char* msg) {
     g_last_error = msg ? msg : "(unknown error)";
@@ -74,7 +83,9 @@ bool call(int nargs, int nresults = 0) {
     const int base = lua_gettop(g_L) - nargs;
     lua_pushcfunction(g_L, traceback_handler);
     lua_insert(g_L, base);
+    ++g_call_depth;
     const int rc = lua_pcall(g_L, nargs, nresults, base);
+    --g_call_depth;
     lua_remove(g_L, base);
     if(rc != LUA_OK) {
         report(lua_tostring(g_L, -1));
@@ -549,31 +560,217 @@ std::string script_config_dir() {
     return {};
 }
 
-void script_load_config() {
-    namespace fs = std::filesystem;
-    if(!g_L) return;
-    const std::string dir = script_config_dir();
-    if(dir.empty()) return;
-    const std::string init = (fs::path(dir) / "init.lua").string();
-    std::error_code ec;
-    if(!fs::exists(init, ec)) return;
-    prepend_package_path((fs::path(dir) / "themes").string());
-    prepend_package_path(dir);
+namespace {
 
+// ---- config reload ---------------------------------------------------------
+
+bool g_snapped = false;
+Options g_opts0;          // options as they were before the config
+std::string g_base_path;  // package.path before we touched it
+std::set<std::string> g_stock_globals;  // _G / package.loaded before the config
+std::set<std::string> g_stock_modules;
+std::vector<WatchId> g_cfg_watches;
+TimerId g_cfg_timer = 0;
+bool g_reloading = false;
+
+// the string keys of the table at stack index idx
+std::set<std::string> keys_of(int idx) {
+    std::set<std::string> out;
+    idx = lua_absindex(g_L, idx);
+    lua_pushnil(g_L);
+    while(lua_next(g_L, idx)) {
+        if(lua_type(g_L, -2) == LUA_TSTRING) out.insert(lua_tostring(g_L, -2));
+        lua_pop(g_L, 1);
+    }
+    return out;
+}
+
+// nil every string key of the table at idx that isn't in `keep`
+void forget_new_keys(int idx, const std::set<std::string>& keep) {
+    idx = lua_absindex(g_L, idx);
+    std::vector<std::string> drop;
+    for(const std::string& k : keys_of(idx))
+        if(!keep.contains(k)) drop.push_back(k);
+    for(const std::string& k : drop) {
+        lua_pushnil(g_L);
+        lua_setfield(g_L, idx, k.c_str());
+    }
+}
+
+// first call only: remember what "no config" looks like
+void snapshot_builtins() {
+    if(g_snapped) return;
+    g_snapped = true;
+    registry_snapshot();
+    g_opts0 = opts;
+    lua_pushglobaltable(g_L);
+    g_stock_globals = keys_of(-1);
+    lua_pop(g_L, 1);
     lua_getglobal(g_L, "package");
     lua_getfield(g_L, -1, "path");
-    const std::string path = std::format(
-        "{}/?.lua;{}/?/init.lua;{}", dir, dir, lua_tostring(g_L, -1));
+    g_base_path = lua_tostring(g_L, -1);
     lua_pop(g_L, 1);
+    lua_getfield(g_L, -1, "loaded");
+    g_stock_modules = keys_of(-1);
+    lua_pop(g_L, 2);
+}
+
+// put everything the config could have set back to the built-in state
+void reset_config_state() {
+    script_ext_reset();  // keymaps, actions, operators, commands, Lua handlers
+    for(auto& [id, t] : g_timers)
+        if(t->cur) loop_cancel(t->cur);
+    g_timers.clear();
+    statusline_reset();
+    g_sl_anon[0].clear();
+    g_sl_anon[1].clear();
+    theme_clear();
+    snippet_clear();
+    opts = g_opts0;
+    set_cursor_for_mode(E.mode);
+    normal_reset();  // a half-typed chord may point at a mapping that is gone
+
+    lua_pushglobaltable(g_L);
+    forget_new_keys(-1, g_stock_globals);
+    lua_pop(g_L, 1);
+    lua_getglobal(g_L, "package");  // so require() re-reads the files
+    lua_getfield(g_L, -1, "loaded");
+    forget_new_keys(-1, g_stock_modules);
+    lua_pop(g_L, 2);
+    lua_gc(g_L, LUA_GCCOLLECT, 0);
+}
+
+// every .lua under the config dir must at least compile, else the reload is
+// refused and the running config stays
+bool config_compiles(const std::string& dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(
+        dir, fs::directory_options::skip_permission_denied, ec);
+    for(const fs::recursive_directory_iterator end; !ec && it != end;
+        it.increment(ec)) {
+        if(!it->is_regular_file(ec) || it->path().extension() != ".lua")
+            continue;
+        if(luaL_loadfile(g_L, it->path().c_str()) != LUA_OK) {
+            report(lua_tostring(g_L, -1));
+            lua_pop(g_L, 1);
+            editor_set_status_message(
+                "Reload aborted, config unchanged: {}",
+                g_last_error.substr(0, g_last_error.find('\n')));
+            return false;
+        }
+        lua_pop(g_L, 1);
+    }
+    return true;
+}
+
+bool run_init(const std::string& dir) {
+    namespace fs = std::filesystem;
+    const std::string init = (fs::path(dir) / "init.lua").string();
+    std::error_code ec;
+    if(!fs::exists(init, ec)) return false;
+
+    // rebuilt from the original each time so reloads don't stack prefixes
+    const std::string path =
+        std::format("{}/?.lua;{}/?/init.lua;{}", dir, dir, g_base_path);
+    lua_getglobal(g_L, "package");
     lua_pushstring(g_L, path.c_str());
     lua_setfield(g_L, -2, "path");
     lua_pop(g_L, 1);
     if(luaL_loadfile(g_L, init.c_str()) != LUA_OK) {
         report(lua_tostring(g_L, -1));
         lua_pop(g_L, 1);
-        return;
+        return false;
     }
-    call(0);
+    return call(0);
+}
+
+// debounce: one save usually fires several inotify events
+void schedule_reload() {
+    if(!opts.hot_reload) return;
+    if(g_cfg_timer) loop_cancel(g_cfg_timer);
+    g_cfg_timer = loop_after(150, [] {
+        g_cfg_timer = 0;
+        script_reload();
+    });
+}
+
+// watch the config dir and every directory below it; rebuilt after a reload
+// so new sub-directories get picked up
+void watch_config_tree() {
+    namespace fs = std::filesystem;
+    for(const WatchId id : g_cfg_watches) watch_remove(id);
+    g_cfg_watches.clear();
+    const std::string dir = script_config_dir();
+    std::error_code ec;
+    if(dir.empty() || !fs::is_directory(dir, ec)) return;
+
+    const auto on_event = [](const std::string& name, unsigned) {
+        if(name.ends_with(".lua"))
+            schedule_reload();  // not swap files, 4913...
+    };
+    const auto add = [&](const fs::path& p) {
+        if(const WatchId id = watch_dir(p.string(), on_event))
+            g_cfg_watches.push_back(id);
+    };
+    add(dir);
+    fs::recursive_directory_iterator it(
+        dir, fs::directory_options::skip_permission_denied, ec);
+    for(const fs::recursive_directory_iterator end; !ec && it != end;
+        it.increment(ec))
+        if(it->is_directory(ec)) add(it->path());
+}
+
+}  // namespace
+
+void script_load_config() {
+    if(!g_L) return;
+    snapshot_builtins();
+    const std::string dir = script_config_dir();
+    if(dir.empty()) return;
+    run_init(dir);
+    watch_config_tree();
+}
+
+bool script_source(std::string_view path) {
+    if(!g_L) return false;
+    const std::string p(path);
+    if(luaL_loadfile(g_L, p.c_str()) != LUA_OK) {
+        report(lua_tostring(g_L, -1));
+        lua_pop(g_L, 1);
+        return false;
+    }
+    return call(0);
+}
+
+bool script_reload() {
+    if(!g_L || g_reloading) return false;
+    if(g_call_depth > 0) {  // inside a Lua callback: try again once it returned
+        loop_after(100, [] { script_reload(); });
+        return false;
+    }
+    const std::string dir = script_config_dir();
+    std::error_code ec;
+    if(dir.empty() || !std::filesystem::exists(dir + "/init.lua", ec)) {
+        editor_set_status_message("Reload: no init.lua in {}", dir);
+        return false;
+    }
+    snapshot_builtins();
+    if(!config_compiles(dir)) return false;
+
+    g_reloading = true;
+    reset_config_state();
+    g_last_error.clear();
+    run_init(dir);
+    watch_config_tree();
+    g_reloading = false;
+    if(g_last_error.empty()) editor_set_status_message("Config reloaded");
+    events_emit("reload");  // handlers from the new config see this one
+    return g_last_error.empty();
+}
+
+void script_reload_later() {
+    loop_post([] { script_reload(); });
 }
 
 std::string script_eval(std::string_view code) {

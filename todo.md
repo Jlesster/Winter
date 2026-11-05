@@ -2,7 +2,6 @@
 
 add provider map to clipboard utils
 markdown rendering
-source and hot reload
 
 # bugs
 

@@ -1,13 +1,18 @@
+-- ~/.config/winter/catppuccin.lua
 -- Catppuccin for winter, ported from catppuccin/nvim (all four flavours).
 --
 --   require("catppuccin").setup({ flavour = "mocha" })
 --
 -- options (all optional):
 --   flavour               "mocha" (default) | "macchiato" | "frappe" | "latte"
---   transparent_background  true: no bg on ui.normal / ui.float / ui.menu
+--   transparent_background  false to paint ui.normal / ui.float / ui.menu /
+--                         ui.statusline backgrounds (default: transparent)
 --   cursor                colour the cursor falls back to off-syntax
 --                         (default: rosewater; ui.cursor's *fg* is what winter uses)
---   styles                { comments = {"italic"}, keywords = {}, functions = {}, ... }
+--   styles                per-group text styles, defaulting to the nvim
+--                         catppuccin set (comments/conditionals/loops italic,
+--                         functions/booleans/types bold, keywords bold+italic,
+--                         properties/miscs italic)
 --   overrides             table, or function(C, U) -> table, of winter.theme.apply
 --                         entries applied last
 --   rainbow               false to leave winter.theme.rainbow alone
@@ -198,11 +203,11 @@ local function build(C, O)
     -- ---------------------------------------------------- treesitter
     ['variable'] = with({ fg = C.text }, S.variables),
     ['variable.builtin'] = with({ fg = C.red }, S.properties),
-    ['variable.parameter'] = with({ fg = C.maroon }, S.variables),
+    ['variable.parameter'] = { fg = C.maroon, italic = true },
     ['variable.member'] = { fg = C.lavender },
 
     ['constant'] = { fg = C.peach },
-    ['constant.builtin'] = kw(C.peach),
+    ['constant.builtin'] = { fg = C.peach, bold = true },
     ['constant.macro'] = { fg = C.mauve },
     ['module'] = misc(C.yellow),
     ['label'] = { fg = C.sapphire },
@@ -223,7 +228,7 @@ local function build(C, O)
     ['number.float'] = with({ fg = C.peach }, S.numbers),
 
     ['type'] = typ(C.yellow),
-    ['type.builtin'] = typ(C.mauve),
+    ['type.builtin'] = { fg = C.yellow, bold = true, italic = true },
     ['type.definition'] = typ(C.yellow),
     ['attribute'] = { fg = C.peach },
     ['property'] = with({ fg = C.lavender }, S.properties),
@@ -241,9 +246,9 @@ local function build(C, O)
     ['keyword.modifier'] = kw(C.mauve),
     ['keyword.type'] = kw(C.mauve),
     ['keyword.coroutine'] = kw(C.mauve),
-    ['keyword.function'] = kw(C.mauve),
+    ['keyword.function'] = { fg = C.mauve, italic = true },
     ['keyword.operator'] = kw(C.mauve),
-    ['keyword.import'] = kw(C.mauve),
+    ['keyword.import'] = { fg = C.mauve, italic = true },
     ['keyword.repeat'] = with({ fg = C.mauve }, S.loops),
     ['keyword.return'] = kw(C.mauve),
     ['keyword.debug'] = kw(C.mauve),
@@ -266,7 +271,7 @@ local function build(C, O)
     ['comment.warning'] = { fg = C.base, bg = C.yellow },
     ['comment.hint'] = { fg = C.base, bg = C.blue },
     ['comment.note'] = { fg = C.base, bg = C.blue },
-    ['comment.todo'] = { fg = C.base, bg = C.flamingo },
+    ['comment.todo'] = { fg = C.base, bg = C.flamingo, bold = true, italic = true },
 
     ['markup'] = { fg = C.text },
     ['markup.strong'] = { fg = C.red, bold = true },
@@ -299,6 +304,53 @@ local function build(C, O)
     ['keyword.import.cpp'] = { fg = C.yellow },
     ['constant.java'] = { fg = C.teal },
 
+    -- bash
+    ['function.builtin.bash'] = { fg = C.red, italic = true },
+    ['variable.parameter.bash'] = { fg = C.green },
+
+    -- css / scss
+    ['property.css'] = { fg = C.blue },
+    ['property.scss'] = { fg = C.blue },
+    ['property.id.css'] = { fg = C.yellow },
+    ['property.class.css'] = { fg = C.yellow },
+    ['type.css'] = { fg = C.lavender },
+    ['type.tag.css'] = { fg = C.blue },
+    ['string.plain.css'] = { fg = C.text },
+    ['number.css'] = { fg = C.peach },
+    ['keyword.directive.css'] = kw(C.mauve),
+
+    -- html
+    ['string.special.url.html'] = { fg = C.green },
+    ['markup.link.label.html'] = { fg = C.text },
+    ['character.special.html'] = { fg = C.red },
+    ['markup.heading.html'] = { fg = C.text },
+    ['markup.heading.1.html'] = { fg = C.text },
+    ['markup.heading.2.html'] = { fg = C.text },
+    ['markup.heading.3.html'] = { fg = C.text },
+    ['markup.heading.4.html'] = { fg = C.text },
+    ['markup.heading.5.html'] = { fg = C.text },
+    ['markup.heading.6.html'] = { fg = C.text },
+
+    -- python
+    ['constructor.python'] = { fg = C.sky },
+
+    -- yaml
+    ['label.yaml'] = { fg = C.yellow },
+
+    -- ruby
+    ['string.special.symbol.ruby'] = { fg = C.flamingo },
+
+    -- php
+    ['function.method.php'] = fn(C.blue),
+    ['function.method.call.php'] = fn(C.blue),
+
+    -- c#
+    ['attribute.c_sharp'] = { fg = C.yellow },
+
+    -- gitcommit / gitignore
+    ['comment.warning.gitcommit'] = { fg = C.yellow },
+    ['string.special.path.gitignore'] = { fg = C.text },
+
     ['diff.plus'] = { fg = C.green },
     ['diff.minus'] = { fg = C.red },
     ['diff.delta'] = { fg = C.blue },
@@ -330,7 +382,7 @@ local function build(C, O)
     ['ui.visual'] = { bg = C.surface1, bold = true },
     ['ui.search'] = { fg = C.text, bg = U.darken(C.sky, 0.30, C.base) },
     ['ui.search.current'] = { fg = C.mantle, bg = C.red },
-    ['ui.search.cursor'] = { fg = C.base },
+    ['ui.search.cursor'] = { fg = C.rosewater },
     -- winter uses ui.cursor's FG as the cursor colour (nvim's Cursor.bg)
     ['ui.cursor'] = { fg = O.cursor or C.rosewater },
     ['ui.cursorline'] = {
@@ -351,7 +403,7 @@ local function build(C, O)
     ['ui.subst.replace'] = { fg = C.pink, bg = C.surface1 },
 
     -- status line: catppuccin's lualine mode colours
-    ['ui.statusline'] = { fg = C.text, bg = C.mantle },
+    ['ui.statusline'] = { fg = C.text, bg = (not none) and C.mantle or nil },
     ['ui.statusline.normal'] = { fg = C.base, bg = C.blue, bold = true },
     ['ui.statusline.insert'] = { fg = C.base, bg = C.green, bold = true },
     ['ui.statusline.visual'] = { fg = C.base, bg = C.mauve, bold = true },
@@ -360,41 +412,67 @@ local function build(C, O)
     ['ui.statusline.command'] = { fg = C.base, bg = C.peach, bold = true },
     ['ui.statusline.search'] = { fg = C.base, bg = C.yellow, bold = true },
     ['ui.statusline.files'] = { fg = C.base, bg = C.lavender, bold = true },
+    -- nvim's custom statusline: filename bold on the bar, position in the
+    -- mode pill. The position override is static (normal-mode blue); winter's
+    -- ui.statusline.percent is the one that follows the mode dynamically.
+    -- ['ui.statusline.file'] = {
+    --   fg = C.text,
+    --   bg = (not none) and C.mantle or nil,
+    --   bold = true,
+    -- },
+    -- ['ui.statusline.position'] = { fg = C.base, bg = C.blue, bold = true },
+    -- ['ui.statusline.modified'] = { fg = C.text },
+    -- -- nvim renders the filetype/indent chunks with StlDim (Comment fg)
+    -- ['ui.statusline.filetype'] = {
+    --   fg = C.overlay2,
+    --   bg = (not none) and C.mantle or nil,
+    -- },
+    -- ['ui.statusline.indent'] = {
+    --   fg = C.overlay2,
+    --   bg = (not none) and C.mantle or nil,
+    -- },
 
     -- floats / menus / input (Pmenu*, NormalFloat, FloatBorder)
     ['ui.float'] = { fg = C.text, bg = (not none) and C.mantle or nil },
-    ['ui.float.border'] = { fg = C.blue, bg = (not none) and C.mantle or nil },
+    ['ui.float.border'] = { fg = C.surface2, bg = (not none) and C.mantle or nil },
+    ['ui.float.title'] = { fg = C.crust, bg = C.lavender },
     ['ui.menu'] = { fg = C.overlay2, bg = (not none) and C.mantle or nil },
     ['ui.menu.select'] = { bg = C.surface0, bold = true },
+    ['ui.menu.marker'] = { fg = C.flamingo },
     ['ui.menu.kind'] = { fg = C.blue },
     ['ui.menu.detail'] = { fg = C.overlay0 },
-    ['ui.menu.doc'] = { fg = C.subtext0 },
+    ['ui.menu.doc'] = { fg = C.text },
     ['ui.menu.match'] = { fg = C.text, bold = true },
     ['ui.menu.key'] = { fg = C.lavender, bold = true },
     ['ui.menu.disabled'] = { fg = C.overlay0 },
     ['ui.input'] = { fg = C.text, bg = (not none) and C.mantle or nil },
     ['ui.input.prompt'] = { fg = C.blue, bold = true },
-    ['ui.input.border'] = { fg = C.blue, bg = (not none) and C.mantle or nil },
+    ['ui.input.border'] = { fg = C.surface2, bg = (not none) and C.mantle or nil },
 
-    -- file tree (nvim-tree integration)
+    -- picker (telescope integration)
+    ['ui.picker.border'] = { fg = C.surface2 },
+    ['ui.picker.prompt'] = { fg = C.flamingo },
+
+    -- file tree (neo-tree integration)
     ['ui.tree.file'] = { fg = C.text },
     ['ui.tree.dir'] = { fg = C.blue },
-    ['ui.tree.root'] = { fg = C.lavender, bold = true },
-    ['ui.tree.open'] = { fg = C.blue },
+    ['ui.tree.root'] = { fg = C.blue, bold = true },
+    ['ui.tree.open'] = { fg = C.pink },
     ['ui.tree.active'] = { fg = C.pink },
     ['ui.tree.symlink'] = { fg = C.pink },
     ['ui.tree.hidden'] = { fg = C.overlay0 },
     ['ui.tree.guide'] = { fg = C.overlay0 },
     ['ui.tree.sep'] = { fg = C.surface1 },
-    ['ui.tree.select'] = { bg = C.surface0, bold = true },
-    ['ui.tree.match'] = { fg = C.peach, bold = true },
+    ['ui.tree.select'] = { fg = C.flamingo, bg = C.surface0, bold = true },
+    ['ui.tree.match'] = { fg = C.green, bold = true },
     ['ui.tree.icon.dir'] = { fg = C.blue },
     ['ui.tree.icon.file'] = { fg = C.subtext1 },
     ['ui.tree.git.modified'] = { fg = C.yellow },
     ['ui.tree.git.added'] = { fg = C.green },
     ['ui.tree.git.deleted'] = { fg = C.red },
-    ['ui.tree.git.untracked'] = { fg = C.blue },
-    ['ui.tree.git.conflict'] = { fg = C.maroon },
+    ['ui.tree.git.untracked'] = { fg = C.mauve },
+    ['ui.tree.git.conflict'] = { fg = C.red },
+    ['ui.tree.git.staged'] = { fg = C.green },
 
     -- diagnostics (nvim: Error red, Warn yellow, Info sky, Hint teal)
     ['diag.error'] = { fg = C.red },
@@ -402,7 +480,7 @@ local function build(C, O)
     ['diag.info'] = { fg = C.sky },
     ['diag.hint'] = { fg = C.teal },
     ['diag.virtual'] = { italic = true },
-    ['diag.underline'] = { undercurl = true },
+    ['diag.underline'] = { underline = true },
   }
 
   -- legacy / pre-0.10 capture names that older query sets still emit
@@ -432,15 +510,28 @@ local function build(C, O)
     ['text.strike'] = 'markup.strikethrough',
     ['text.uri'] = 'markup.link.url',
     ['text.math'] = 'markup.math',
+    ['text.environment'] = 'markup.environment',
+    ['text.environment.name'] = 'markup.environment.name',
     ['text.title'] = 'markup.heading',
     ['text.literal'] = 'markup.raw',
     ['text.reference'] = 'markup.link',
     ['text.todo'] = 'comment.todo',
+    ['text.todo.checked'] = 'markup.list.checked',
+    ['text.todo.unchecked'] = 'markup.list.unchecked',
     ['text.warning'] = 'comment.warning',
     ['text.note'] = 'comment.note',
     ['text.danger'] = 'comment.error',
     ['text.diff.add'] = 'diff.plus',
     ['text.diff.delete'] = 'diff.minus',
+    ['text.title.1.markdown'] = 'markup.heading.1.markdown',
+    ['text.title.2.markdown'] = 'markup.heading.2.markdown',
+    ['text.title.3.markdown'] = 'markup.heading.3.markdown',
+    ['text.title.4.markdown'] = 'markup.heading.4.markdown',
+    ['text.title.5.markdown'] = 'markup.heading.5.markdown',
+    ['text.title.6.markdown'] = 'markup.heading.6.markdown',
+    ['method.php'] = 'function.method.php',
+    ['method.call.php'] = 'function.method.call.php',
+    ['symbol.ruby'] = 'string.special.symbol.ruby',
   }
   for old, new in pairs(alias) do
     if T[old] == nil and T[new] ~= nil then T[old] = T[new] end
@@ -458,10 +549,20 @@ function M.setup(opts)
   M.colors = C
 
   local O = {
-    transparent_background = opts.transparent_background or false,
+    transparent_background = opts.transparent_background ~= false,
     cursor = opts.cursor,
   }
-  local defaults = { comments = { 'italic' }, miscs = { 'italic' } }
+  local defaults = {
+    comments = { 'italic' },
+    conditionals = { 'italic' },
+    loops = { 'italic' },
+    functions = { 'bold' },
+    keywords = { 'bold', 'italic' },
+    booleans = { 'bold' },
+    properties = { 'italic' },
+    types = { 'bold' },
+    miscs = { 'italic' },
+  }
   O.styles = {}
   for _, k in ipairs({
     'comments',
