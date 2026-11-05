@@ -29,3 +29,4 @@ std::string lsp_sync_server_of(Buffer& b);
 std::string lsp_sync_server_start(std::string_view name);
 std::string lsp_sync_server_stop(std::string_view name);
 std::string lsp_sync_server_restart(std::string_view name);
+std::string lsp_sync_server_report();

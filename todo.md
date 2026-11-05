@@ -1,10 +1,9 @@
 # features
 
 add provider map to clipboard utils
-lsp formatting and format on save
-lsp command palette
+markdown rendering
+source and hot reload
 
 # bugs
 
-case unindent shifts back a space
-chords lacking
+lock input when in files panel

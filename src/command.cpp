@@ -601,7 +601,10 @@ void cmd_lsp(const CmdLine& c) {
     std::string_view name =
         sp == std::string_view::npos ? std::string_view{} : args.substr(sp + 1);
     skip_blanks(name);
-
+    if(sub == "status") {
+        buffer_show_text("[lsp]", lsp_sync_server_report());
+        return;
+    }
     if(sub != "start" && sub != "stop" && sub != "restart") {
         std::string known;
         for(const std::string& n : lsp_enabled_names())
@@ -731,7 +734,8 @@ static std::vector<CmdCand> complete_buffers(std::string_view) {
 static std::vector<CmdCand> complete_lsp(std::string_view) {
     std::vector<CmdCand> out = {{"start", "subcommand"},
                                 {"stop", "subcommand"},
-                                {"restart", "subcommand"}};
+                                {"restart", "subcommand"},
+                                {"status", "subcommand"}};
     for(const std::string& n : lsp_enabled_names())
         out.push_back({n, "server"});
     return out;

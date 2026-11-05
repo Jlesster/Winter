@@ -171,7 +171,8 @@ void reindent(const Range& r) {
     PieceTable& pt = E.buf().pt;
     const size_t l0 = pt.line_of(r.start);
     const size_t l1 = pt.line_of(r.end > r.start ? r.end - 1 : r.start);
-    indent::reindent_lines(E.buf().syntax, pt, E.buf().eol, l0, l1);
+    indent::reindent_lines(
+        E.buf().indent, E.buf().syntax, pt, E.buf().eol, l0, l1);
     apply_motion(motion::to_first_nonblank(pt, pt.line_start(l0), 0));
 }
 
@@ -281,7 +282,7 @@ void paste_indented(bool after, int count) {
         static_cast<size_t>(std::max(count, 1));
     if(n == 0) return;
     indent::reindent_lines(
-        E.buf().syntax, pt, E.buf().eol, first, first + n - 1);
+        E.buf().indent, E.buf().syntax, pt, E.buf().eol, first, first + n - 1);
     apply_motion(motion::to_first_nonblank(pt, pt.line_start(first), 0));
 }
 
@@ -309,12 +310,15 @@ void paste_over(const Range& r, int count, bool swap_reg) {
     const size_t nl = std::count(s.begin(), s.end(), '\n');
     if(opts.paste_indent && nl) {
         const size_t first = r.linewise ? l0 : l0 + 1;
-        const size_t last = (!r.linewise && src.linewise) ? l0 + nl - 1 : l0 + nl;
+        const size_t last =
+            (!r.linewise && src.linewise) ? l0 + nl - 1 : l0 + nl;
         if(last >= first)
-            indent::reindent_lines(E.buf().syntax, pt, E.buf().eol, first, last);
+            indent::reindent_lines(
+                E.buf().indent, E.buf().syntax, pt, E.buf().eol, first, last);
     }
     if(r.linewise || src.linewise)
-        apply_motion(motion::to_first_nonblank(pt, pt.line_start(r.linewise ? l0 : l0 + 1), 0));
+        apply_motion(motion::to_first_nonblank(
+            pt, pt.line_start(r.linewise ? l0 : l0 + 1), 0));
     else {
         set_cursor_offset(nl ? at : motion::left(pt, at + s.size(), 1).pos);
         update_want();

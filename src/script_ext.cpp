@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "command.hpp"
@@ -46,6 +47,49 @@ bool parse_modes(std::string_view s, Modes& out) {
     return out.n > 0;
 }
 
+constexpr const char* kModesHelp =
+    "modes: letters from n i r v x c s f, a word like \"normal\", or a table "
+    "of those";
+
+// "normal" -> "n" ...; anything else is passed on as letters
+std::string_view mode_word(std::string_view s) {
+    static constexpr std::pair<std::string_view, std::string_view> kWords[] = {
+        {"normal", "n"},
+        {"insert", "i"},
+        {"replace", "r"},
+        {"visual", "v"},
+        {"command", "c"},
+        {"search", "s"},
+        {"files", "f"},
+    };
+    for(const auto& [word, letters] : kWords)
+        if(s == word) return letters;
+    return s;
+}
+
+// Lua argument `idx` -> modes. Accepts "n", "nx", "normal", {"n", "x"},
+// {"normal", "visual"}, {"nx", "i"}...
+bool collect_modes(lua_State* L, int idx, Modes& out) {
+    idx = lua_absindex(L, idx);
+    if(lua_type(L, idx) == LUA_TSTRING) {
+        size_t n;
+        const char* s = lua_tolstring(L, idx, &n);
+        return parse_modes(mode_word({s, n}), out);
+    }
+    if(!lua_istable(L, idx)) return false;
+    const int len = static_cast<int>(lua_rawlen(L, idx));
+    for(int i = 1; i <= len; ++i) {
+        lua_rawgeti(L, idx, i);
+        size_t n = 0;
+        const char* s =
+            lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &n) : nullptr;
+        const bool ok = s && parse_modes(mode_word({s, n}), out);
+        lua_pop(L, 1);
+        if(!ok) return false;
+    }
+    return out.n > 0;
+}
+
 // a Lua function as an Action. It receives {count=, arg=}
 Action make_action(LuaFn fn) {
     return [fn](Ctx& c) {
@@ -78,19 +122,18 @@ void anon_release(std::string_view action) {
 // ---- winter.keymap ---------------------------------------------------------
 
 // winter.keymap.set(modes, keys, action_name | fn [, {wants_char=bool}])
-// modes: letters from n i r v x c s ("nx" = normal + visual).
+// modes: letters from n i r v x c s f ("nx" = normal + visual), a word
+// ("normal"), or a table of either: {"n", "x"} / {"normal", "visual"}.
 int l_keymap_set(lua_State* L) {
-    size_t mn;
-    const char* ms = luaL_checklstring(L, 1, &mn);
-    const char* keys = luaL_checkstring(L, 2);
     const bool is_fn = lua_isfunction(L, 3);
     if(!is_fn) luaL_checkstring(L, 3);
     const int t = lua_table_arg(L, 4);
     const bool wants_char = lua_opt_bool(L, t, "wants_char", false);
     Modes modes;
-    if(!parse_modes(std::string_view(ms, mn), modes))
-        return luaL_argerror(L, 1, "modes are letters from n i r v x c s");
-    const std::string k = parse_keys(keys);
+    if(!collect_modes(L, 1, modes)) return luaL_argerror(L, 1, kModesHelp);
+    const char* err = nullptr;
+    const KeySeq k = parse_keys(luaL_checkstring(L, 2), &err);
+    if(k.empty()) return luaL_argerror(L, 2, err ? err : "empty key sequence");
     std::string action;
     if(is_fn) {
         action = std::format("lua.anon{}", g_next_anon++);
@@ -109,15 +152,14 @@ int l_keymap_set(lua_State* L) {
 
 // winter.keymap.del(modes, keys) -> true if anything was mapped
 int l_keymap_del(lua_State* L) {
-    size_t mn;
-    const char* ms = luaL_checklstring(L, 1, &mn);
-    const char* keys = luaL_checkstring(L, 2);
     Modes modes;
-    if(!parse_modes(std::string_view(ms, mn), modes))
-        return luaL_argerror(L, 1, "modes are letters from n i r v x c s");
+    if(!collect_modes(L, 1, modes)) return luaL_argerror(L, 1, kModesHelp);
     bool any = false;
     {
-        const std::string k = parse_keys(keys);
+        const char* err = nullptr;
+        const KeySeq k = parse_keys(luaL_checkstring(L, 2), &err);
+        if(k.empty())
+            return luaL_argerror(L, 2, err ? err : "empty key sequence");
         for(int i = 0; i < modes.n; ++i) {
             const Hit h = registry().lookup(modes.m[i], k);
             if(!registry().unmap(modes.m[i], k)) continue;
@@ -188,13 +230,16 @@ int l_cmd_add(lua_State* L) {
     Nargs nargs = Nargs::Any;
     if(t) {
         lua_getfield(L, t, "nargs");
-        const char* n = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : nullptr;
+        const char* n =
+            lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : nullptr;
         if(n) {
             if(!std::strcmp(n, "0")) nargs = Nargs::None;
             else if(!std::strcmp(n, "1")) nargs = Nargs::One;
             else if(!std::strcmp(n, "?")) nargs = Nargs::Opt;
             else if(!std::strcmp(n, "*")) nargs = Nargs::Any;
-            else return luaL_argerror(L, 3, "nargs is \"0\", \"1\", \"?\" or \"*\"");
+            else
+                return luaL_argerror(
+                    L, 3, "nargs is \"0\", \"1\", \"?\" or \"*\"");
         }
         lua_pop(L, 1);
     }
@@ -237,10 +282,12 @@ int l_cmd_add(lua_State* L) {
                             c.text = lua_tostring(L, -1);
                         } else if(lua_istable(L, -1)) {
                             lua_getfield(L, -1, "text");
-                            if(lua_type(L, -1) == LUA_TSTRING) c.text = lua_tostring(L, -1);
+                            if(lua_type(L, -1) == LUA_TSTRING)
+                                c.text = lua_tostring(L, -1);
                             lua_pop(L, 1);
                             lua_getfield(L, -1, "detail");
-                            if(lua_type(L, -1) == LUA_TSTRING) c.detail = lua_tostring(L, -1);
+                            if(lua_type(L, -1) == LUA_TSTRING)
+                                c.detail = lua_tostring(L, -1);
                             lua_pop(L, 1);
                         }
                         lua_pop(L, 1);

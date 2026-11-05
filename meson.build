@@ -53,6 +53,9 @@ deps = [
 
 sources = files(
     'src/bufedit.cpp',
+    'src/indent_scan.cpp',
+    'src/indent_calc.cpp',
+    'src/indent_model.cpp',
     'src/buffer.cpp',
     'src/buflist.cpp',
     'src/build.cpp',
@@ -135,7 +138,13 @@ executable(
   sources: sources,
   include_directories: incls,
   dependencies: deps,
-  install: false,
+  install: true,
 )
 
 subdir('tests')
+
+install_subdir(
+    'lua',
+    install_dir: '/etc' / 'xdg' / 'winter',
+    strip_directory: true,
+)

@@ -47,22 +47,24 @@ struct Options {
     bool wrap = false;           // wrap long lines at screen edge
     bool hl_reference =
         false;  // highlight other uses of the symbol under the cursor (LSP)
-    bool cursorline = false;   // tint the cursor row
-    bool matchparen = false;   // highlight the matching bracket
-    bool hl_trailing = false;  // highlight trailing whitespace
-    int colorcolumn = 0;       // 1-based display column to tint, 0 = off
-    int timeoutlen = 1000;     // chord timeout ms
-    int undo_levels = 1000;    // # of stored edits per file
+    bool cursorline = false;      // tint the cursor row
+    bool matchparen = false;      // highlight the matching bracket
+    bool hl_trailing = false;     // highlight trailing whitespace
+    bool format_on_save = false;  // run the formatter before every write
+    int indent_namespace = 2;     // 0 flat, 1 indent 2 follow block first line
+    int indent_case = 2;          // 0 flat, 1 indent 2 follow block first line
+    int colorcolumn = 0;          // 1-based display column to tint, 0 = off
+    int timeoutlen = 1000;        // chord timeout ms
+    int undo_levels = 1000;       // # of stored edits per file
     int diag_severity = 4;  // show this severity and worse: 1 error .. 4 hint
     int scrolloff = 5;      // scroll off padding
     int tab_stop = 4;       // display width of a '\t'
     int shift_width = 4;    // one indent level
-    bool format_on_save = false;  // run the formatter before every write
-    int format_timeout = 1000;    // ms a formatter may block a save
-    int quit_times = 3;     // extra Ctrl-Q presses needed with unsaved changes
-    int history = 500;      // history entries per file
-    int number_width = 4;   // gutter width
-    int tree_width = 30;    // columns, before the separator
+    int format_timeout = 1000;  // ms a formatter may block a save
+    int quit_times = 3;    // extra Ctrl-Q presses needed with unsaved changes
+    int history = 500;     // history entries per file
+    int number_width = 4;  // gutter width
+    int tree_width = 30;   // columns, before the separator
     int indent_engine =
         0;  // 0 structural + ts fallback / 1 ts only / 2 structural only
     Border border = Border::Rounded;  // ui border selection

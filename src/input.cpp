@@ -35,6 +35,15 @@ void editor_handle_key(int c) {
         dot_after_key(c, before, rev);
         return;
     }
+    if(key_mods(c)) {
+        const bool keymapped =
+            !overlay_modal() &&
+            (E.mode == NORMAL || E.mode == VISUAL || E.mode == FILES);
+        if(!(keymapped && normal_accepts(c))) {
+            c = key_base(c) >= ARROW_LEFT ? key_base(c) : NONE;
+            if(c == NONE) return;
+        }
+    }
     if(c != PASTE && overlay_key(c)) return;
     const EditorMode before = E.mode;
     const uint64_t rev_before = E.buf().pt.revision();
@@ -155,7 +164,7 @@ void editor_process_key() {
         if(!loop_wait(static_cast<int>(left))) return;
     }
     deadline.reset();
-    const int c = editor_read_key();
+    const int c = editor_read_key(true);
     if(c == NONE) return;
     editor_handle_key(c);
 }

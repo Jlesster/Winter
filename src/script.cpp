@@ -7,32 +7,33 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <map>
-#include <optional>
-#include <vector>
 #include <format>
 #include <lua.hpp>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "buflist.hpp"
 #include "columns.hpp"
 #include "command.hpp"
 #include "comment.hpp"
 #include "core.hpp"
-#include "editor.hpp"
 #include "diag.hpp"
+#include "editor.hpp"
 #include "events.hpp"
 #include "file.hpp"
 #include "glyphs.hpp"
 #include "inputbox.hpp"
-#include "json.hpp"
 #include "job.hpp"
+#include "json.hpp"
 #include "jumplist.hpp"
 #include "keys.hpp"
-#include "lsp_config.hpp"
 #include "loop.hpp"
+#include "lsp_actions.hpp"
+#include "lsp_config.hpp"
 #include "lsp_nav.hpp"
 #include "lsp_rename.hpp"
 #include "lua_json.hpp"
@@ -46,7 +47,6 @@
 #include "snippet.hpp"
 #include "statusline.hpp"
 #include "syntax.hpp"
-#include "lsp_actions.hpp"
 #include "theme.hpp"
 #include "utf8.hpp"
 #include "virt.hpp"
@@ -82,6 +82,19 @@ bool call(int nargs, int nresults = 0) {
         return false;
     }
     return true;
+}
+
+// helper to add */themes dirs to lua's require() search path
+void prepend_package_path(std::string_view dir) {
+    lua_getglobal(g_L, "package");
+    lua_getfield(g_L, -1, "path");
+    const char* old = lua_tostring(g_L, -1);
+    const std::string next =
+        std::format("{}/?.lua;{}/?/init.lua;{}", dir, dir, old ? old : "");
+    lua_pop(g_L, 1);
+    lua_pushlstring(g_L, next.data(), next.size());
+    lua_setfield(g_L, -2, "path");
+    lua_pop(g_L, 1);
 }
 
 // keep a Lua function alive by parking it in Lua's registry
@@ -480,7 +493,7 @@ bool script_init() {
     g_L = luaL_newstate();
     if(!g_L) return false;
     luaL_openlibs(g_L);
-
+    prepend_package_path("/etc/xdg/winter/themes");
     lua_newtable(g_L);  // winter
     lua_newtable(g_L);
     lua_newtable(g_L);
@@ -544,6 +557,8 @@ void script_load_config() {
     const std::string init = (fs::path(dir) / "init.lua").string();
     std::error_code ec;
     if(!fs::exists(init, ec)) return;
+    prepend_package_path((fs::path(dir) / "themes").string());
+    prepend_package_path(dir);
 
     lua_getglobal(g_L, "package");
     lua_getfield(g_L, -1, "path");

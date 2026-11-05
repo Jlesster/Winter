@@ -16,7 +16,8 @@ const TermCaps& term_caps();  // valid after enable_raw_mode()
 void editor_quit();
 void enable_raw_mode();
 void disable_raw_mode();
-int editor_read_key();  // blocks; returns an EditorKey (keys.hpp) or a byte
+int editor_read_key(bool want_mods = false);  // blocks; returns an EditorKey
+                                              // (keys.hpp) or a byte
 std::string editor_take_paste();
 
 int get_window_size(int* rows, int* cols);

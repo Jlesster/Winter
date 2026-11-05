@@ -64,6 +64,8 @@ Opt kTable[] = {
     {"hltrailing", "hlt", Kind::Bool, &opts.hl_trailing, 0, 1},
     {"colorcolumn", "cc", Kind::Int, &opts.colorcolumn, 0, 500},
     {"hlreference", "hlr", Kind::Bool, &opts.hl_reference, 0, 1},
+    {"indentnamespace", "inam", Kind::Int, &opts.indent_namespace, 0, 2},
+    {"indentcase", "icase", Kind::Int, &opts.indent_case, 0, 2},
 };
 
 std::optional<CursorStyle> parse_cursor(std::string_view v) {

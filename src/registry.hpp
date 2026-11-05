@@ -4,13 +4,15 @@
 
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
-#include <optional>
 
 #include "core.hpp"
 #include "motion.hpp"
+
+using KeySeq = std::u32string;
 
 struct Range {
     size_t start = 0, end = 0;
@@ -49,10 +51,11 @@ public:
     void add_motion(std::string name, motion::Fn fn);
     motion::Fn motion(std::string_view name) const;  // nullptr if not a motion
 
-    // ---- keymaps: per mode, key bytes -> action name
-    void map(EditorMode m, std::string keys, std::string action);
-    bool unmap(EditorMode m, std::string_view keys);
-    Hit lookup(EditorMode m, std::string_view keys) const;
+    // ---- keymaps: per mode, key sequence -> action name
+    void map(EditorMode m, KeySeq keys, std::string action);
+    void map(EditorMode m, const char* notation, std::string action);  // "gg"
+    bool unmap(EditorMode m, std::u32string_view keys);
+    Hit lookup(EditorMode m, std::u32string_view keys) const;
 
     void add_operator(std::string name, Operator fn);
     const Operator* op(std::string_view name) const;
@@ -66,13 +69,19 @@ private:
     };
     std::map<std::string, Entry, std::less<>> actions_;
     std::map<std::string, motion::Fn, std::less<>> motions_;
-    std::map<EditorMode, std::map<std::string, std::string, std::less<>>>
-        keymaps_;
+    std::map<EditorMode, std::map<KeySeq, std::string, std::less<>>> keymaps_;
     std::map<std::string, Operator, std::less<>> ops_;
     std::map<std::string, ObjectFn, std::less<>> objects_;
 };
 
 Registry& registry();
 
-// "<C-r>gg<Esc>" -> raw key bytes. Names: C-x, Esc, CR, Tab, BS, Space, lt.
-std::string parse_keys(std::string_view notation);
+// "<C-r>gg<Esc>" -> key sequence. Inside <>: optional C- A- (or M-) S-
+// prefixes, then one character or a name: Esc CR Enter Tab BS Space lt Up Down
+// Left Right Home End PageUp PageDown Del. Unknown <names> are typed literally.
+// An impossible combination (<C-S-a>, <S-1>) returns an empty sequence and
+// sets *err to a string literal.
+KeySeq parse_keys(std::string_view notation, const char** err = nullptr);
+
+// the inverse, for the status line: {0x12,'g'} -> "<C-r>g"
+std::string format_keys(const KeySeq& keys);

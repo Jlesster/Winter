@@ -1,6 +1,6 @@
 #include "terminal.hpp"
-#include "events.hpp"
 #include "buflist.hpp"
+#include "events.hpp"
 #include "job.hpp"
 #include "loop.hpp"
 
@@ -130,19 +130,26 @@ void enable_raw_mode() {
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 1;
     trux::ansi::enter_alt_screen();
-    write(STDOUT_FILENO, "\x1b[>4;1m", 7);
+    write(STDOUT_FILENO, "\x1b[>4;2m", 7);
     write(STDOUT_FILENO, "\x1b[?2004h", 8);
     if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
 }
 
-int editor_read_key() {
+namespace {
+
+int legacy_key(int k) {
+    const int base = key_base(k);
+    if(base >= ARROW_LEFT) return base;
+    return key_mods(k) ? NONE : k;
+}
+
+int read_key(bool want_mods) {
     static int pushed = -1;
     if(pushed != -1) {
         const int k = pushed;
         pushed = -1;
         return k;
     }
-    int nread;
     char c;
     for(;;) {
         if(!loop_wait(-1)) return NONE;
@@ -166,20 +173,31 @@ int editor_read_key() {
         return NONE;
     }
     if(b != '[') {
+        // legacy Alt-x arrives as ESC x. Esc-Esc and ESC + UTF-8 byte stay
+        // "Esc, then the key", as before.
+        if(want_mods && b != '\x1b' && static_cast<unsigned char>(b) < 0x80)
+            return static_cast<unsigned char>(b) | MOD_ALT;
         pushed = static_cast<unsigned char>(b);
         return '\x1b';
     }
+
     int p[3] = {0, 0, 0};
     int np = 0;
     bool sub = false;
-    const auto ctrl = [&](int mod) { return mod > 1 && ((mod - 1) & 4); };
-    const auto plain = [](int mod, int key) -> int {
-        const int bits = mod > 1 ? mod - 1 : 0;
-        if(bits & ~1) return NONE;
-        if(key >= 'a' && key <= 'z') return (bits & 1) ? key - 32 : key;
-        if(key == ' ' || key == '\r' || key == '\t' || key == 127 || key == 27)
-            return key;
-        return NONE;
+    // xterm/kitty modifier parameter (1 + bits: shift=1 alt=2 ctrl=4) -> MOD_*
+    // bits; -1 for modifiers we don't model (super, hyper, meta)
+    const auto mods_of = [](int m) -> int {
+        const int bits = m > 1 ? m - 1 : 0;
+        if(bits & 0x38) return -1;
+        return ((bits & 1) ? MOD_SHIFT : 0) | ((bits & 2) ? MOD_ALT : 0) |
+               ((bits & 4) ? MOD_CTRL : 0);
+    };
+    // base key + modifier parameter -> the canonical key (NONE if impossible)
+    const auto with = [&](int base, int modparam, int extra = 0) -> int {
+        const int m = mods_of(modparam);
+        if(m < 0) return NONE;
+        const int k = key_normalize(base, m | extra);
+        return k < 0 ? NONE : k;
     };
     for(int i = 0; i < 16; ++i) {
         if(!next_byte(b)) return '\x1b';
@@ -192,30 +210,27 @@ int editor_read_key() {
             ++np;
         } else if(b >= 0x40 && b <= 0x7E) {
             switch(b) {
-                case 'A': return ARROW_UP;
-                case 'B': return ARROW_DOWN;
-                case 'C': return ARROW_RIGHT;
-                case 'D': return ARROW_LEFT;
-                case 'H': return HOME;
-                case 'F': return END;
-                case 'u':  // kitty / CSI-u: 127;5u
-                    if(ctrl(p[1])) {
-                        if(p[0] == 127) return CTRL_BACKSPACE;
-                        if(p[0] >= 'a' && p[0] <= 'z') return p[0] & 0x1f;
-                    }
-                    return plain(p[1], p[0]);
+                case 'A': return with(ARROW_UP, p[1]);  // CSI 1;5A
+                case 'B': return with(ARROW_DOWN, p[1]);
+                case 'C': return with(ARROW_RIGHT, p[1]);
+                case 'D': return with(ARROW_LEFT, p[1]);
+                case 'H': return with(HOME, p[1]);
+                case 'F': return with(END, p[1]);
+                case 'Z': return with('\t', p[1], MOD_SHIFT);  // Shift-Tab
+                case 'u':  // kitty / CSI-u: 97;5u
+                    return p[0] > 0 && p[0] < 128 ? with(p[0], p[1]) : NONE;
                 case '~':
                     switch(p[0]) {
                         case 1:
-                        case 7: return HOME;
-                        case 3: return DELETE;
+                        case 7: return with(HOME, p[1]);
+                        case 3: return with(DELETE, p[1]);
                         case 4:
-                        case 8: return END;
-                        case 5: return PAGE_UP;
-                        case 6: return PAGE_DOWN;
-                        case 27:
-                            if(p[2] == 127 && ctrl(p[1])) return CTRL_BACKSPACE;
-                            return plain(p[1], p[2]);
+                        case 8: return with(END, p[1]);
+                        case 5: return with(PAGE_UP, p[1]);
+                        case 6: return with(PAGE_DOWN, p[1]);
+                        case 27:  // modifyOtherKeys: 27;5;13~
+                            return p[2] > 0 && p[2] < 128 ? with(p[2], p[1])
+                                                          : NONE;
                         case 200: read_paste(); return PASTE;
                     }
                     break;
@@ -224,6 +239,13 @@ int editor_read_key() {
         }
     }
     return NONE;
+}
+
+}  // namespace
+
+int editor_read_key(bool want_mods) {
+    const int k = read_key(want_mods);
+    return want_mods ? k : legacy_key(k);
 }
 
 std::string editor_take_paste() { return std::exchange(g_paste, {}); }

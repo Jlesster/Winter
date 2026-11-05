@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include "indent_model.hpp"
 #include "piece.hpp"
 #include "syntax.hpp"
 
@@ -11,9 +12,9 @@ std::string_view leading_ws(std::string_view line);
 std::string ws_for_cols(int cols);
 std::string for_newline(std::string_view before);
 std::string for_open_above(std::string_view line);
-void reindent_lines(Syntax& syn, PieceTable& pt, bool eol, size_t l0,
+void reindent_lines(Model& m, Syntax& syn, PieceTable& pt, bool eol, size_t l0,
                     size_t l1);
-std::optional<std::string> from_tree(Syntax& syn, PieceTable& pt, bool eol,
-                                     size_t line);
+std::optional<std::string> from_tree(Model& m, Syntax& syn, PieceTable& pt,
+                                     bool eol, size_t line);
 bool is_label(std::string_view tok);
 }  // namespace indent

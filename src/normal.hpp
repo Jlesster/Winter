@@ -5,7 +5,8 @@
 #include "registry.hpp"
 
 void normal_feed(int c);  // feed one key; everything in normal mode goes here
-void normal_reset();      // drop pending count / chord
+bool normal_accepts(int c);   // would c continue or finish a mapping?
+void normal_reset();          // drop pending count / chord
 bool normal_chord_pending();  // chord waiting
 bool normal_input_pending();  // input waiting
 void normal_chord_timeout();  // resolve or timeout waiting chord

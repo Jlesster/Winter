@@ -83,7 +83,7 @@ namespace {
 
 struct NormalState {
     int count = 0;           // 0 = nothing typed yet
-    std::string keys;        // chord typed so far: "g", "gg", ...
+    KeySeq keys;             // chord typed so far: "g", "gg", ... (parse_keys)
     bool want_char = false;  // waiting for the char argument of `action`
     std::string action;      // the wants_char action that is waiting
     std::string arg;         // that char's bytes (UTF-8 arrives 1 byte/key)
@@ -124,8 +124,9 @@ EditorMode keymap_mode() {
 }
 
 void show_pending() {
-    editor_set_status_message(
-        "{}{}", N.count ? std::to_string(N.count) : std::string(), N.keys);
+    editor_set_status_message("{}{}",
+                              N.count ? std::to_string(N.count) : std::string(),
+                              format_keys(N.keys));
     N.shown = true;
 }
 
@@ -213,6 +214,17 @@ void normal_reset() { N.reset(); }
 bool normal_chord_pending() { return !N.keys.empty() && !N.want_char; }
 bool normal_input_pending() { return normal_pending(); }
 
+// would feeding `c` continue or finish a mapping? (editor_handle_key asks this
+// before letting a modified key through)
+bool normal_accepts(int c) {
+    if(N.want_char) return false;
+    KeySeq probe = N.keys;
+    probe += static_cast<char32_t>(c);
+    const EditorMode m =
+        E.mode == VISUAL ? VISUAL : (N.op.empty() ? NORMAL : OPPEND);
+    return registry().lookup(m, probe).kind != Lookup::None;
+}
+
 void normal_chord_timeout() {
     if(!normal_chord_pending()) return;
     const EditorMode map_mode = keymap_mode();
@@ -228,12 +240,11 @@ void normal_begin_operator(std::string_view name, int count) {
 }
 
 void normal_feed(int c) {
-    if(c == '\x1b' || c >= 0x100) {
-        N.reset();
-        return;
-    }
-
-    if(N.want_char) {
+    if(N.want_char) {  // the argument of f / t / r ...: plain bytes only
+        if(c == '\x1b' || c >= 0x100) {
+            N.reset();
+            return;
+        }
         if(N.arg.empty() && c < 32) {
             N.reset();
             return;
@@ -245,6 +256,19 @@ void normal_feed(int c) {
         return;
     }
 
+    // arrows, Home, PageUp ... are handled by editor_handle_key and aren't
+    // mappable (yet); a modified key (Alt-x, Ctrl-Left) is.
+    if(c >= 0x100 && !key_mods(c)) {
+        N.reset();
+        return;
+    }
+    // Esc cancels anything pending; with nothing pending it is a normal key
+    // that can be mapped
+    if(c == '\x1b' && (N.count || !N.keys.empty() || !N.op.empty())) {
+        N.reset();
+        return;
+    }
+
     if(N.keys.empty() &&
        ((c >= '1' && c <= '9') || (c == '0' && N.count > 0))) {
         N.count = std::min(N.count * 10 + (c - '0'), 1000000);
@@ -252,7 +276,7 @@ void normal_feed(int c) {
         return;
     }
 
-    N.keys += static_cast<char>(c);
+    N.keys += static_cast<char32_t>(c);
     const EditorMode map_mode =
         E.mode == VISUAL ? VISUAL : (N.op.empty() ? NORMAL : OPPEND);
     const Hit hit = registry().lookup(map_mode, N.keys);

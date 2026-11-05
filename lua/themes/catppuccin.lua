@@ -1,4 +1,3 @@
--- ~/.config/winter/catppuccin.lua
 -- Catppuccin for winter, ported from catppuccin/nvim (all four flavours).
 --
 --   require("catppuccin").setup({ flavour = "mocha" })

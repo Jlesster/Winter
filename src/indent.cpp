@@ -7,9 +7,9 @@
 #include <optional>
 #include <string_view>
 #include <unordered_map>
+#include "columns.hpp"
 #include "options.hpp"
 #include "piece.hpp"
-#include "src/columns.hpp"
 #include "syntax.hpp"
 
 namespace {
@@ -39,6 +39,8 @@ const Rules* rules_for(std::string_view lang) {
     if(lang == "go" || lang == "rust") return &strict;
     return nullptr;
 }
+
+bool model_lang(std::string_view l) { return l == "c" || l == "cpp"; }
 
 bool is_closer(char c) { return c == ')' || c == ']' || c == '}'; }
 bool is_opener(char c) { return c == '(' || c == '[' || c == '{'; }
@@ -129,7 +131,7 @@ public:
         std::string& s = it->second;
         if(!fresh) return s;
         s = text(l);
-        if(_r.preproc && ltrim(s).starts_with('#')) {
+        if(_r.preproc && ltrim(s).starts_with('#') || pp_cont(l)) {
             s.assign(s.size(), ' ');
             return s;
         }
@@ -230,7 +232,9 @@ public:
         while(l > lo) {
             const auto q = prev_significant(l);
             if(!q || *q < lo) break;
-            if(!ends_cont(tail(*q)) && !starts_cont(head(l))) break;
+            if(!ends_cont(tail(*q)) && !starts_cont(head(l)) && !in_string(l) &&
+               !(tail(*q).ends_with(',') && init_chain(*q)))
+                break;
             l = anchor_line(*q);
         }
         return l;
@@ -265,6 +269,65 @@ public:
         return base;
     }
 
+    bool is_scope_block(size_t l) {  // namespace
+        const std::string_view w = first_word(head(l));
+        return w == "namespace" || (w == "extern" && text(l).contains('"'));
+    }
+
+    bool indent_ns(const Opener& o, size_t ow) {
+        if(opts.indent_namespace != 2) return opts.indent_namespace == 1;
+        for(size_t l = o.line + 1; l < _pt.line_count() && l < o.line + 50; ++l)
+            if(!blank(l)) return ind(l) > ind(ow) && !is_closer(head(l)[0]);
+        return false;
+    }
+
+    std::optional<int> pp_cont(size_t l) {  // line continue
+        if(!_r.preproc || l == 0 || !rtrim(text(l - 1)).ends_with('\\'))
+            return std::nullopt;
+        size_t k = l - 1;
+        while(k > 0 && rtrim(text(k - 1)).ends_with('\\')) --k;
+        if(!ltrim(text(k)).starts_with('#')) return std::nullopt;
+        return k == l - 1 ? opts.shift_width : ind(l - 1);
+    }
+
+    std::optional<size_t> init_chain(size_t q) {  // q ends in ','
+        for(size_t n = 0; n < 64; ++n) {
+            const std::string_view h = head(q);
+            if(h.starts_with(':') && !h.starts_with("::")) return q;
+            const auto p = prev_significant(q);
+            if(!p || !tail(*p).ends_with(',')) return std::nullopt;
+            q = *p;
+        }
+        return std::nullopt;
+    }
+
+    bool in_string(size_t l) {  // line starts inside a string
+        const size_t ls = _pt.line_start(l);
+        const Syntax::LitSpan lit = _syn.literal_at(ls);
+        return lit.kind == Syntax::Lit::String && lit.start < ls;
+    }
+
+    // `case`/`default` labels of switch `o`: 0 flat, 1 indent, 2 follow
+    // siblings
+    bool indent_case(const Opener& o, size_t ow, size_t line) {
+        if(opts.indent_case != 2) return opts.indent_case == 1;
+        const auto sibling = [&](size_t l) -> std::optional<bool> {
+            const std::string_view w = first_word(head(l));
+            if(w != "case" && w != "default") return std::nullopt;
+            const auto ob =
+                unclosed_before(l, 0);  // must belong to THIS switch,
+            if(!ob || ob->line != o.line ||
+               ob->col != o.col)  // not a nested one
+                return std::nullopt;
+            return ind(l) > ind(ow);
+        };
+        for(size_t l = line; l-- > o.line + 1;)  // labels above first
+            if(const auto r = sibling(l)) return *r;
+        for(size_t l = line + 1; l < _pt.line_count() && l < line + 60; ++l)
+            if(const auto r = sibling(l)) return *r;  // then below
+        return true;                                  // none yet: indent
+    }
+
     std::optional<int> align_col(const Opener& o) {
         const size_t k = code(o.line).find_first_not_of(" \t", o.col + 1);
         if(k == std::string::npos) return std::nullopt;
@@ -283,12 +346,14 @@ std::optional<int> structural(Syntax& syn, const PieceTable& pt, size_t line,
     Scan sc(syn, pt, r);
     const int sw = opts.shift_width;
     const std::string_view cur = sc.head(line);
+    if(r.preproc && ltrim(sc.text(line)).starts_with('#')) return 0;
+    if(const auto pc = sc.pp_cont(line)) return *pc;
     const auto o = sc.unclosed_before(line, 0);
     const auto p = sc.prev_significant(line);
     const size_t lo = o ? o->line + 1 : 0;
     const auto inside = [&]() -> int {
         const auto ow = sc.owner(*o);
-        if(o->ch == '{' && first_word(sc.head(ow)) == "namespace")
+        if(o->ch == '{' && sc.is_scope_block(ow) && !sc.indent_ns(*o, ow))
             return sc.ind(ow);
         if(o->ch != '{')
             if(const auto a = sc.align_col(*o)) return *a;
@@ -302,7 +367,12 @@ std::optional<int> structural(Syntax& syn, const PieceTable& pt, size_t line,
         if(!o) return std::nullopt;
         return sc.ind(sc.owner(*o));
     }
-    if(o && o->ch == '{' && starts_label(cur)) return sc.ind(sc.owner(*o));
+    if(o && o->ch == '{' && starts_label(cur)) {
+        const size_t ow = sc.owner(*o);
+        const bool in =
+            first_word(sc.head(ow)) == "switch" && sc.indent_case(*o, ow, line);
+        return sc.ind(ow) + (in ? sw : 0);
+    }
     if(o && p && *p == o->line) return inside();
     if(!p) return 0;
     if(starts_label(sc.head(*p)) && sc.tail(*p).ends_with(':') &&
@@ -310,13 +380,16 @@ std::optional<int> structural(Syntax& syn, const PieceTable& pt, size_t line,
         return sc.ind(*p) + sw;
     const size_t s = sc.stmt_start(*p);
     if(cur.starts_with('{')) return fix(s);
+    if(sc.tail(*p).ends_with(',') && (!o || o->ch == '{'))
+        if(const auto k = sc.init_chain(*p))
+            return sc.ind(*k) + (cur.starts_with(',') ? 0 : 2);
     if(ends_cont(sc.tail(*p)) || starts_cont(cur)) {
         const bool on_cont = *p != s && sc.anchor_line(*p) == *p;
         return on_cont ? sc.ind(*p) : fix(s) + sw;
     }
-    if(first_word(cur) == "else") return fix(sc.pop_braceless(*p, lo, true));
+    if(first_word(cur) == "else") return fix(sc.pop_braceless(s, lo, true));
     if(sc.braceless_header(*p)) return fix(sc.anchor_line(*p)) + sw;
-    return fix(sc.pop_braceless(*p, lo, false));
+    return fix(sc.pop_braceless(s, lo, false));
 }
 
 bool is_label_prefix(std::string_view tok) {
@@ -356,13 +429,13 @@ std::string for_open_above(std::string_view line) {
     return std::string(leading_ws(line));
 }
 
-void reindent_lines(Syntax& syn, PieceTable& pt, bool eol, size_t l0,
+void reindent_lines(Model& m, Syntax& syn, PieceTable& pt, bool eol, size_t l0,
                     size_t l1) {
     PieceTable::Group g(pt);
     for(size_t l = l0; l <= l1; ++l) {
         const std::string line = pt.line_text(l);
         if(line.find_first_not_of(" \t") == std::string::npos) continue;
-        const auto ws = from_tree(syn, pt, eol, l);
+        const auto ws = from_tree(m, syn, pt, eol, l);
         if(!ws) continue;
         const std::string_view cur = leading_ws(line);
         if(cur == *ws) continue;
@@ -372,25 +445,45 @@ void reindent_lines(Syntax& syn, PieceTable& pt, bool eol, size_t l0,
     }
 }
 
-std::optional<std::string> from_tree(Syntax& syn, PieceTable& pt, bool eol,
-                                     size_t line) {
+std::optional<std::string> from_tree(Model& m, Syntax& syn, PieceTable& pt,
+                                     bool eol, size_t line) {
     syn.update(pt, eol);
-    const Rules* r = rules_for(syn.lang());
-    const std::optional<int> st =
-        r ? structural(syn, pt, line, *r) : std::nullopt;
+    const size_t ls = pt.line_start(line);
+    const Syntax::LitSpan lit = syn.literal_at(ls);
+    if(lit.kind != Syntax::Lit::None && lit.start < ls) {
+        if(lit.kind == Syntax::Lit::String) return std::nullopt;
+        const std::string t = pt.line_text(line);
+        const size_t f = t.find_first_not_of(" \t");
+        if(f == std::string::npos || t[f] != '*') return std::nullopt;
+        const size_t ol = pt.line_of(lit.start);
+        return ws_for_cols(
+            cx_to_rx(pt.line_text(ol), int(lit.start - pt.line_start(ol))) + 1);
+    }
+    syn.update(pt, eol);
+    const auto lang = syn.lang();
+    const Rules* r = rules_for(lang);
+    std::optional<int> st;
+    if(model_lang(lang)) st = m.indent_for(syn, pt, line);
+    else if(r) st = structural(syn, pt, line, *r);
     const std::optional<int> ts = syn.indent_for(line);
     const std::optional<int> cols = opts.indent_engine == 1   ? ts
                                     : opts.indent_engine == 2 ? st
                                                               : (st ? st : ts);
-    if(std::getenv("WINTER_INDENT_LOG"))
+    if(std::getenv("WINTER_INDENT_LOG")) {
+        const int legacy = (model_lang(lang) && r)
+                               ? structural(syn, pt, line, *r).value_or(-1)
+                               : st.value_or(-1);
         std::ofstream("/tmp/winter-indent.log", std::ios::app) << std::format(
-            "line={} lang={} ie={} structural={} ts={} applied={}\n",
-            line,
-            syn.lang(),
+            "line={} lang={} ie={} model={} legacy={} ts={} applied={} | {}\n",
+            line + 1,
+            lang,
             opts.indent_engine,
             st.value_or(-1),
+            legacy,
             ts.value_or(-1),
-            cols.value_or(-1));
+            cols.value_or(-1),
+            pt.line_text(line));
+    }
     if(!cols) return std::nullopt;
     return ws_for_cols(*cols);
 }

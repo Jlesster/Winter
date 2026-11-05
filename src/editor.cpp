@@ -51,6 +51,7 @@ void set_mode(EditorMode m) {
         const size_t p = motion::clamp_normal(E.buf().pt, cursor_offset());
         set_cursor_offset(p);
     }
+    if(insertish(E.mode) && !insertish(m)) editor_strip_autoindent();
     if(E.mode == INSERT) E.buf().pt.end_group();
     const bool was_ins = insertish(E.mode), will_ins = insertish(m);
     if(was_ins && !will_ins) {

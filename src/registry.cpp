@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 #include <iterator>
+#include <string>
+#include "keys.hpp"
 
 Registry& registry() {
     static Registry r;
@@ -48,11 +50,16 @@ motion::Fn Registry::motion(std::string_view name) const {
     return it == motions_.end() ? nullptr : it->second;
 }
 
-void Registry::map(EditorMode m, std::string keys, std::string action) {
+void Registry::map(EditorMode m, KeySeq keys, std::string action) {
+    if(keys.empty()) return;  // a bad notation maps nothing
     keymaps_[m][std::move(keys)] = std::move(action);
 }
 
-bool Registry::unmap(EditorMode m, std::string_view keys) {
+void Registry::map(EditorMode m, const char* notation, std::string action) {
+    map(m, parse_keys(notation), std::move(action));
+}
+
+bool Registry::unmap(EditorMode m, std::u32string_view keys) {
     const auto km = keymaps_.find(m);
     if(km == keymaps_.end()) return false;
     const auto it = km->second.find(keys);
@@ -61,7 +68,7 @@ bool Registry::unmap(EditorMode m, std::string_view keys) {
     return true;
 }
 
-Hit Registry::lookup(EditorMode m, std::string_view keys) const {
+Hit Registry::lookup(EditorMode m, std::u32string_view keys) const {
     const auto km = keymaps_.find(m);
     if(km == keymaps_.end() || keys.empty()) return {};
     const auto& map = km->second;
@@ -77,35 +84,117 @@ Hit Registry::lookup(EditorMode m, std::string_view keys) const {
     return {};
 }
 
-std::string parse_keys(std::string_view s) {
-    std::string out;
+namespace {
+struct NamedKey {
+    std::string_view name;
+    int key;
+};
+// canonical names first: format_keys() prints the first match
+constexpr NamedKey kNamed[] = {
+    {"Esc", 27},          {"CR", '\r'},
+    {"Tab", '\t'},        {"BS", BACKSPACE},
+    {"Space", ' '},       {"lt", '<'},
+    {"Up", ARROW_UP},     {"Down", ARROW_DOWN},
+    {"Left", ARROW_LEFT}, {"Right", ARROW_RIGHT},
+    {"Home", HOME},       {"End", END},
+    {"PageUp", PAGE_UP},  {"PageDown", PAGE_DOWN},
+    {"Del", DELETE},      {"C-BS", CTRL_BACKSPACE},
+    {"Enter", '\r'},      {"Return", '\r'},
+    {"Delete", DELETE},
+};
+
+bool iequals(std::string_view a, std::string_view b) {
+    return std::ranges::equal(a, b, [](unsigned char x, unsigned char y) {
+        return std::tolower(x) == std::tolower(y);
+    });
+}
+
+// "C-S-Left" -> key. false = not a key name (caller types it literally);
+// *err is set when it IS a key but can't exist.
+bool parse_one(std::string_view name, int& out, const char** err) {
+    int mods = 0;
+    while(name.size() > 2 && name[1] == '-') {
+        switch(std::tolower(static_cast<unsigned char>(name[0]))) {
+            case 'c': mods |= MOD_CTRL; break;
+            case 'a':
+            case 'm': mods |= MOD_ALT; break;
+            case 's': mods |= MOD_SHIFT; break;
+            default: return false;
+        }
+        name.remove_prefix(2);
+    }
+    int base = -1;
+    if(name.size() == 1) {
+        if(!mods) return false;  // "<x>" is just the text <x>
+        base = static_cast<unsigned char>(name[0]);
+    } else {
+        for(const auto& n : kNamed)
+            if(iequals(n.name, name)) {
+                base = n.key;
+                break;
+            }
+    }
+    if(base < 0) return false;
+    const int k = key_normalize(base, mods);
+    if(k < 0) {
+        if(err) *err = "that modifier combination can't be typed in a terminal";
+        return false;
+    }
+    out = k;
+    return true;
+}
+}  // namespace
+
+KeySeq parse_keys(std::string_view s, const char** err) {
+    if(err) *err = nullptr;
+    KeySeq out;
     for(size_t i = 0; i < s.size(); ++i) {
         if(s[i] == '<') {
             const size_t close = s.find('>', i);
-            if(close != std::string_view::npos && close - i <= 6) {
-                std::string name(s.substr(i + 1, close - i - 1));
-                std::string low = name;
-                std::transform(
-                    low.begin(), low.end(), low.begin(), [](unsigned char c) {
-                        return std::tolower(c);
-                    });
-                char c = 0;
-                if(low.size() == 3 && low[0] == 'c' && low[1] == '-')
-                    c = static_cast<char>(low[2] & 0x1f);
-                else if(low == "esc") c = '\x1b';
-                else if(low == "cr") c = '\r';
-                else if(low == "tab") c = '\t';
-                else if(low == "bs") c = 127;
-                else if(low == "space") c = ' ';
-                else if(low == "lt") c = '<';
-                if(c) {
-                    out += c;
+            if(close != std::string_view::npos && close - i <= 16) {
+                int k;
+                if(parse_one(s.substr(i + 1, close - i - 1), k, err)) {
+                    out += static_cast<char32_t>(k);
                     i = close;
                     continue;
                 }
+                if(err && *err) return {};  // known key, impossible combo
             }
         }
-        out += s[i];  // plain key (or a '<' that isn't a known name)
+        // one element per byte, like the terminal delivers them (UTF-8 = N
+        // keys)
+        out += static_cast<char32_t>(static_cast<unsigned char>(s[i]));
+    }
+    return out;
+}
+
+std::string format_keys(const KeySeq& keys) {
+    std::string out;
+    for(const char32_t ch : keys) {
+        const int base = key_base(static_cast<int>(ch));
+        const int mods = key_mods(static_cast<int>(ch));
+        std::string name;  // non-empty -> needs <...>
+        for(const auto& n : kNamed)
+            if(n.key == base) {
+                name = n.name;
+                break;
+            }
+        if(name.empty() && base == 0) name = "C-Space";
+        else if(name.empty() && base < 32)
+            name = std::string("C-") + static_cast<char>('a' + base - 1);
+        if(name.empty() && !mods) {
+            out += static_cast<char>(base);
+            continue;
+        }
+        if(name.empty()) name = std::string(1, static_cast<char>(base));
+        std::string pre;
+        if(mods & MOD_CTRL) pre += "C-";
+        if(mods & MOD_ALT) pre += "A-";
+        if(mods & MOD_SHIFT) pre += "S-";
+        out += '<';
+        out += pre;
+        out += name;
+        out += '>';
     }
     return out;
 }

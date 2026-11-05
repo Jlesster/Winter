@@ -26,10 +26,10 @@ motion::Fn wrap(Pure fn) {
 }
 
 void map_shared(const char* name, const char* keys) {
-    const std::string k = parse_keys(keys);
-    registry().map(NORMAL, parse_keys(keys), name);
-    registry().map(OPPEND, parse_keys(keys), name);
-    registry().map(VISUAL, parse_keys(keys), name);
+    const KeySeq k = parse_keys(keys);
+    registry().map(NORMAL, k, name);
+    registry().map(OPPEND, k, name);
+    registry().map(VISUAL, k, name);
 }
 
 void bind_op_motion(const char* name, Pure fn, const char* keys) {

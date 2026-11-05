@@ -68,6 +68,7 @@ struct Server {
     LspId id = 0;
     bool dead = false;
     bool restart = false;
+    std::string why;
     std::vector<Buffer*> waiting;
 };
 std::deque<Server> g_servers;
@@ -476,6 +477,7 @@ void on_exit(LspId id, std::string_view why) {
     Server* s = by_id(id);
     if(!s) return;
     s->dead = true;
+    s->why = why.substr(0, why.find('\n'));
     s->waiting.clear();
     for(Doc& d : g_docs)
         if(d.server == id) {
@@ -485,6 +487,7 @@ void on_exit(LspId id, std::string_view why) {
             d.buf->decos.clear_ns(deco_ns("lsp.refs"));
             d.buf->pt.lsp_track(false);
         }
+    std::erase_if(g_docs, [&](const Doc& d) { return d.server == id; });
     if(s->restart) {
         editor_set_status_message("lsp {}: restarting", s->name);
         std::erase_if(g_servers, [id](const Server& x) { return x.id == id; });
@@ -493,7 +496,6 @@ void on_exit(LspId id, std::string_view why) {
         });
         return;
     }
-    std::erase_if(g_docs, [&](const Doc& d) { return d.server == id; });
     editor_set_status_message(
         "lsp {} exited: {}", s->name, why.substr(0, why.find('\n')));
 }
@@ -622,6 +624,27 @@ std::string lsp_sync_server_restart(std::string_view name) {
             return std::format("lsp {}: restarting", name);
         }
     return lsp_sync_server_start(name);
+}
+
+std::string lsp_sync_server_report() {
+    if(g_servers.empty()) return "no lsp server has been started\n";
+    std::string o;
+    for(const Server& s : g_servers) {
+        const auto docs = std::ranges::count_if(
+            g_docs, [&](const Doc& d) { return d.server == s.id; });
+        o += std::format("{} (id {}): {}{}\n",
+                         s.name,
+                         s.id,
+                         s.dead            ? "dead: " + s.why
+                         : lsp_ready(s.id) ? std::string("ready")
+                                           : std::string("starting"),
+                         s.restart ? "  [restart pending]" : "");
+        o += std::format(
+            "  attached buffers: {} queued: {}\n", docs, s.waiting.size());
+        if(!s.dead && !lsp_stderr(s.id).empty())
+            o += std::format("  stderr tail:\n{}\n", lsp_stderr(s.id));
+    }
+    return o;
 }
 
 void lsp_sync_tick() {
