@@ -142,6 +142,30 @@ std::optional<int> Model::indent_for(Syntax& syn, const PieceTable& pt,
         }
         return std::nullopt;
     };
+    if(cur.empty() && s.frames && s.frames->kind == Kind::Init) {
+        // a brand-new line in an init list: copy the element lines already
+        // below it (the Enter-in-the-middle case); a reindent of existing text
+        // doesn't peek, or `=` would just preserve whatever is there
+        pk.next_sibling = [&]() -> std::optional<int> {
+            const Frame& f = *s.frames;
+            for(size_t l = line + 1; l < pt.line_count() && l < line + 50; ++l) {
+                const LineState ls = state_at(syn, pt, l);
+                const Frame* top = ls.frames.get();
+                if(!top || top->kind != Kind::Init || top->line != f.line ||
+                   top->align != f.align)
+                    continue;
+                const std::string r = pt.line_text(l);
+                const std::string c = mask_line(syn, pt, l, r);
+                const size_t q = c.find_first_not_of(" \t");
+                if(q == std::string::npos) continue;
+                if(c[q] == '}' || c[q] == ')' || c[q] == ']')
+                    return std::nullopt;
+                if(ls.stmt.pending != Pending::None) continue;
+                return indent_cols(r);
+            }
+            return std::nullopt;
+        };
+    }
     return column(s, cur, cfg, pk);
 }
 

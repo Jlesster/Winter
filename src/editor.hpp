@@ -11,6 +11,7 @@
 #include "diag.hpp"
 #include "edit_bus.hpp"
 #include "indent_model.hpp"
+#include "markdown.hpp"
 #include "options.hpp"
 #include "piece.hpp"
 #include "syntax.hpp"
@@ -36,6 +37,7 @@ struct Buffer {
     indent::Model indent{};
     std::vector<Diag> diags{};
     DecoStore decos{};
+    MdState md{};
     std::string filename{};
     std::string orig{};
     bool eol = true;

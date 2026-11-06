@@ -10,6 +10,7 @@
 #include "glyphs.hpp"
 #include "options.hpp"
 #include "syntax.hpp"
+#include "tree.hpp"
 #include "theme.hpp"
 #include "utf8.hpp"
 #include "virt.hpp"
@@ -28,7 +29,7 @@ std::string_view mode_text() {
         case VISUAL: return E.v_line ? "V-LINE" : "VISUAL";
         case COMMAND: return "COMMAND";
         case REPLACE: return "REPLACE";
-        case FILES: return "FILES";
+        case FILES: return tree_visual() ? "V-FILES" : "FILES";
         case NORMAL:
         case OPPEND: break;
     }
@@ -42,6 +43,7 @@ uint32_t mode_accent(std::string_view m) {
     if(m == "COMMAND") return kPeach;
     if(m == "SEARCH") return kYellow;
     if(m == "FILES") return kTeal;
+    if(m == "V-FILES") return kMauve;
     return kBlue;
 }
 
@@ -67,7 +69,7 @@ Style on_bar(std::string_view group) {
 
 StatusBlock c_mode() {
     const std::string_view mode = mode_text();
-    // ui.statusline.<normal|insert|visual|vline|replace|command|search|files>
+    // ui.statusline.<normal|insert|visual|vline|replace|command|search|files|vfiles>
     std::string group = "ui.statusline.";
     for(const char c : mode)
         if(c != '-')

@@ -11,8 +11,8 @@
 #include "editor.hpp"
 #include "jumplist.hpp"
 #include "lsp_actions.hpp"
-#include "lsp_rename.hpp"
 #include "lsp_nav.hpp"
+#include "lsp_rename.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
 #include "registry.hpp"
@@ -134,7 +134,7 @@ void register_builtin_actions() {
         "buffer.prev",
         [](Ctx& c) {
             dot_supress();
-            buffer_cycle(std::max(c.count, 1));
+            buffer_cycle(-std::max(c.count, 1));
         },
         "[b");
     bind(
@@ -148,9 +148,9 @@ void register_builtin_actions() {
         "buffer.prev",
         [](Ctx& c) {
             dot_supress();
-            buffer_cycle(std::max(c.count, 1));
+            buffer_cycle(-std::max(c.count, 1));
         },
-        "<S-l>");
+        "<S-h>");
     bind(
         "buffer.alt",
         [](Ctx& c) {

@@ -88,11 +88,12 @@ struct Walker {
         }
     }
 
-    Kind brace_kind(bool header_body) {
+    Kind brace_kind(bool header_body, bool first_arg) {
         const Stmt& t = st();
         if(t.kw == Kw::Switch) return Kind::Switch;
         if(t.kw == Kw::Scope) return Kind::Scope;
         if(header_body) return Kind::Block;
+        if(first_arg) return Kind::Init;  // f({...}), a[{...}]
         if(t.init_list && t.last == 'w') return Kind::Init;
         if(t.paren_seen) return Kind::Block;
         if(top_kind() == Kind::Init) return Kind::Init;
@@ -274,8 +275,14 @@ struct Walker {
                 case '{': {
                     const bool hb = st().pending == Pending::Header;
                     const int hind = hb && st().headers ? st().headers->ind : 0;
+                    // `f({.a = 1,`: a list straight after a `(` / `[` is an
+                    // init list, not a code block (begin_stmt() below wipes
+                    // the evidence, so look now)
+                    const bool first_arg =
+                        !hb && in_group() && st().pending == Pending::None &&
+                        st().last == 0;
                     begin_stmt();
-                    const Kind k = brace_kind(hb);
+                    const Kind k = brace_kind(hb, first_arg);
                     push(k,
                          '{',
                          align_after(at),
@@ -353,7 +360,18 @@ void advance(LineState& s, std::string_view raw, std::string_view code, int ind,
         s.pp_cont = e != std::string_view::npos && raw[e] == '\\';
         return;
     }
-    if(code.find_first_not_of(" \t") == std::string_view::npos) return;
+    const size_t first = code.find_first_not_of(" \t");
+    if(first == std::string_view::npos) return;
+    // the first element of an init list that starts a line sets the indent
+    // the following ones copy
+    if(const Frame* f = s.frames.get();
+       f && f->kind == Kind::Init && f->line != line && f->sib_ind < 0 &&
+       s.stmt.pending == Pending::None &&
+       !(code[first] == '}' || code[first] == ')' || code[first] == ']')) {
+        Frame nf = *f;
+        nf.sib_ind = ind;
+        s.frames = std::make_shared<const Frame>(std::move(nf));
+    }
     Walker w{s, raw, code, ind, line};
     w.run();
     Stmt& t = s.stmt;

@@ -187,20 +187,96 @@ int l_action_add(lua_State* L) {
     return 0;
 }
 
+struct ActionStep {
+    std::string name;
+    int count = 0;
+    std::string arg;
+};
+
+// {count=, arg=} on the table at absolute index `t`; absent keys leave `s` as is
+void read_step_opts(lua_State* L, int t, ActionStep& s) {
+    lua_getfield(L, t, "count");
+    if(lua_isinteger(L, -1)) s.count = static_cast<int>(lua_tointeger(L, -1));
+    lua_pop(L, 1);
+    lua_getfield(L, t, "arg");
+    if(lua_type(L, -1) == LUA_TSTRING) s.arg = lua_tostring(L, -1);
+    lua_pop(L, 1);
+}
+
 // winter.action.run(name [, {count=, arg=}]) -> false if there is no such
 // action
+//
+// winter.action.run({step, ...} [, {count=, arg=}]) -> true
+//                                | false, failed_name, failed_index
+// runs the steps in order. A step is an action name or
+// {name, count=, arg=}; the second argument gives the defaults for steps
+// that don't set their own. Every name is checked before the first step
+// runs, so a typo never leaves a half-run chain.
 int l_action_run(lua_State* L) {
-    const char* name = luaL_checkstring(L, 1);
-    int count = 0;
-    const char* arg = "";
-    if(lua_istable(L, 2)) {
-        lua_getfield(L, 2, "count");
-        if(lua_isinteger(L, -1)) count = static_cast<int>(lua_tointeger(L, -1));
-        lua_getfield(L, 2, "arg");
-        if(lua_type(L, -1) == LUA_TSTRING) arg = lua_tostring(L, -1);
-    }
-    Ctx ctx{count, arg};
-    lua_pushboolean(L, registry().run_action(name, ctx));
+    const bool chain = lua_istable(L, 1);
+    if(!chain) luaL_checkstring(L, 1);
+    bool ok = true, bad = false;
+    int failed = 0;
+    {
+        ActionStep base;
+        if(lua_istable(L, 2)) read_step_opts(L, 2, base);
+        std::vector<ActionStep> steps;
+        std::string msg;
+        if(!chain) {
+            base.name = lua_tostring(L, 1);
+            steps.push_back(std::move(base));
+        } else {
+            const int n = static_cast<int>(lua_rawlen(L, 1));
+            for(int i = 1; i <= n && msg.empty(); ++i) {
+                ActionStep s = base;
+                s.name.clear();
+                lua_rawgeti(L, 1, i);
+                if(lua_type(L, -1) == LUA_TSTRING) {
+                    s.name = lua_tostring(L, -1);
+                } else if(lua_istable(L, -1)) {
+                    lua_rawgeti(L, -1, 1);
+                    if(lua_type(L, -1) == LUA_TSTRING)
+                        s.name = lua_tostring(L, -1);
+                    lua_pop(L, 1);
+                    read_step_opts(L, lua_gettop(L), s);
+                }
+                lua_pop(L, 1);
+                if(s.name.empty())
+                    msg = std::format(
+                        "winter.action.run: step {} must be an action name "
+                        "or {{name, count=, arg=}}",
+                        i);
+                else steps.push_back(std::move(s));
+            }
+        }
+        if(!msg.empty()) {
+            lua_pushstring(L, msg.c_str());
+            bad = true;
+        } else {
+            const std::vector<std::string> known = registry().action_names();
+            for(size_t i = 0; i < steps.size() && ok; ++i)
+                if(std::ranges::find(known, steps[i].name) == known.end()) {
+                    ok = false;
+                    failed = static_cast<int>(i);
+                }
+            for(size_t i = 0; i < steps.size() && ok; ++i) {
+                Ctx ctx{steps[i].count, steps[i].arg};
+                if(!registry().run_action(steps[i].name, ctx)) {
+                    ok = false;
+                    failed = static_cast<int>(i);
+                }
+            }
+            if(!ok && chain) {
+                lua_pushboolean(L, 0);
+                lua_pushlstring(L, steps[failed].name.data(),
+                                steps[failed].name.size());
+                lua_pushinteger(L, failed + 1);
+            }
+        }
+    }  // std:: objects are gone before anything can longjmp
+    if(bad) return lua_error(L);
+    if(!ok && chain) return 3;
+    lua_pushboolean(L, ok);
     return 1;
 }
 

@@ -29,6 +29,7 @@
 #include "lsp_nav.hpp"
 #include "lsp_rename.hpp"
 #include "lsp_sync.hpp"
+#include "markdown.hpp"
 #include "menu.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
@@ -932,26 +933,36 @@ void register_builtin_commands() {
     lsp_actions_register();
     lsp_rename_register();
     completion_register_commands();
+    markdown_register_commands();
 }
 
 void editor_command_palette(std::string_view cmd) {
     while(cmd.ends_with(' ')) cmd.remove_suffix(1);
+
+    // A command invoked from VISUAL behaves like `:` from VISUAL:
+    // commit the selection to the visual marks and leave VISUAL first.
+    const bool from_visual = E.mode == VISUAL;
+    if(from_visual) set_mode(NORMAL);
+
     CmdLine c;
     std::string err;
     if(!parse_cmdline(cmd, c, err)) {
         editor_set_status_message("{}", err);
         return;
     }
+
     if(c.name.empty()) {
         if(c.has_range) goto_line(c.last);
         return;
     }
+
     const CmdMatch m = command_find(c.name);
     if(!m.spec) {
         if(m.cands.empty()) {
             editor_set_status_message("Unknown Command: {}", c.name);
             return;
         }
+
         std::string list;
         for(const std::string& n : m.cands) {
             if(!list.empty()) list += ", ";
@@ -960,12 +971,21 @@ void editor_command_palette(std::string_view cmd) {
         editor_set_status_message("Ambiguous command {}: {}", c.name, list);
         return;
     }
+
+    // Implicit visual range: only commands that accept a range get one.
+    if(from_visual && !c.has_range && m.spec->range) {
+        c.has_range = true;
+        c.first = static_cast<long>(E.vm_first) + 1;
+        c.last = static_cast<long>(E.vm_last) + 1;
+    }
+
     c.spec = m.spec;
     if(!validate_cmd(c, err)) {
         editor_set_status_message("{}", err);
         return;
     }
-    const CmdFn fn = m.spec->run;  // copy: the command may re-register itself
+
+    const CmdFn fn = m.spec->run;
     if(fn) fn(c);
 }
 

@@ -35,6 +35,7 @@ enum : uint16_t {
     ATTR_REVERSE = 1 << 4,
     ATTR_UNDERCURL = 1 << 5,
     ATTR_STRIKE = 1 << 6,
+    ATTR_NODIM = 1 << 7,  // patch-only: clears ATTR_DIM of what is below
 };
 
 class Screen {

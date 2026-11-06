@@ -24,6 +24,11 @@ public:
 
     static std::string_view detect(std::string_view path);
     bool attach(std::string_view filename);
+    // Attach by language name ("cpp", "c++", "rs", ...) instead of a file name.
+    bool attach_lang(std::string_view lang);
+    // Highlights `code` as a standalone document and returns styled byte ranges
+    // (sorted, non-overlapping). Leaves the object detached from any buffer.
+    std::optional<std::vector<Span>> highlight_text(std::string_view code);
     void parse(const PieceTable& pt, bool trailing_nl);
     std::string summary() const;
 
@@ -96,6 +101,7 @@ private:
     void cache_erase_range(size_t lo, size_t hi);
     void cache_apply_edit(const TextEdit& e);
 
+    bool use_lang(std::string_view lang);
     void drop_tree();
     void detach();
     bool load_query(const TSLanguage* lang, std::string_view name);
@@ -126,6 +132,7 @@ private:
     size_t _rb_lo = 0, _rb_hi = 0;
     std::string _err;
     std::string_view _name{};
+    std::string _name_store;  // backs _name for attach_lang
     uint64_t _seen_rev = ~0ULL;
     TSQuery* _query = nullptr;
     TSQueryCursor* _qc = nullptr;
@@ -144,3 +151,9 @@ private:
     const PieceTable* _pt = nullptr;
 };
 std::optional<Style> syntax_theme(std::string_view capture);
+
+// One-shot highlighting of a code snippet (hover fences). Syntax objects are
+// kept per language, so the query compiles once. nullopt when the language is
+// unknown, not installed, has no highlight query, or `code` is too large.
+std::optional<std::vector<Span>> syntax_highlight(std::string_view lang,
+                                                  std::string_view code);

@@ -378,6 +378,15 @@ void editor_open_above() {
     E.cx = static_cast<int>(ws.size());
 }
 
+void editor_indent_blank_line(std::string_view fallback) {
+    Buffer& B = E.buf();
+    const auto t = indent::from_tree(B.indent, B.syntax, B.pt, B.eol, E.cy);
+    const std::string ws = t ? *t : std::string(fallback);
+    if(!ws.empty()) B.pt.insert(B.pt.line_start(E.cy), ws);
+    g_ai = ws.empty() ? SIZE_MAX : static_cast<size_t>(E.cy);
+    E.cx = static_cast<int>(ws.size());
+}
+
 void editor_delete_char() {
     const size_t pos = cursor_offset();
     if(pos == 0) return;

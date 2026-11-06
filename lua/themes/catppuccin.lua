@@ -1461,6 +1461,51 @@ local function winter_only(C, U)
   }
 end
 
+-- Completion menu icons: one colour per LSP CompletionItemKind (glyphs live in
+-- kKinds in complete.cpp). The per-kind groups outrank the blanket
+-- ui.menu.kind (PmenuKind, which is plain blue), so without these every icon
+-- comes out blue.
+local function completion_kinds(C)
+  local by_kind = {
+    -- callables
+    method = C.blue,
+    ['function'] = C.blue,
+    constructor = C.sapphire,
+    -- data
+    variable = C.lavender,
+    field = C.flamingo,
+    property = C.teal,
+    -- types
+    class = C.yellow,
+    struct = C.yellow,
+    interface = C.yellow,
+    enum = C.yellow,
+    type_parameter = C.maroon,
+    -- constants and values
+    constant = C.peach,
+    enum_member = C.peach,
+    value = C.peach,
+    unit = C.peach,
+    -- everything else
+    module = C.rosewater,
+    keyword = C.mauve,
+    snippet = C.green,
+    color = C.pink,
+    operator = C.sky,
+    event = C.red,
+    file = C.subtext0,
+    folder = C.blue,
+    reference = C.subtext0,
+    text = C.subtext0,
+    unknown = C.overlay1,
+  }
+  local out = {}
+  for kind, fg in pairs(by_kind) do
+    out['ui.menu.kind.' .. kind] = { fg = fg }
+  end
+  return out
+end
+
 local function merge_style(base, over)
   local o = {}
   for k, v in pairs(base or {}) do
@@ -1560,6 +1605,13 @@ local function build(flavour, O)
     out[g] = to_style(d)
   end
   for g, st in pairs(winter_only(C, U)) do
+    out[g] = st
+  end
+
+  for g, st in pairs(winter_only(C, U)) do
+    out[g] = st
+  end
+  for g, st in pairs(completion_kinds(C)) do -- <- new
     out[g] = st
   end
 

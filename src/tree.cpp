@@ -1,7 +1,10 @@
 #include "tree.hpp"
 #include <algorithm>
 #include <cstddef>
+#include <cctype>
+#include <charconv>
 #include <cstdio>
+#include <functional>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -62,9 +65,12 @@ std::vector<TreeLine> g_lines;
 size_t g_sel = 0, g_top = 0;
 bool g_shown = false, g_hidden = false;
 int g_cols = 0;
+bool g_vis = false;  // v range: g_anchor .. g_sel
+fs::path g_anchor;
 
 bool focused() { return E.mode == FILES; }
 void focus(bool on) {
+    g_vis = false;
     if(on) set_mode(FILES);
     else if(E.mode == FILES) set_mode(NORMAL);
 }
@@ -156,6 +162,17 @@ Node* cur() {
 fs::path cur_path() {
     Node* n = cur();
     return n ? n->path : fs::path{};
+}
+
+// rows covered by the v range (just the cursor row if the anchor is hidden)
+std::pair<size_t, size_t> vis_range() {
+    size_t a = g_sel;
+    for(size_t i = 0; i < g_rows.size(); ++i)
+        if(g_rows[i].n->path == g_anchor) {
+            a = i;
+            break;
+        }
+    return {std::min(a, g_sel), std::max(a, g_sel)};
 }
 
 void set_root(const fs::path& p) {
@@ -261,6 +278,21 @@ fs::path target_dir(const fs::path& sel) {
     return fs::is_directory(sel, ec) ? sel : sel.parent_path();
 }
 
+// the v range as paths: root dropped, anything under another picked dir dropped
+std::vector<fs::path> vis_paths() {
+    const auto [lo, hi] = vis_range();
+    std::vector<fs::path> out;
+    for(size_t i = lo; i <= hi && i < g_rows.size(); ++i) {
+        const fs::path& p = g_rows[i].n->path;
+        if(p == g_root->path) continue;
+        if(std::ranges::any_of(
+               out, [&](const fs::path& q) { return within(p, q); }))
+            continue;
+        out.push_back(p);
+    }
+    return out;
+}
+
 std::vector<size_t> buffers_under(const fs::path& p) {
     std::vector<size_t> out;
     for(size_t i = 0; i < E.buffers.size(); ++i) {
@@ -307,34 +339,138 @@ std::optional<fs::path> resolve(const fs::path& dir, std::string text,
 }
 
 struct Clip {
-    fs::path src;
+    std::vector<fs::path> src;
     bool cut = false;
 };
 
 Clip g_clip;
+
+constexpr size_t kMaxAdd = 500;  // items one `a` may create
+
+// "1..5", "01..10", "a..e", "5..1" -> items; false if body isn't a range
+bool range_items(const std::string& body, std::vector<std::string>& out) {
+    const size_t d = body.find("..");
+    if(d == std::string::npos) return false;
+    const std::string a = body.substr(0, d), b = body.substr(d + 2);
+    if(a.empty() || b.empty() || b.find("..") != std::string::npos)
+        return false;
+    const auto num = [](const std::string& x, long long& v) {
+        const char* f = x.data() + (x[0] == '+' ? 1 : 0);
+        const auto [p, ec] = std::from_chars(f, x.data() + x.size(), v);
+        return ec == std::errc{} && p == x.data() + x.size();
+    };
+    long long x = 0, y = 0;
+    if(num(a, x) && num(b, y)) {
+        const auto padded = [](const std::string& t) {
+            return t.size() > 1 && (t[0] == '0' || (t[0] == '-' && t[1] == '0'));
+        };
+        const size_t width =
+            padded(a) || padded(b) ? std::max(a.size(), b.size()) : 0;
+        const long long step = x <= y ? 1 : -1;
+        for(long long v = x; out.size() <= kMaxAdd; v += step) {
+            std::string t = std::to_string(v);
+            if(t.size() < width)
+                t.insert(t[0] == '-' ? 1 : 0, width - t.size(), '0');
+            out.push_back(std::move(t));
+            if(v == y) break;
+        }
+        return true;
+    }
+    if(a.size() == 1 && b.size() == 1 &&
+       std::isalpha(static_cast<unsigned char>(a[0])) &&
+       std::isalpha(static_cast<unsigned char>(b[0]))) {
+        const int step = a[0] <= b[0] ? 1 : -1;
+        for(int c = a[0];; c += step) {
+            out.emplace_back(1, static_cast<char>(c));
+            if(c == b[0]) break;
+        }
+        return true;
+    }
+    return false;
+}
+
+// bash brace expansion: a.{hpp,cpp}  x/{a,b}/{1..3}  {a,{b,c}}  Unmatched
+// braces and single-item groups like {x} stay literal, as in bash. Stops
+// growing once `out` passes kMaxAdd.
+void brace_expand(const std::string& s, std::vector<std::string>& out) {
+    for(size_t i = 0; i < s.size(); ++i) {
+        if(s[i] != '{') continue;
+        int depth = 0;
+        size_t close = std::string::npos;
+        std::vector<size_t> commas;
+        for(size_t j = i; j < s.size(); ++j) {
+            if(s[j] == '{') ++depth;
+            else if(s[j] == '}') {
+                if(--depth == 0) {
+                    close = j;
+                    break;
+                }
+            } else if(s[j] == ',' && depth == 1) commas.push_back(j);
+        }
+        if(close == std::string::npos) continue;
+        std::vector<std::string> alts;
+        if(!commas.empty()) {
+            size_t from = i + 1;
+            for(const size_t c : commas) {
+                alts.push_back(s.substr(from, c - from));
+                from = c + 1;
+            }
+            alts.push_back(s.substr(from, close - from));
+        } else if(!range_items(s.substr(i + 1, close - i - 1), alts)) {
+            continue;
+        }
+        const std::string pre = s.substr(0, i), post = s.substr(close + 1);
+        for(const std::string& a : alts) {
+            brace_expand(pre + a + post, out);  // nested + later groups
+            if(out.size() > kMaxAdd) return;
+        }
+        return;
+    }
+    out.push_back(s);
+}
 
 void op_add(const fs::path& sel) {
     const fs::path dir = target_dir(sel);
     const fs::path rel = dir.lexically_relative(g_root->path);
     const std::string where = rel == "." ? "./" : rel.string() + "/";
     ask("New in " + where + ": ", "", [dir](std::string text) {
-        bool want_dir = false;
-        const auto p = resolve(dir, std::move(text), want_dir);
-        if(!p) return;
+        std::vector<std::string> names;
+        brace_expand(text, names);
+        if(names.size() > kMaxAdd)
+            return say("That expands to more than " + std::to_string(kMaxAdd) +
+                       " items");
+        // check everything first so a clash doesn't leave half the set made
+        std::vector<std::pair<fs::path, bool>> todo;  // path, is a dir
+        std::set<fs::path> seen;
         std::error_code ec;
-        if(fs::exists(*p, ec))
-            return say(p->filename().string() + " already exists");
-        if(want_dir) {
-            fs::create_directories(*p, ec);
-        } else {
-            fs::create_directories(p->parent_path(), ec);
-            if(!ec) {
-                std::ofstream f(*p);
-                if(!f) ec = std::make_error_code(std::errc::io_error);
-            }
+        for(std::string& n : names) {
+            bool want_dir = false;
+            const auto p = resolve(dir, std::move(n), want_dir);
+            if(!p) return;  // resolve() said why
+            if(fs::exists(*p, ec))
+                return say(p->filename().string() + " already exists");
+            if(seen.insert(*p).second) todo.emplace_back(*p, want_dir);
         }
-        if(ec) return say("create failed: " + ec.message());
-        settle(*p);
+        if(todo.empty()) return;
+        fs::path last = dir;
+        for(const auto& [p, is_dir] : todo) {
+            if(is_dir) {
+                fs::create_directories(p, ec);
+            } else {
+                fs::create_directories(p.parent_path(), ec);
+                if(!ec) {
+                    std::ofstream f(p);
+                    if(!f) ec = std::make_error_code(std::errc::io_error);
+                }
+            }
+            if(ec) {
+                settle(last);
+                return say("create failed: " + ec.message());
+            }
+            last = p;
+        }
+        settle(last);
+        if(todo.size() > 1) say("Created " + std::to_string(todo.size()) + " items");
     });
 }
 
@@ -357,81 +493,114 @@ void op_rename(const fs::path& sel) {
     });
 }
 
-void op_delete(const fs::path& sel) {
-    if(sel == g_root->path) return say("Refusing to delete the tree root");
-    for(const size_t i : buffers_under(sel))
-        if(E.buffers[i]->pt.modified())
-            return say("Unsaved changes in an open buffer under this path");
-    ask("Delete " + sel.filename().string() + "? [y/N] ",
-        "",
-        [sel](std::string t) {
-            if(t.empty() || (t[0] != 'y' && t[0] != 'Y')) return;
-            const auto bufs = buffers_under(sel);
+void del_paths(std::vector<fs::path> sel) {
+    std::erase(sel, g_root->path);
+    if(sel.empty()) return say("Refusing to delete the tree root");
+    for(const fs::path& p : sel)
+        for(const size_t i : buffers_under(p))
+            if(E.buffers[i]->pt.modified())
+                return say("Unsaved changes in an open buffer under " +
+                           p.filename().string());
+    const std::string what = sel.size() == 1
+                                 ? sel[0].filename().string()
+                                 : std::to_string(sel.size()) + " items";
+    ask("Delete " + what + "? [y/N] ", "", [sel](std::string t) {
+        if(t.empty() || (t[0] != 'y' && t[0] != 'Y')) return;
+        std::string err;
+        for(const fs::path& p : sel) {
+            const auto bufs = buffers_under(p);
+            bool closed = true;
             for(auto it = bufs.rbegin(); it != bufs.rend(); ++it)
-                if(!buffer_close(*it, false)) return;
+                if(!buffer_close(*it, false)) closed = false;
+            if(!closed) {
+                err = "Couldn't close a buffer under " + p.filename().string();
+                break;
+            }
             std::error_code ec;
-            fs::remove_all(sel, ec);
-            if(ec) say("delete failed: " + ec.message());
-            settle(sel);
-        });
-}
-
-void stash(const fs::path& sel, bool cut) {
-    if(sel == g_root->path) return say("Can't copy or cut the tree root");
-    g_clip = {sel, cut};
-    say(std::string(cut ? "Cut " : "Copied ") + sel.filename().string());
-}
-void op_copy(const fs::path& sel) { stash(sel, false); }
-void op_cut(const fs::path& sel) { stash(sel, true); }
-
-// Drops `src` into `dir` as `name`; if that name is taken, asks for another.
-void paste_into(const fs::path& dir, const fs::path& src,
-                const std::string& name, bool cut) {
-    std::error_code ec;
-    if(fs::is_directory(src, ec) && within(dir, src))
-        return say("Can't paste a directory into itself");
-    if(cut && !buffers_under(src).empty())
-        return say("Close the open buffer(s) for this path first");
-    const fs::path dst = dir / name;
-    if(fs::exists(dst, ec)) {
-        ask("Exists, new name: ", name, [dir, src, cut](std::string t) {
-            if(t.empty() || t.find('/') != std::string::npos)
-                return say("Give a plain name (no slashes)");
-            paste_into(dir, src, t, cut);
-        });
-        return;
-    }
-    if(cut) {
-        fs::rename(src, dst, ec);
-        if(ec == std::errc::cross_device_link) {
-            ec.clear();
-            fs::copy(
-                src,
-                dst,
-                fs::copy_options::recursive | fs::copy_options::copy_symlinks,
-                ec);
-            if(!ec) fs::remove_all(src, ec);
+            fs::remove_all(p, ec);
+            if(ec) err = "delete failed: " + ec.message();
         }
-    } else {
-        fs::copy(src,
-                 dst,
-                 fs::copy_options::recursive | fs::copy_options::copy_symlinks,
-                 ec);
+        settle(sel.front());
+        if(!err.empty()) say(err);
+    });
+}
+void op_delete(const fs::path& sel) { del_paths({sel}); }
+
+void stash_paths(std::vector<fs::path> sel, bool cut) {
+    std::erase(sel, g_root->path);
+    if(sel.empty()) return say("Can't copy or cut the tree root");
+    const std::string what = sel.size() == 1
+                                 ? sel[0].filename().string()
+                                 : std::to_string(sel.size()) + " items";
+    g_clip = {std::move(sel), cut};
+    say(std::string(cut ? "Cut " : "Copied ") + what);
+}
+void op_copy(const fs::path& sel) { stash_paths({sel}, false); }
+void op_cut(const fs::path& sel) { stash_paths({sel}, true); }
+
+// Drops srcs[i..] into `dir`. A name clash asks for another name for that one
+// item (`name` overrides its own), then carries on with the rest.
+void paste_from(const fs::path& dir, std::vector<fs::path> srcs, size_t i,
+                std::string name, bool cut, fs::path last) {
+    for(; i < srcs.size(); ++i, name.clear()) {
+        const fs::path& src = srcs[i];
+        if(name.empty()) name = src.filename().string();
+        std::error_code ec;
+        if(fs::is_directory(src, ec) && (dir == src || within(dir, src))) {
+            say("Can't paste a directory into itself");
+            continue;
+        }
+        if(cut && !buffers_under(src).empty()) {
+            say("Close the open buffer(s) for this path first");
+            continue;
+        }
+        const fs::path dst = dir / name;
+        if(fs::exists(dst, ec)) {
+            ask("Exists, new name: ",
+                name,
+                [dir, srcs, i, cut, last](std::string t) {
+                    if(t.empty() || t.find('/') != std::string::npos)
+                        return say("Give a plain name (no slashes)");
+                    paste_from(dir, srcs, i, t, cut, last);
+                });
+            return;
+        }
+        if(cut) {
+            fs::rename(src, dst, ec);
+            if(ec == std::errc::cross_device_link) {
+                ec.clear();
+                fs::copy(src,
+                         dst,
+                         fs::copy_options::recursive |
+                             fs::copy_options::copy_symlinks,
+                         ec);
+                if(!ec) fs::remove_all(src, ec);
+            }
+        } else {
+            fs::copy(src,
+                     dst,
+                     fs::copy_options::recursive |
+                         fs::copy_options::copy_symlinks,
+                     ec);
+        }
+        if(ec) {
+            say("paste failed: " + ec.message());
+            break;
+        }
+        if(cut) std::erase(g_clip.src, src);  // moved: no longer on the clipboard
+        last = dst;
     }
-    if(ec) return say("paste failed: " + ec.message());
-    if(cut) g_clip = {};
-    settle(dst);
+    if(!last.empty()) settle(last);
 }
 
 void op_paste(const fs::path& sel) {
-    std::error_code ec;
     if(g_clip.src.empty()) return say("Clipboard is empty");
-    if(!fs::exists(g_clip.src, ec))
-        return say("Copied source no longer exists");
-    paste_into(target_dir(sel),
-               g_clip.src,
-               g_clip.src.filename().string(),
-               g_clip.cut);
+    std::error_code ec;
+    std::vector<fs::path> srcs;
+    for(const fs::path& s : g_clip.src)
+        if(fs::exists(s, ec)) srcs.push_back(s);
+    if(srcs.empty()) return say("Copied source no longer exists");
+    paste_from(target_dir(sel), std::move(srcs), 0, {}, g_clip.cut, {});
 }
 
 constexpr size_t kNone = static_cast<size_t>(-1);
@@ -700,7 +869,7 @@ struct Action {
 };
 
 const Action kActions[] = {
-    {'a', "a", "Add file  (end with / for a directory)", op_add},
+    {'a', "a", "Add file(s)  (end with / for a dir, {a,b} expands)", op_add},
     {'r', "r", "Rename / move", op_rename},
     {'d', "d", "Delete (asks first)", op_delete},
     {'c', "c", "Copy", op_copy},
@@ -710,6 +879,7 @@ const Action kActions[] = {
     {'n', "n", "Next match", op_next},
     {'N', "N", "Previous match", op_prev},
     {'?', "?", "This palette", palette_open},
+    {0, "v", "Visual range: j k to extend, then d x c", nullptr},
     {0, "j k", "Move down / up", nullptr},
     {0, "h l", "Collapse / expand", nullptr},
     {0, "o Enter", "Open file / toggle dir", nullptr},
@@ -812,6 +982,12 @@ void palette_open(const fs::path&) {
 
 bool tree_visible() { return g_shown; }
 bool tree_focused() { return focused(); }
+bool tree_visual() { return g_vis && focused(); }
+bool tree_visual_cancel() {
+    if(!g_vis) return false;
+    g_vis = false;
+    return true;
+}
 
 void tree_move(long d) { move(d); }
 
@@ -856,6 +1032,46 @@ bool tree_key(int c) {
         return false;
     }
     Node* n = cur();
+    if(c == 'v') {  // the only visual mode the tree has
+        if(g_vis) g_vis = false;
+        else if(n) {
+            g_vis = true;
+            g_anchor = n->path;
+        }
+        return true;
+    }
+    if(g_vis) {
+        switch(c) {
+            case 'd': {
+                g_vis = false;
+                del_paths(vis_paths());
+                return true;
+            }
+            case 'x': {
+                g_vis = false;
+                stash_paths(vis_paths(), true);
+                return true;
+            }
+            case 'c': {
+                g_vis = false;
+                stash_paths(vis_paths(), false);
+                return true;
+            }
+            case 'j':
+            case 'k':
+            case 'g':
+            case 'G':
+            case ARROW_UP:
+            case ARROW_DOWN:
+            case PAGE_UP:
+            case PAGE_DOWN:
+            case HOME:
+            case END: break;  // these just move the far end of the range
+            default:
+                if(c >= '0' && c <= '9') break;  // counts: 5j
+                g_vis = false;  // anything else ends it, then acts as usual
+        }
+    }
     switch(c) {
         case ARROW_DOWN: move(+1); break;
         case ARROW_UP: move(-1); break;
@@ -1114,6 +1330,8 @@ const std::vector<TreeLine>& tree_view(int rows) {
         g_top = static_cast<size_t>(
             std::clamp(off, 0L, std::max(0L, total + pad - R)));
     }
+    const bool in_vis = g_vis && focused();
+    const auto [vlo, vhi] = vis_range();
     for(size_t y = 0; y < vis; ++y) {
         const size_t i = g_top + y;
         if(i >= g_rows.size()) {
@@ -1125,6 +1343,7 @@ const std::vector<TreeLine>& tree_view(int rows) {
         const Icons& ic = icons();
         TreeLine l;
         l.selected = i == g_sel && focused();
+        l.visual = in_vis && i >= vlo && i <= vhi;
         if(!r.guide.empty())
             l.segs.push_back(
                 {r.guide, theme_ui("ui.tree.guide", Style{.attrs = ATTR_DIM})});

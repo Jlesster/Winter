@@ -125,6 +125,17 @@ int text_cols() { return std::max(E.term_cols - gutter(), 1); }
 
 namespace {
 
+// Screen column of the cursor. E.rx counts source columns; on a concealed
+// markdown line the cursor sits where its character lands in the drawn text.
+int g_crx = 0;
+
+int cursor_rx() {
+    const std::string raw = E.buf().pt.line_text(E.cy);
+    SubstView v;
+    if(!md_line_view(E.cy, raw, text_cols(), v)) return E.rx;
+    return cx_to_rx(v.text, snap_cx(v.text, static_cast<int>(v.map(E.cx))));
+}
+
 struct RowPos {  // a screen-row position: file line + wrapped segment of it
     int line = 0, sub = 0;
     auto operator<=>(const RowPos&) const = default;
@@ -134,7 +145,11 @@ struct RowPos {  // a screen-row position: file line + wrapped segment of it
 // a break; a tab may (put_line clips it per segment). The cursor line gets an
 // extra row when the cursor sits just past a full last segment (insert mode).
 std::vector<int> wrap_starts(int line, int W) {
-    const std::string text = E.buf().pt.line_text(line);
+    const std::string raw = E.buf().pt.line_text(line);
+    SubstView view;  // a concealed markdown line wraps as it is drawn
+    const std::string_view text =
+        md_line_view(line, raw, W, view) ? std::string_view(view.text)
+                                         : std::string_view(raw);
     std::vector<int> st{0};
     int rx = 0, s = 0;
     for(size_t i = 0; i < text.size();) {
@@ -149,7 +164,7 @@ std::vector<int> wrap_starts(int line, int W) {
         }
         rx += w;
     }
-    if(line == E.cy && E.rx >= s + W) st.push_back(s + W);
+    if(line == E.cy && g_crx >= s + W) st.push_back(s + W);
     return st;
 }
 
@@ -204,7 +219,7 @@ int rows_between(RowPos a, RowPos b, int W, int cap = INT_MAX) {
 void scroll_wrapped(int so, int bot, int pad) {
     const int W = text_cols();
     E.col_offset = 0;
-    const RowPos cur{E.cy, seg_of(wrap_starts(E.cy, W), E.rx)};
+    const RowPos cur{E.cy, seg_of(wrap_starts(E.cy, W), g_crx)};
     RowPos top{std::clamp(E.row_offset, 0, E.num_rows() - 1), E.row_sub};
     top.sub = std::clamp(top.sub, 0, rows_of(top.line, W) - 1);
 
@@ -220,6 +235,7 @@ void scroll_wrapped(int so, int bot, int pad) {
 
 void editor_scroll() {
     E.rx = cx_to_rx(E.buf().pt.line_text(E.cy), E.cx);
+    g_crx = cursor_rx();
     const int total = E.num_rows();
     const int so = std::min(opts.scrolloff, (E.term_rows - 1) / 2);
     const int bot = std::min(opts.scrolloff, E.term_rows - 1 - so);
@@ -228,9 +244,9 @@ void editor_scroll() {
     if(E.cy < off + so) off = E.cy - so;
     if(E.cy > off + E.term_rows - 1 - bot) off = E.cy - (E.term_rows - 1 - bot);
     E.row_offset = std::clamp(off, 0, std::max(0, total + pad - E.term_rows));
-    if(E.rx < E.col_offset) { E.col_offset = E.rx; }
-    if(E.rx >= E.col_offset + text_cols()) {
-        E.col_offset = E.rx - text_cols() + 1;
+    if(g_crx < E.col_offset) { E.col_offset = g_crx; }
+    if(g_crx >= E.col_offset + text_cols()) {
+        E.col_offset = g_crx - text_cols() + 1;
     }
 }
 
@@ -309,11 +325,12 @@ void editor_draw_rows() {
     const Style tr_st = theme_ui("ui.trailing", Style{.bg = 0xf38ba8});
     const Style mp_st =
         theme_ui("ui.matchparen", Style{.bg = 0x585b70, .attrs = ATTR_BOLD});
-    std::vector<LineSpan> decos, runs;
+    std::vector<LineSpan> decos, runs, view_decos;
     std::vector<EolItem> eols;
     SubstView pv;
     std::vector<Span> pv_syn;
     E.buf().sync_anchors();
+    md_buffer_refresh(E.buf());
     const bool wrap = opts.wrap;
     int wrap_line = E.row_offset;
     int seg = wrap ? E.row_sub : 0;
@@ -336,10 +353,12 @@ void editor_draw_rows() {
             const std::string_view real(view_text.data() + pos, len);
             const auto& real_spans = E.buf().syntax.line_spans(base + pos, len);
             const bool pvw = subst_preview_line(file_row, real, pv);
+            const bool mdv = !pvw && md_line_view(file_row, real, text_cols(), pv);
+            const bool xf = pvw || mdv;  // `line` is a transformed view
             const std::string_view line =
-                pvw ? std::string_view(pv.text) : real;
+                xf ? std::string_view(pv.text) : real;
             const size_t dlen = line.size();  // length of what gets drawn
-            if(pvw) {
+            if(xf) {
                 pv_syn.clear();
                 for(Span sp : real_spans) {
                     sp.start = pv.map(sp.start);
@@ -347,7 +366,7 @@ void editor_draw_rows() {
                     if(sp.end > sp.start) pv_syn.push_back(sp);
                 }
             }
-            const std::vector<Span>& spans = pvw ? pv_syn : real_spans;
+            const std::vector<Span>& spans = xf ? pv_syn : real_spans;
             if(wrap && starts.empty())
                 starts = wrap_starts(file_row, text_cols());
             const int nseg = wrap ? static_cast<int>(starts.size()) : 1;
@@ -367,7 +386,7 @@ void editor_draw_rows() {
             if(vis && sel.end > ls && sel.start <= ls + len) {
                 lo = std::max(sel.start, ls) - ls;
                 hi = std::min(sel.end, ls + len) - ls;
-                if(pvw) {
+                if(xf) {
                     lo = pv.map(lo);
                     hi = pv.map(hi);
                 }
@@ -380,21 +399,36 @@ void editor_draw_rows() {
                         theme_ui("ui.visual", Style{.attrs = ATTR_REVERSE}));
             }
             decos.clear();
-            if(dg && !pvw) diag_spans(E.buf().diags, ls, len, decos);
-            if(!pvw) search_spans(file_row, line, decos);
+            if(dg && !xf) diag_spans(E.buf().diags, ls, len, decos);
+            if(!xf) search_spans(file_row, line, decos);
             if(cl_on && file_row == E.cy) decos.push_back({0, dlen, 1, cl_st});
             if(opts.hl_trailing && !(E.mode == INSERT && file_row == E.cy)) {
                 // npos + 1 wraps to 0, so an all-blank line is fully trailing
                 const size_t keep = line.find_last_not_of(" \t") + 1;
                 if(keep < dlen) decos.push_back({keep, dlen, 2, tr_st});
             }
-            if(pp.ok && !pvw)
+            if(pp.ok && !xf)
                 for(const size_t o : {pp.a, pp.b})
                     if(o >= ls && o < ls + len)
                         decos.push_back({o - ls, o - ls + 1, 20, mp_st});
-            if(!pvw) {
+            if(!xf) {
                 snippet_spans(ls, len, decos);
                 E.buf().decos.spans_on_line(ls, len, decos);
+            } else if(mdv) {
+                // decorations speak source offsets: carry them over to the
+                // concealed text, then lay the icons on top
+                view_decos.clear();
+                if(dg) diag_spans(E.buf().diags, ls, len, view_decos);
+                search_spans(file_row, real, view_decos);
+                if(pp.ok)
+                    for(const size_t o : {pp.a, pp.b})
+                        if(o >= ls && o < ls + len)
+                            view_decos.push_back({o - ls, o - ls + 1, 20, mp_st});
+                snippet_spans(ls, len, view_decos);
+                E.buf().decos.spans_on_line(ls, len, view_decos);
+                for(const LineSpan& v : view_decos)
+                    decos.push_back({pv.map(v.lo), pv.map(v.hi), v.prio, v.st});
+                decos.insert(decos.end(), pv.marks.begin(), pv.marks.end());
             } else {
                 decos.insert(decos.end(), pv.marks.begin(), pv.marks.end());
                 if(hi > lo) {
@@ -416,6 +450,11 @@ void editor_draw_rows() {
                 for(int x = g_px + g; x < g_px + g + cols && x < scr.width();
                     ++x)
                     if(Cell& c = scr.at(x, y); c == Cell{}) c.style = cl_st;
+            if(!pvw)  // whole-line bands (markdown headings, code blocks)
+                if(const auto f = E.buf().decos.fill_on_line(ls, len))
+                    for(int x = g_px + g; x < g_px + g + cols && x < scr.width();
+                        ++x)
+                        if(Cell& c = scr.at(x, y); c == Cell{}) c.style = *f;
             if(opts.colorcolumn > 0) {
                 const int x = g_px + g + (opts.colorcolumn - 1) - s0;
                 if(x >= g_px + g && x < g_px + g + cols && x < scr.width())
@@ -455,11 +494,11 @@ struct ScreenPos {
 
 ScreenPos cursor_screen() {
     const int base = tree_cols() + gutter();
-    if(!opts.wrap) return {base + E.rx - E.col_offset, E.cy - E.row_offset};
+    if(!opts.wrap) return {base + g_crx - E.col_offset, E.cy - E.row_offset};
     const int W = text_cols();
     const auto st = wrap_starts(E.cy, W);
-    const int cs = seg_of(st, E.rx);
-    return {base + E.rx - st[cs],
+    const int cs = seg_of(st, g_crx);
+    return {base + g_crx - st[cs],
             rows_between({E.row_offset, E.row_sub}, {E.cy, cs}, W)};
 }
 
@@ -473,12 +512,15 @@ void editor_draw_tree() {
         const TreeLine& l = lines[static_cast<size_t>(y)];
         const Style sel =
             theme_ui("ui.tree.select", Style{.attrs = ATTR_REVERSE});
-        const Style fill = l.selected ? sel : Style{};
+        const Style vsel = theme_ui(
+            "ui.tree.visual", theme_ui("ui.visual", Style{.attrs = ATTR_REVERSE}));
+        const Style fill = l.selected ? sel : l.visual ? vsel : Style{};
         for(int x = 0; x < w; ++x) scr.at(x, y) = Cell{U' ', 1, fill};
         int x = 0;
         for(const TreeSeg& s : l.segs) {
             Style st = s.st;
             if(l.selected) style_patch(st, sel);
+            else if(l.visual) style_patch(st, vsel);
             x = put_text(x, y, s.text, w, st);
         }
         scr.at(w, y) =

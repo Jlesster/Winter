@@ -48,7 +48,12 @@ int inner(const Frame* f, const Cfg& c, const Peek& pk) {
             return seen < 0 || seen > own ? own + c.sw : own;
         }
         case Kind::Switch: return (f->case_ind >= 0 ? f->case_ind : own) + c.sw;
-        case Kind::Init: return f->align >= 0 ? f->align : own + c.sw;
+        case Kind::Init: {
+            if(f->sib_ind >= 0) return f->sib_ind;
+            if(pk.next_sibling)
+                if(const auto v = pk.next_sibling()) return *v;
+            return f->align >= 0 ? f->align : own + c.sw;
+        }
         default: return own + c.sw;
     }
 }

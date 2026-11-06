@@ -216,7 +216,8 @@ void send_initialize(Client& c) {
                {"publishDiagnostics", Json::obj()},
                {"documentHighlight", Json::obj()},
                {"hover",
-                Json::obj({{"contentFormat", Json::arr({"plaintext"})}})},
+                Json::obj(
+                    {{"contentFormat", Json::arr({"markdown", "plaintext"})}})},
                {"definition", Json::obj({{"linkSupport", true}})},
                {"declaration", Json::obj({{"linkSupport", true}})},
                {"typeDefinition", Json::obj({{"linkSupport", true}})},

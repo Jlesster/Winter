@@ -362,6 +362,17 @@ bool Syntax::attach(std::string_view filename) {
     detach();
     const std::string_view lang = detect(filename);
     if(lang.empty()) return false;
+    return use_lang(lang);
+}
+
+bool Syntax::attach_lang(std::string_view lang) {
+    detach();
+    _name_store = normalize_lang(std::string(lang));
+    if(_name_store.empty()) return false;
+    return use_lang(_name_store);
+}
+
+bool Syntax::use_lang(std::string_view lang) {
     const TSLanguage* tl = nullptr;
     for(const auto& l : kLangs)
         if(l.name == lang) {
@@ -1001,4 +1012,35 @@ std::string Syntax::summary() const {
 
 std::optional<Style> syntax_theme(std::string_view capture) {
     return theme_for(capture);
+}
+
+std::optional<std::vector<Span>> Syntax::highlight_text(std::string_view code) {
+    if(_name.empty() || !_query) return std::nullopt;
+    drop_tree();
+    const PieceTable pt{code};
+    parse(pt, false);
+    std::optional<std::vector<Span>> out;
+    if(_tree) out = compute_spans(0, code.size());
+    drop_tree();  // the predicates above read `pt`; nothing may outlive it
+    free_layers();
+    _span_cache.clear();
+    _pt = nullptr;
+    return out;
+}
+
+std::optional<std::vector<Span>> syntax_highlight(std::string_view lang,
+                                                  std::string_view code) {
+    constexpr size_t kMaxCode = 32 * 1024;
+    if(code.empty() || code.size() > kMaxCode) return std::nullopt;
+    const std::string key = normalize_lang(std::string(lang));
+    if(key.empty()) return std::nullopt;
+    static std::map<std::string, std::unique_ptr<Syntax>> cache;
+    auto it = cache.find(key);
+    if(it == cache.end()) {
+        auto s = std::make_unique<Syntax>();
+        // A failure is not cached: :TSInstall may add the grammar later.
+        if(!s->attach_lang(key)) return std::nullopt;
+        it = cache.emplace(key, std::move(s)).first;
+    }
+    return it->second->highlight_text(code);
 }

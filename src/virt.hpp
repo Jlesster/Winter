@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,6 +37,7 @@ struct SpanDeco {
     NsId ns = 0;
     int prio = 0;
     Style st;
+    bool fill = false;  // also tints the empty tail of every row it touches
 };
 
 struct EolItem {
@@ -52,6 +54,8 @@ public:
     bool empty() const { return _eol.empty() && _spans.empty(); }
     void eol_on_line(size_t ls, size_t len, std::vector<EolItem>& out) const;
     void spans_on_line(size_t ls, size_t len, std::vector<LineSpan>& out) const;
+    // composed style of the `fill` spans touching a line, if any
+    std::optional<Style> fill_on_line(size_t ls, size_t len) const;
 
 private:
     std::vector<EolDeco> _eol;

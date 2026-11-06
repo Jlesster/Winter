@@ -118,9 +118,19 @@ bool normal_pending() {
     return N.count || !N.keys.empty() || N.want_char || !N.op.empty();
 }
 
-EditorMode keymap_mode() {
-    if(E.mode == VISUAL || E.mode == FILES) return E.mode;
-    return N.op.empty() ? NORMAL : OPPEND;
+// FILES has its own keymap. Only <space>... chords (leader maps) fall through
+// to NORMAL; any other unmapped key is dropped so i, v, dd ... can't reach
+// the buffer from the tree.
+Hit lookup_keys(std::u32string_view keys) {
+    if(E.mode == FILES) {
+        const Hit h = registry().lookup(FILES, keys);
+        if(h.kind != Lookup::None || keys.empty() || keys.front() != U' ')
+            return h;
+        return registry().lookup(NORMAL, keys);
+    }
+    const EditorMode m =
+        E.mode == VISUAL ? VISUAL : (N.op.empty() ? NORMAL : OPPEND);
+    return registry().lookup(m, keys);
 }
 
 void show_pending() {
@@ -220,15 +230,12 @@ bool normal_accepts(int c) {
     if(N.want_char) return false;
     KeySeq probe = N.keys;
     probe += static_cast<char32_t>(c);
-    const EditorMode m =
-        E.mode == VISUAL ? VISUAL : (N.op.empty() ? NORMAL : OPPEND);
-    return registry().lookup(m, probe).kind != Lookup::None;
+    return lookup_keys(probe).kind != Lookup::None;
 }
 
 void normal_chord_timeout() {
     if(!normal_chord_pending()) return;
-    const EditorMode map_mode = keymap_mode();
-    const Hit hit = registry().lookup(map_mode, N.keys);
+    const Hit hit = lookup_keys(N.keys);
     D.cur.clear();
     if(hit.kind == Lookup::Exact) run_exact(hit);
     else N.reset();
@@ -277,9 +284,7 @@ void normal_feed(int c) {
     }
 
     N.keys += static_cast<char32_t>(c);
-    const EditorMode map_mode =
-        E.mode == VISUAL ? VISUAL : (N.op.empty() ? NORMAL : OPPEND);
-    const Hit hit = registry().lookup(map_mode, N.keys);
+    const Hit hit = lookup_keys(N.keys);
     switch(hit.kind) {
         case Lookup::None: N.reset(); return;
         case Lookup::Prefix: show_pending(); return;

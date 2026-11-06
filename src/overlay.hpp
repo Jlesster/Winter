@@ -36,9 +36,12 @@ struct OverlaySpec {
     std::function<void()> on_close;
     std::function<void(OverlayId)> on_paint;
 
-    std::string title;         // drawn in the top border, framed only
-    std::string footer;        // drawn in the bottom border, right aligned
-    bool tee_bottom = false;   // bottom corners become tees (box continues below)
+    std::string title;   // drawn in the top border, framed only
+    std::string footer;  // drawn in the bottom border, right aligned
+    bool tee_bottom =
+        false;  // bottom corners become tees (box continues below)
+    std::vector<int>
+        dividers;  // rows inside the frame drawn as a rule joined to both sides
 };
 
 struct Viewport {

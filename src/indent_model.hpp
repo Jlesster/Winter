@@ -52,6 +52,8 @@ struct Frame {
     Stmt outer;          // statement context to restore when this closes
     int case_ind = -1;   // switch: actual indent of its first case
     int first_ind = -1;  // brace: actual indent of its first statement
+    int sib_ind = -1;    // init list: indent of its first element that starts a
+                         // line, so later elements follow it
 };
 using FramePtr = std::shared_ptr<const Frame>;
 
@@ -73,6 +75,7 @@ struct Cfg {
 struct Peek {
     std::function<std::optional<int>()> next_label;
     std::function<std::optional<int>()> next_inner;
+    std::function<std::optional<int>()> next_sibling;  // init list, below
 };
 
 std::optional<int> column(const LineState& s, std::string_view cur,

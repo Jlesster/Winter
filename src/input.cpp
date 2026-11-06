@@ -119,6 +119,9 @@ void editor_handle_key(int c) {
     if(c != PASTE && overlay_key(c)) return;
     const EditorMode before = E.mode;
     const uint64_t rev_before = E.buf().pt.revision();
+    if(E.mode == FILES && (c == '\x1b' || c == CTRL_KEY('l')) &&
+       tree_visual_cancel())
+        return;  // Esc in a tree range: drop the range, stay in the tree
 
     switch(c) {
         case CTRL_KEY('s'): editor_save(); break;

@@ -3,26 +3,28 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <functional>
 #include <iterator>
-#include <format>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "columns.hpp"
 #include "buflist.hpp"
+#include "columns.hpp"
 #include "command.hpp"
 #include "core.hpp"
 #include "diag.hpp"
 #include "editor.hpp"
 #include "keys.hpp"
 #include "loop.hpp"
+#include "markdown.hpp"
 #include "lsp_client.hpp"
 #include "lsp_sync.hpp"
 #include "overlay.hpp"
 #include "piece.hpp"
 #include "snippet.hpp"
+#include "syntax.hpp"
 #include "theme.hpp"
 #include "utf8.hpp"
 
@@ -36,7 +38,42 @@ constexpr int kResolveMs = 60;
 constexpr size_t kDocRows = 6;
 constexpr int kDocW = 46;
 
-constexpr std::string_view kKinds = "?tmfcFvCIMpuVEksofrdeKSvOT";
+struct KindLook {
+    const char* glyph;
+    const char* name;  // override group: ui.menu.kind.<name>
+    const char* cap;   // syntax capture whose colour it follows, or nullptr
+    uint32_t fg;       // used when cap is null or has no colour in the theme
+};
+
+constexpr KindLook kKinds[] = {
+    {"\ueb63", "unknown", nullptr, 0x9399b2},                  //  0
+    {"\uea93", "text", nullptr, 0xa6adc8},                     //  1
+    {"\uea8c", "method", "method", 0x89b4fa},                  //  2
+    {"\uea8c", "function", "function", 0x89b4fa},              //  3
+    {"\uea8c", "constructor", "constructor", 0x74c7ec},        //  4
+    {"\ueb5f", "field", "field", 0xb4befe},                    //  5
+    {"\uea88", "variable", "variable", 0xb4befe},              //  6
+    {"\ueb5b", "class", "type", 0xf9e2af},                     //  7
+    {"\ueb61", "interface", "type", 0xf9e2af},                 //  8
+    {"\uea8b", "module", "module", 0xb4befe},                  //  9
+    {"\ueb65", "property", "property", 0xb4befe},              // 10
+    {"\uea96", "unit", "number", 0xfab387},                    // 11
+    {"\uea95", "value", "constant", 0xfab387},                 // 12
+    {"\uea95", "enum", "type", 0xf9e2af},                      // 13
+    {"\ueb62", "keyword", "keyword", 0xcba6f7},                // 14
+    {"\uf0c4", "snippet", nullptr, 0xa6e3a1},                  // 15
+    {"\ueb5c", "color", nullptr, 0xf5c2e7},                    // 16
+    {"\uea7b", "file", nullptr, 0xa6adc8},                     // 17
+    {"\uea94", "reference", nullptr, 0xa6adc8},                // 18
+    {"\uea83", "folder", nullptr, 0x89b4fa},                   // 19
+    {"\ueb5e", "enum_member", "constant", 0xfab387},           // 20
+    {"\ueb5d", "constant", "constant", 0xfab387},              // 21
+    {"\uea91", "struct", "type", 0xf9e2af},                    // 22
+    {"\uea86", "event", "label", 0x74c7ec},                    // 23
+    {"\ueb64", "operator", "operator", 0x89dceb},              // 24
+    {"\uea92", "type_parameter", "type.parameter", 0xeba0ac},  // 25
+};
+static_assert(std::size(kKinds) == 26);
 
 struct Edit {
     size_t start, end;
@@ -80,6 +117,7 @@ unsigned g_seq = 0;
 TimerId g_timer = 0;
 TimerId g_rtimer = 0;
 std::string g_last;
+std::string g_hover_raw;  // raw text of the last hover, for :HoverLast
 
 bool word_byte(unsigned char c) {
     return std::isalnum(c) || c == '_' || c >= 0x80;
@@ -104,6 +142,16 @@ std::string fit(std::string_view s, int w) {
         i += d.len;
     }
     return out;
+}
+
+Style pop_base() {
+    return theme_ui("ui.menu", Style{.fg = 0xcdd6f4, .bg = 0x181825});
+}
+
+Style pop_border(const Style& base) {
+    Style b = theme_ui("ui.float.border", Style{.fg = 0x6c7086});
+    b.bg = base.bg;
+    return b;
 }
 
 std::string doc_text(const Json& d) {
@@ -197,25 +245,25 @@ Item parse_item(const Json& j, const PieceTable& pt, bool utf16,
     const Json& te = j["textEdit"];
     it.text =
         std::string(te["newText"].as_str(j["insertText"].as_str(it.label)));
-        it.start = word_start;
-        // plain TextEdit has "range"; InsertReplaceEdit has "insert"+"replace".
-        // We take "replace" so no tail of the word is left behind; use
-        // te["insert"] here instead for VS Code's default insert behaviour.
-        const Json& rg = te["range"].is_object() ? te["range"] : te["replace"];
-        if(rg.is_object()) {
-            it.start = lsp_offset(pt,
-                                  rg["start"]["line"].as_int(),
-                                  rg["start"]["character"].as_int(),
-                                  utf16);
-            const size_t end = lsp_offset(pt,
-                                          rg["end"]["line"].as_int(),
-                                          rg["end"]["character"].as_int(),
-                                          utf16);
-            it.tail = end > cursor ? end - cursor : 0;
-        }
-        it.start = std::min(it.start, cursor);
-        it.extra = parse_extras(j["additionalTextEdits"], pt, utf16, it.start);
-        return it;
+    it.start = word_start;
+    // plain TextEdit has "range"; InsertReplaceEdit has "insert"+"replace".
+    // We take "replace" so no tail of the word is left behind; use
+    // te["insert"] here instead for VS Code's default insert behaviour.
+    const Json& rg = te["range"].is_object() ? te["range"] : te["replace"];
+    if(rg.is_object()) {
+        it.start = lsp_offset(pt,
+                              rg["start"]["line"].as_int(),
+                              rg["start"]["character"].as_int(),
+                              utf16);
+        const size_t end = lsp_offset(pt,
+                                      rg["end"]["line"].as_int(),
+                                      rg["end"]["character"].as_int(),
+                                      utf16);
+        it.tail = end > cursor ? end - cursor : 0;
+    }
+    it.start = std::min(it.start, cursor);
+    it.extra = parse_extras(j["additionalTextEdits"], pt, utf16, it.start);
+    return it;
 }
 
 bool has_upper(std::string_view s) {
@@ -255,6 +303,31 @@ int rank(std::string_view f, std::string_view q) {
         if(qi == q.size()) return 2;
     }
     return -1;
+}
+
+// Which bytes of `label` the typed text `q` matched, mirroring rank() above.
+std::vector<char> match_hits(std::string_view label, std::string_view q) {
+    std::vector<char> hit(label.size(), 0);
+    if(q.empty()) return hit;
+    const auto ieq = [](char a, char b) {
+        return std::tolower(static_cast<unsigned char>(a)) ==
+               std::tolower(static_cast<unsigned char>(b));
+    };
+    if(label.size() >= q.size() &&
+       std::equal(q.begin(), q.end(), label.begin(), ieq)) {
+        std::fill_n(hit.begin(), q.size(), 1);
+        return hit;
+    }
+    for(size_t i = 0; i < label.size(); ++i) {
+        if(!ieq(label[i], q[0]) || !word_start(label, i)) continue;
+        std::vector<size_t> at{i};
+        for(size_t j = i + 1; j < label.size() && at.size() < q.size(); ++j)
+            if(ieq(label[j], q[at.size()])) at.push_back(j);
+        if(at.size() != q.size()) continue;
+        for(const size_t p : at) hit[p] = 1;
+        return hit;
+    }
+    return hit;
 }
 
 bool refilter() {
@@ -373,33 +446,42 @@ void accept() {
     {
         PieceTable::Group g(pt);
         const std::ptrdiff_t shift = apply_extras(pt, std::move(it.extra));
-        start = static_cast<size_t>(static_cast<std::ptrdiff_t>(it.start) + shift);
+        start =
+            static_cast<size_t>(static_cast<std::ptrdiff_t>(it.start) + shift);
         std::ptrdiff_t end = std::clamp<std::ptrdiff_t>(
             cur + shift + static_cast<std::ptrdiff_t>(it.tail),
             static_cast<std::ptrdiff_t>(start),
             static_cast<std::ptrdiff_t>(pt.size()));
         if(!it.text.empty() && end < static_cast<std::ptrdiff_t>(pt.size()) &&
            pt.at(static_cast<size_t>(end)) == it.text.back() &&
-               has_unmatched_tail(it.text))
+           has_unmatched_tail(it.text))
             ++end;
         const std::string gone =
             end > static_cast<std::ptrdiff_t>(start)
-            ? pt.text(start, static_cast<size_t>(end) - start)
-            : std::string();
-            g_last = std::format(
-                "label   : {}\nstart   : {}  tail: {}  cursor: {}  extras shift: {}\n"
-                "replaced: [{}]\ninserted: [{}]  snippet: {}\nraw item: {}\n",
-                it.label, start, it.tail, cur, shift, gone, it.text, it.snippet,
-                it.raw.dump());
-            if(end > static_cast<std::ptrdiff_t>(start))
-                pt.remove(start, static_cast<size_t>(end) - start);
-            if(it.snippet) {
-                set_cursor_offset(start);
-                snippet_expand(it.text);
-            } else {
-                pt.insert(start, it.text);
-                set_cursor_offset(start + it.text.size());
-            }
+                ? pt.text(start, static_cast<size_t>(end) - start)
+                : std::string();
+        g_last = std::format(
+            "label   : {}\nstart   : {}  tail: {}  cursor: {}  extras shift: "
+            "{}\n"
+            "replaced: [{}]\ninserted: [{}]  snippet: {}\nraw item: {}\n",
+            it.label,
+            start,
+            it.tail,
+            cur,
+            shift,
+            gone,
+            it.text,
+            it.snippet,
+            it.raw.dump());
+        if(end > static_cast<std::ptrdiff_t>(start))
+            pt.remove(start, static_cast<size_t>(end) - start);
+        if(it.snippet) {
+            set_cursor_offset(start);
+            snippet_expand(it.text);
+        } else {
+            pt.insert(start, it.text);
+            set_cursor_offset(start + it.text.size());
+        }
     }
     if(late) resolve_late(buf, server, utf16, it, start);
 }
@@ -429,43 +511,104 @@ bool popup_key(int c) {
     }
 }
 
-void paint(OverlayId id, int lw, int dw, int inner, int rows) {
-    overlay_clear(id);
+// Precedence, highest first:
+//   ui.menu.kind.<name>   per-kind override
+//   ui.menu.kind          blanket override (the existing `kov`)
+//   syntax capture colour (follows the user's code theme)
+//   k.fg                  built-in Catppuccin fallback
+Style kind_style(const KindLook& k, const Style& global) {
+    Style s = global;
+    if(const auto o = theme_override(std::string("ui.menu.kind.") + k.name))
+        style_patch(s, *o);
+    if(s.fg == 0xFFFFFFFF) {  // nobody chose a colour
+        const auto c = k.cap ? syntax_theme(k.cap) : std::nullopt;
+        s.fg = c && c->fg != 0xFFFFFFFF ? c->fg : k.fg;
+    }
+    return s;
+}
+
+void paint(OverlayId id, int lw, int dw, int inner, int rows,
+           const std::string& typed) {
+    const Style base = pop_base();
+    overlay_clear(id, base);
     if(S.sel < S.top) S.top = S.sel;
     else if(S.sel >= S.top + static_cast<size_t>(rows))
         S.top = S.sel - rows + 1;
+
+    const Style sel =
+        theme_ui("ui.menu.select", Style{.bg = 0x313244, .attrs = ATTR_BOLD});
+    const Style bar = theme_ui("ui.menu.marker", Style{.fg = 0xb4befe});
+    const Style hit =
+        theme_ui("ui.menu.match", Style{.fg = 0xfab387, .attrs = ATTR_BOLD});
+    const Style dim = theme_ui("ui.menu.detail", Style{.fg = 0x6c7086});
+    const Style kov = theme_ui("ui.menu.kind", Style{});
+
+    const int total = static_cast<int>(S.shown.size());
+    const bool scroll = total > rows;
+    const int thumb = scroll ? std::max(1, rows * rows / total) : 0;
+    const int pos =
+        scroll ? static_cast<int>(S.top) * (rows - thumb) / (total - rows) : 0;
+
     for(int r = 0; r < rows; ++r) {
         const size_t idx = S.top + static_cast<size_t>(r);
         if(idx >= S.shown.size()) break;
         const Item& it = S.items[S.shown[idx]];
-        Style row = theme_ui("ui.menu", Style{});
-        if(idx == S.sel)
-            row = theme_ui("ui.menu.select", Style{.attrs = ATTR_REVERSE});
-        Style kind = row, dim = row;
-        style_patch(kind, theme_ui("ui.menu.kind", Style{.attrs = ATTR_BOLD}));
-        style_patch(dim, theme_ui("ui.menu.detail", Style{.attrs = ATTR_DIM}));
         const int y = 1 + r;
-        const char k =
-            kKinds[it.kind > 0 && it.kind < static_cast<int>(kKinds.size())
-                       ? it.kind
-                       : 0];
+
+        Style row = base;
+        if(idx == S.sel) style_patch(row, sel);
+        // `row` plus an override, so the selected row's bg shows under every
+        // cell
+        const auto on = [&row](const Style& over) {
+            Style s = row;
+            style_patch(s, over);
+            return s;
+        };
+
         overlay_put(
             id, 1, y, std::string(static_cast<size_t>(inner), ' '), row);
-        overlay_put(id, 2, y, std::string(1, k), kind);
-        overlay_put(id, 4, y, fit(it.label, lw), row);
-        if(dw) overlay_put(id, 4 + lw + 2, y, fit(it.detail, dw), dim);
+        if(idx == S.sel) overlay_put(id, 1, y, "\u258c", on(bar));
+
+        const KindLook& k =
+            kKinds[it.kind > 0 && it.kind < static_cast<int>(std::size(kKinds))
+                       ? it.kind
+                       : 0];
+        Style ks = on(kind_style(k, kov));
+        overlay_put(id, 2, y, k.glyph, ks);
+
+        const std::vector<char> hits = match_hits(it.label, typed);
+        int x = 4;
+        for(size_t i = 0; i < it.label.size();) {
+            const Decoded d = utf8_decode(it.label, i);
+            if(x + cell_width(d.cp, 0) > 4 + lw) break;
+            x = overlay_put(id,
+                            x,
+                            y,
+                            std::string_view(it.label).substr(i, d.len),
+                            hits[i] ? on(hit) : row);
+            i += d.len;
+        }
+        if(dw && !it.detail.empty()) {
+            const std::string d = fit(it.detail, dw);
+            overlay_put(id, inner - text_width(d), y, d, on(dim));
+        }
+        if(scroll)
+            overlay_put(id,
+                        inner,
+                        y,
+                        r >= pos && r < pos + thumb ? "\u2503" : " ",
+                        on(Style{.fg = 0x585b70}));
     }
+
     if(S.doc_lines.empty()) return;
-    const Style dim = theme_ui("ui.menu.doc", Style{.attrs = ATTR_DIM});
-    std::string rule;
-    for(int i = 0; i < inner; i++) rule += "\u2500";
-    overlay_put(id, 1, 1 + rows, rule, dim);
+    Style doc = base;
+    style_patch(doc, theme_ui("ui.menu.doc", Style{.fg = 0xa6adc8}));
     for(size_t i = 0; i < S.doc_lines.size(); ++i)
         overlay_put(id,
                     2,
                     2 + rows + static_cast<int>(i),
                     fit(S.doc_lines[i], inner - 2),
-                    dim);
+                    doc);
 }
 
 void resolve_selected() {
@@ -540,13 +683,15 @@ void show() {
     o.h = rows + doc_h + 2;
     o.z = 50;
     o.framed = true;
+    o.border_style = pop_border(pop_base());
+    if(!S.doc_lines.empty()) o.dividers = {1 + rows};
     o.dismiss_on_move = false;
     o.on_key = popup_key;
     o.on_close = [gen] {
         if(S.gen == gen) reset();
     };
-    o.on_paint = [lw, dw, inner, rows](OverlayId id) {
-        paint(id, lw, dw, inner, rows);
+    o.on_paint = [lw, dw, inner, rows, prefix](OverlayId id) {
+        paint(id, lw, dw, inner, rows, prefix);
     };
     S.id = overlay_open(std::move(o));
 
@@ -674,30 +819,57 @@ void hover_show() {
             if(c.is_array())
                 for(const Json& e : c.items()) text += doc_text(e) + "\n\n";
             else text = doc_text(c);
+            g_hover_raw = text;
 
-            const int w = std::min(64, E.term_cols - 4);
-            auto lines = wrap(text, w - 2, 14);
+            constexpr size_t kHoverRows = 16;
+            const auto lines = md_float_layout(
+                text, std::max(16, std::min(72, E.term_cols - 8)), kHoverRows);
             if(lines.empty()) {
                 editor_set_status_message("hover: nothing here");
                 return;
             }
+            int tw = 12;
+            for(const MdRow& l : lines) tw = std::max(tw, l.width);
+
+            const Style base =
+                theme_ui("ui.hover", Style{.fg = 0xcdd6f4, .bg = 0x181825});
+            Style code = base, head = base, bul = base, quo = base;
+            style_patch(bul, md_style(MdRole::Bullet));
+            style_patch(quo, md_style(MdRole::Quote));
+            style_patch(code,
+                        theme_ui("ui.hover.code", md_style(MdRole::Code)));
+            style_patch(head,
+                        theme_ui("ui.hover.heading",
+                                 md_style(MdRole::Heading)));
+
             if(g_hover) overlay_close(g_hover);
             OverlaySpec o;
             o.at = OverlaySpec::At::Cursor;
             o.x = 0;
             o.y = 1;
-            o.w = w + 2;
+            o.w = tw + 4;
             o.h = static_cast<int>(lines.size()) + 2;
             o.z = 50;
             o.framed = true;
-            o.on_paint = [lines, w](OverlayId id) {
-                overlay_clear(id);
-                for(size_t i = 0; i < lines.size(); ++i)
-                    overlay_put(id,
-                                2,
-                                1 + static_cast<int>(i),
-                                fit(lines[i], w - 2),
-                                theme_ui("ui.hover", Style{}));
+            o.border_style = pop_border(base);
+            if(lines.size() >= kHoverRows) o.footer = "\u2026";  // cut short
+            for(size_t i = 0; i < lines.size(); ++i)
+                if(lines[i].rule) o.dividers.push_back(1 + static_cast<int>(i));
+            o.on_paint = [lines, base, code, head, bul, quo](OverlayId id) {
+                overlay_clear(id, base);
+                for(size_t i = 0; i < lines.size(); ++i) {
+                    int x = 2;
+                    for(const MdSeg& s : lines[i].segs) {
+                        Style st = s.tone == MdTone::Code      ? code
+                                   : s.tone == MdTone::Heading ? head
+                                   : s.tone == MdTone::Bullet  ? bul
+                                   : s.tone == MdTone::Quote   ? quo
+                                                               : base;
+                        if(s.style) style_patch(st, *s.style);  // syntax colour
+                        x = overlay_put(
+                            id, x, 1 + static_cast<int>(i), s.text, st);
+                    }
+                }
             };
             g_hover = overlay_open(std::move(o));
         });
@@ -742,11 +914,19 @@ void completion_post_key(int c) {
 
 void completion_register_commands() {
     command_add({.name = "CompletionLast",
-        .desc = "Show the last accepted LSP completion",
-            .nargs = Nargs::None,
-            .run = [](const CmdLine&) {
-                buffer_show_text(
-                    "[completion]",
-                    g_last.empty() ? "nothing accepted yet\n" : g_last);
-            }});
+                 .desc = "Show the last accepted LSP completion",
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine&) {
+                     buffer_show_text(
+                         "[completion]",
+                         g_last.empty() ? "nothing accepted yet\n" : g_last);
+                 }});
+    command_add({.name = "HoverLast",
+                 .desc = "Show the raw text of the last LSP hover",
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine&) {
+                     buffer_show_text(
+                         "[hover]",
+                         g_hover_raw.empty() ? "no hover yet\n" : g_hover_raw);
+                 }});
 }

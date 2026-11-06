@@ -199,9 +199,87 @@ bool convert(FileEdits& f, bool utf16, std::string& err) {
     return true;
 }
 
+// Some servers (mesonlsp's formatter, for one) answer with a single edit
+// replacing the whole document. Applied as-is, that swallows the cursor and
+// drops it at the edit start (0:0). Split such an edit into per-line hunks
+// of what actually differs, so only touched lines move the cursor.
+std::vector<Change> split_by_lines(const std::string& old, const Change& c) {
+    auto lines = [](std::string_view t) {
+        std::vector<std::string_view> v;
+        for(size_t i = 0; i < t.size();) {
+            const size_t e = t.find('\n', i);
+            const size_t n = e == std::string_view::npos ? t.size() : e + 1;
+            v.push_back(t.substr(i, n - i));
+            i = n;
+        }
+        return v;
+    };
+    const auto a = lines(old), b = lines(c.text);
+    size_t pre = 0;
+    while(pre < a.size() && pre < b.size() && a[pre] == b[pre]) ++pre;
+    size_t suf = 0;
+    while(suf < a.size() - pre && suf < b.size() - pre &&
+          a[a.size() - 1 - suf] == b[b.size() - 1 - suf])
+        ++suf;
+    const size_t n = a.size() - pre - suf, m = b.size() - pre - suf;
+    constexpr size_t kMaxCells = 4'000'000;
+    if((n + 1) * (m + 1) > kMaxCells) return {c};
+
+    // lcs[i][j] = LCS length of a[pre+i..] and b[pre+j..]
+    std::vector<uint32_t> lcs((n + 1) * (m + 1), 0);
+    auto at = [&](size_t i, size_t j) -> uint32_t& {
+        return lcs[i * (m + 1) + j];
+    };
+    for(size_t i = n; i-- > 0;)
+        for(size_t j = m; j-- > 0;)
+            at(i, j) = a[pre + i] == b[pre + j]
+                ? at(i + 1, j + 1) + 1
+                : std::max(at(i + 1, j), at(i, j + 1));
+
+    std::vector<size_t> aoff(a.size() + 1, 0);
+    for(size_t i = 0; i < a.size(); ++i) aoff[i + 1] = aoff[i] + a[i].size();
+
+    std::vector<Change> out;
+    size_t i = 0, j = 0;
+    while(i < n || j < m) {
+        if(i < n && j < m && a[pre + i] == b[pre + j]) {
+            ++i;
+            ++j;
+            continue;
+        }
+        const size_t i0 = i, j0 = j;  // start of a differing run
+        while((i < n || j < m) &&
+              !(i < n && j < m && a[pre + i] == b[pre + j])) {
+            if(j < m && (i == n || at(i, j + 1) >= at(i + 1, j))) ++j;
+            else ++i;
+        }
+        Change h;
+        h.start = c.start + aoff[pre + i0];
+        h.end = c.start + aoff[pre + i];
+        for(size_t k = j0; k < j; ++k) h.text += b[pre + k];
+        out.push_back(std::move(h));
+    }
+    return out;
+}
+
+void split_big_edits(const PieceTable& pt, std::vector<Change>& changes) {
+    std::vector<Change> out;
+    for(Change& c : changes) {
+        if(c.end - c.start < 256 || c.text.empty()) {
+            out.push_back(std::move(c));
+            continue;
+        }
+        auto parts = split_by_lines(pt.text(c.start, c.end - c.start), c);
+        for(Change& p : parts) out.push_back(std::move(p));
+    }
+    changes = std::move(out);
+}
+
 bool apply_edits(FileEdits& f, ApplyResult& res) {
     if(f.changes.empty()) return true;
     PieceTable& pt = f.buf->pt;
+    split_big_edits(pt, f.changes);
+    if(f.changes.empty()) return true;
     const bool current = f.buf == &E.buf();
     const size_t cur = current ? cursor_offset() : 0;
 

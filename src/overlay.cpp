@@ -78,6 +78,18 @@ void paint_frame(const Overlay& o) {
     put(0, H - 1, bl);
     put(W - 1, H - 1, br);
 
+    if(!s.dividers.empty()) {
+        std::string_view jl = "\u251c", jr = "\u2524", bar = b.t;
+        if(kind == Border::Double) jl = "\u2560", jr = "\u2563";
+        else if(kind == Border::Block) jl = b.l, jr = b.r, bar = " ";
+        for(const int y : s.dividers) {
+            if(y < 1 || y >= H - 1) continue;
+            for(int x = 1; x < W - 1; ++x) put(x, y, bar);
+            put(0, y, jl);
+            put(W - 1, y, jr);
+        }
+    }
+
     if(!s.title.empty() && W > 6) {
         Style ts = bst;
         ts.attrs = static_cast<uint16_t>(ts.attrs | ATTR_BOLD);

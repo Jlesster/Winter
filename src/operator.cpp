@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "builtin.hpp"
+#include "edit.hpp"
 #include "editor.hpp"
 #include "indent.hpp"
 #include "motion.hpp"
@@ -522,7 +523,7 @@ void register_builtin_operators() {
     bind_op(
         "op.change",
         [](const Range& r) {
-            if(r.linewise) {  // cc: wipe the text, keep the line and its indent
+            if(r.linewise) {  // cc/S: wipe the text, re-indent the empty line
                 const std::string line =
                     E.buf().pt.line_text(E.buf().pt.line_of(r.start));
                 const size_t w = line.find_first_not_of(" \t");
@@ -533,8 +534,10 @@ void register_builtin_operators() {
                 if(b > r.start && E.buf().pt.at(b - 1) == '\n')
                     --b;  // keep the '\n'
                 E.buf().pt.remove(r.start, b - r.start);
-                E.buf().pt.insert(r.start, indent);
-                set_cursor_offset(r.start + indent.size());
+                // line is empty now: indent it from the syntax tree like
+                // o/O do; `indent` (the old line's) is only the fallback
+                set_cursor_offset(r.start);
+                editor_indent_blank_line(indent);
             } else {
                 set_cursor_offset(
                     cut(r));  // unclamped: insert may sit past the last char

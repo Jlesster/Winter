@@ -69,12 +69,30 @@ void DecoStore::spans_on_line(size_t ls, size_t len,
     }
 }
 
+std::optional<Style> DecoStore::fill_on_line(size_t ls, size_t len) const {
+    const size_t le = ls + len;
+    const size_t from = ls > _max_len ? ls - _max_len : 0;
+    std::vector<const SpanDeco*> hit;
+    auto it = std::ranges::lower_bound(_spans, from, {}, &SpanDeco::start);
+    for(; it != _spans.end(); ++it) {
+        if(it->start > le) break;
+        if(it->fill && it->end > ls) hit.push_back(&*it);
+    }
+    if(hit.empty()) return std::nullopt;
+    std::ranges::stable_sort(hit, {}, &SpanDeco::prio);
+    Style st{};
+    for(const SpanDeco* s : hit) style_patch(st, s->st);
+    return st;
+}
+
 void style_patch(Style& base, const Style& p) {
     constexpr uint32_t none = 0xFFFFFFFF;
     if(p.fg != none) base.fg = p.fg;
     if(p.bg != none) base.bg = p.bg;
     if(p.ul != none) base.ul = p.ul;
     base.attrs = static_cast<uint16_t>(base.attrs | p.attrs);
+    if(p.attrs & ATTR_NODIM)
+        base.attrs = static_cast<uint16_t>(base.attrs & ~ATTR_DIM);
 }
 
 void compose_spans(std::vector<LineSpan>& in, std::vector<LineSpan>& out) {

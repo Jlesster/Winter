@@ -13,11 +13,14 @@ struct TreeSeg {
 struct TreeLine {
     std::vector<TreeSeg> segs;
     bool selected = false;
+    bool visual = false;  // inside the v range (cursor row is `selected`)
 };
 
 void tree_toggle();
 bool tree_visible();
 bool tree_focused();
+bool tree_visual();         // a v range is active in the tree
+bool tree_visual_cancel();  // ends it; false if there was none
 void tree_layout(int total_cols);
 int tree_cols();
 bool tree_key(int c);
