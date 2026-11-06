@@ -1360,6 +1360,8 @@ local function ui_groups(R, C, O)
     ['ui.linenr.cursor'] = R('CursorLineNr'),
     ['ui.tilde'] = R('EndOfBuffer'),
     ['ui.ctrl'] = R('NonText'), -- SpecialKey links NonText
+    ['ui.indent_lead'] = R('NonText'),
+    ['ui.wrap'] = R('NonText'),
     ['ui.visual'] = R('Visual'),
     ['ui.search'] = R('Search'),
     ['ui.search.current'] = R('CurSearch'),

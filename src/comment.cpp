@@ -1,6 +1,8 @@
 #include "comment.hpp"
 #include <algorithm>
 #include <cstddef>
+#include <flat_map>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -16,22 +18,36 @@ using Table = std::unordered_map<std::string, CommentStyle>;
 Table& table() {
     static Table t = [] {
         Table m;
-        const auto put = [&](std::initializer_list<const char*> langs, CommentStyle s) {
+        const auto put = [&](std::initializer_list<const char*> langs,
+                             CommentStyle s) {
             for(const char* l : langs) m[l] = s;
         };
-        put({"c", "cpp", "rust", "go", "java", "d", "javascript", "typescript",
-            "tsx", "zig", "swift", "kotlin", "scala", "c_sharp", "php", "dart",
-            "glsl", "hlsl", "cuda", "jsonc", "proto"},
-            {"//", "", ""});
-        put({"python", "bash", "fish", "nix", "toml", "yaml", "make", "cmake",
-            "ruby", "perl", "dockerfile", "meson", "gitignore", "r"},
+        put({"c",      "cpp",        "rust",       "go",    "java",
+             "d",      "javascript", "typescript", "tsx",   "swift",
+             "kotlin", "scala",      "c_sharp",    "php",   "dart",
+             "glsl",   "hlsl",       "cuda",       "jsonc", "proto"},
+            {"//", "/*", "*/"});
+        put({"zig"}, {"//", "", ""});
+        put({"python",
+             "bash",
+             "fish",
+             "nix",
+             "toml",
+             "yaml",
+             "make",
+             "cmake",
+             "ruby",
+             "perl",
+             "dockerfile",
+             "meson",
+             "gitignore",
+             "r"},
             {"#", "", ""});
         put({"lua", "sql", "haskell", "vhdl"}, {"--", "", ""});
         put({"vim"}, {"\"", "", ""});
         put({"ini", "scheme", "commonlisp", "clojure", "asm"}, {";", "", ""});
         put({"latex", "bibtex"}, {"%", "", ""});
-        put({"html", "xml", "markdown", "svelte", "vue"},
-            {"", "<!--", "-->"});
+        put({"html", "xml", "markdown", "svelte", "vue"}, {"", "<!--", "-->"});
         put({"css", "scss"}, {"", "/*", "*/"});
         return m;
     }();
@@ -47,7 +63,22 @@ size_t indent_of(const std::string& s) {
     return i == std::string::npos ? s.size() : i;
 }
 
+bool star_line(std::string_view r) {
+    return r.starts_with('*') && (r.size() == 1 || r[1] == ' ' || r[1] == '\t');
 }
+
+bool in_star_block(PieceTable& pt, size_t line) {
+    for(size_t l = line, n = 0; l-- > 0 && n < 512; ++n) {
+        const std::string u = pt.line_text(l);
+        const std::string_view r = std::string_view(u).substr(indent_of(u));
+        if(r.starts_with("/*"))
+            return r.find("*/", 2) == std::string_view::npos;
+        if(!star_line(r)) return false;
+    }
+    return false;
+}
+
+}  // namespace
 
 void comment_register(std::string lang, CommentStyle s) {
     table()[std::move(lang)] = std::move(s);
@@ -83,8 +114,10 @@ void comment_toggle(size_t l0, size_t l1) {
         min_ind = std::min(min_ind, indent_of(t));
         const size_t i = indent_of(t);
         const bool starts = t.compare(i, open.size(), open) == 0;
-        const bool ends = !block || (t.size() >= close.size() &&
-                                     t.compare(t.size() - close.size(), close.size(), close) == 0);
+        const bool ends =
+            !block ||
+            (t.size() >= close.size() &&
+             t.compare(t.size() - close.size(), close.size(), close) == 0);
         if(!(starts && ends)) all_commented = false;
     }
     if(!any) return;
@@ -110,4 +143,43 @@ void comment_toggle(size_t l0, size_t l1) {
         }
     }
     apply_motion(motion::to_first_nonblank(pt, pt.line_start(l0), 0));
+}
+
+std::optional<CommentCont> comment_continue(size_t line, size_t cx,
+                                            bool above) {
+    Buffer& b = E.buf();
+    const CommentStyle* st = comment_style(b.syntax.lang());
+    if(!st) return std::nullopt;
+    const std::string t = b.pt.line_text(line);
+    const size_t ind = indent_of(t);
+    const std::string_view rest = std::string_view(t).substr(ind);
+    if(rest.empty()) return std::nullopt;
+    const bool star = st->open == "/*";
+    size_t lead = 0;
+    bool opener = false;
+    if(star && rest.starts_with("/*")) {
+        if(above || rest.find("*/", 2) != std::string_view::npos)
+            return std::nullopt;
+        opener = true;
+        lead = rest.size() > 2 && (rest[2] == '*' || rest[2] == '!') ? 3 : 2;
+    } else if(star && star_line(rest)) {
+        if(t.find("*/") != std::string::npos || !in_star_block(b.pt, line))
+            return std::nullopt;
+        lead = 1;
+    } else if(!st->line.empty() && rest.starts_with(st->line)) {
+        lead = st->line.size();
+        if(lead < rest.size() && (rest[lead] == st->line.back() ||
+                                  (st->line == "//" && rest[lead] == '!')))
+            ++lead;
+    } else {
+        return std::nullopt;
+    }
+    if(cx < ind + lead) return std::nullopt;
+    const size_t sp_end =
+        std::min(t.find_first_not_of(" \t", ind + lead), t.size());
+    const bool lone = sp_end == t.size();
+    if(opener) return CommentCont{t.substr(0, ind) + " * ", lone};
+    std::string spacing = t.substr(ind + lead, sp_end - (ind + lead));
+    if(line && spacing.empty()) spacing = " ";
+    return CommentCont{t.substr(0, ind + lead) + spacing, lone};
 }

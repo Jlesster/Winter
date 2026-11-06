@@ -140,6 +140,8 @@ const std::vector<std::string_view>& theme_ui_groups() {
         "ui.colorcolumn",
         "ui.matchparen",
         "ui.trailing",
+        "ui.indent_lead",
+        "ui.wrap",
         "ui.snippet",
         "ui.snippet.active",
         "ui.reference",

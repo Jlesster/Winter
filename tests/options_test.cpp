@@ -16,6 +16,7 @@ int main() {
     // defaults match the old #defines
     CHECK(opts.tab_stop == 4 && opts.shift_width == 4 && opts.expand_tab);
     CHECK(opts.quit_times == 3);
+    CHECK(!opts.wrap_indicator && !opts.indent_leads);
 
     // ints: set, alias, range, junk
     CHECK(set_option("tabstop", "8") == OptResult::Ok && opts.tab_stop == 8);
@@ -40,6 +41,17 @@ int main() {
     }
     CHECK(set_option("et", "maybe") == OptResult::BadValue);
 
+    // display-only render features
+    CHECK(set_option("wrap_indicator", "true") == OptResult::Ok &&
+          opts.wrap_indicator);
+    CHECK(set_option("wrapind", "false") == OptResult::Ok &&
+          !opts.wrap_indicator);
+    CHECK(set_option("indent_leads", "true") == OptResult::Ok &&
+          opts.indent_leads);
+    CHECK(set_option("ileads", "false") == OptResult::Ok && !opts.indent_leads);
+    CHECK(get_option("wrap_indicator") == "false");
+    CHECK(get_option("indent_leads") == "false");
+
     // get
     CHECK(get_option("tabstop") == "8");
     CHECK(get_option("et") == "true");
@@ -53,6 +65,10 @@ int main() {
     CHECK(apply_set_command("noexpandtab") == "" && !opts.expand_tab);
     CHECK(apply_set_command("noet") == "" && !opts.expand_tab);
     CHECK(apply_set_command("expandtab") == "" && opts.expand_tab);
+    CHECK(apply_set_command("wrap_indicator") == "" && opts.wrap_indicator);
+    CHECK(apply_set_command("nowrapind") == "" && !opts.wrap_indicator);
+    CHECK(apply_set_command("indent_leads") == "" && opts.indent_leads);
+    CHECK(apply_set_command("noindent_leads") == "" && !opts.indent_leads);
     CHECK(apply_set_command("ts?") == "ts=2");
     CHECK(apply_set_command("tabstop") == "tabstop=2");           // int, no value: show
     CHECK(apply_set_command("ts=2 sw?") == "sw=3");

@@ -45,6 +45,8 @@ struct Options {
     bool tree_git = true;        // git status marks
     bool tree_git_names = true;  // recolor file names by git stats
     bool wrap = false;           // wrap long lines at screen edge
+    bool wrap_indicator = false;  // show a marker before wrapped rows
+    bool indent_leads = false;   // chevron at the start of each indent level
     bool hl_reference =
         false;  // highlight other uses of the symbol under the cursor (LSP)
     bool cursorline = false;      // tint the cursor row

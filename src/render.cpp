@@ -69,6 +69,35 @@ void put_eols(int y, std::string_view line, int g, std::vector<EolItem>& items,
     }
 }
 
+// Display-only indent leads: one chevron at the start of every indent level.
+// Purely a screen-cell paint; the buffer is never touched.
+void put_indent_leads(int y, std::string_view line, int x0, int s0, int cols) {
+    if(!opts.indent_leads) return;
+    int ind = 0;
+    bool blank = true;
+    for(const char ch : line) {
+        if(ch == ' ') ++ind;
+        else if(ch == '\t') ind += opt_ts() - ind % opt_ts();
+        else {
+            blank = false;
+            break;
+        }
+    }
+    if(blank) return;  // whitespace-only lines get no leads
+    const int sw = std::max(1, opt_sw());
+    const Style st = theme_ui("ui.indent_lead", Style{.attrs = ATTR_DIM});
+    for(int col = 0; col < ind; col += sw) {
+        if(col < s0 || col >= s0 + cols) continue;
+        const int x = g_px + x0 + col - s0;
+        if(x < 0 || x >= scr.width()) continue;
+        Cell& c = scr.at(x, y);
+        if(c.chr != U' ' && c.chr != U'\0') continue;
+        c.chr = U'\uf105';
+        c.width = 1;
+        style_patch(c.style, st);
+    }
+}
+
 void put_line(int y, std::string_view line, int col_off, int cols, int x0,
               const std::vector<Span>& spans = {}, size_t sel_lo = 0,
               size_t sel_hi = 0, const std::vector<LineSpan>& runs = {}) {
@@ -125,6 +154,14 @@ int text_cols() { return std::max(E.term_cols - gutter(), 1); }
 
 namespace {
 
+constexpr std::string_view kWrapPrefix = "↪ ";
+
+// Columns reserved at the start of a wrapped continuation row. 0 unless the
+// wrap indicator is active.
+int wrap_prefix_cols() {
+    return opts.wrap && opts.wrap_indicator ? text_width(kWrapPrefix) : 0;
+}
+
 // Screen column of the cursor. E.rx counts source columns; on a concealed
 // markdown line the cursor sits where its character lands in the drawn text.
 int g_crx = 0;
@@ -145,6 +182,12 @@ struct RowPos {  // a screen-row position: file line + wrapped segment of it
 // a break; a tab may (put_line clips it per segment). The cursor line gets an
 // extra row when the cursor sits just past a full last segment (insert mode).
 std::vector<int> wrap_starts(int line, int W) {
+    const int P = wrap_prefix_cols();
+    // The first row uses the full width; continuation rows lose P columns to
+    // the indicator prefix.
+    const auto seg_width = [W, P](size_t idx) {
+        return idx == 0 ? W : std::max(1, W - P);
+    };
     const std::string raw = E.buf().pt.line_text(line);
     SubstView view;  // a concealed markdown line wraps as it is drawn
     const std::string_view text =
@@ -158,13 +201,15 @@ std::vector<int> wrap_starts(int line, int W) {
         const int w = cell_width(d.cp, rx);
         if(w == 0) continue;
         if(d.cp == U'\t') {
-            while(rx + w > s + W) st.push_back(s += W);
-        } else if(rx + w > s + W) {
+            while(rx + w > s + seg_width(st.size() - 1))
+                st.push_back(s += seg_width(st.size() - 1));
+        } else if(rx + w > s + seg_width(st.size() - 1)) {
             st.push_back(s = rx);
         }
         rx += w;
     }
-    if(line == E.cy && g_crx >= s + W) st.push_back(s + W);
+    const int last_w = seg_width(st.size() - 1);
+    if(line == E.cy && g_crx >= s + last_w) st.push_back(s + last_w);
     return st;
 }
 
@@ -371,8 +416,11 @@ void editor_draw_rows() {
                 starts = wrap_starts(file_row, text_cols());
             const int nseg = wrap ? static_cast<int>(starts.size()) : 1;
             const int s0 = wrap ? starts[seg] : E.col_offset;
-            const int cols =
-                wrap && seg + 1 < nseg ? starts[seg + 1] - s0 : text_cols();
+            const int pre = seg > 0 ? wrap_prefix_cols() : 0;
+            const int x0 = g + pre;
+            const int cols = wrap && seg + 1 < nseg
+                                 ? starts[seg + 1] - s0
+                                 : std::max(1, text_cols() - pre);
             if(g > 0 && seg == 0) {
                 const Style gst =
                     file_row == E.cy
@@ -392,7 +440,7 @@ void editor_draw_rows() {
                 }
                 if(len == 0)
                     put_text(
-                        g,
+                        x0,
                         y,
                         " ",
                         E.term_cols,
@@ -445,19 +493,26 @@ void editor_draw_rows() {
                 }
             }
             compose_spans(decos, runs);
-            put_line(y, line, s0, cols, g, spans, lo, hi, runs);
+            put_line(y, line, s0, cols, x0, spans, lo, hi, runs);
+            put_indent_leads(y, line, x0, s0, cols);
             if(cl_on && file_row == E.cy)  // tint the empty tail of the row too
-                for(int x = g_px + g; x < g_px + g + cols && x < scr.width();
+                for(int x = g_px + g; x < g_px + x0 + cols && x < scr.width();
                     ++x)
                     if(Cell& c = scr.at(x, y); c == Cell{}) c.style = cl_st;
             if(!pvw)  // whole-line bands (markdown headings, code blocks)
                 if(const auto f = E.buf().decos.fill_on_line(ls, len))
-                    for(int x = g_px + g; x < g_px + g + cols && x < scr.width();
+                    for(int x = g_px + g; x < g_px + x0 + cols && x < scr.width();
                         ++x)
                         if(Cell& c = scr.at(x, y); c == Cell{}) c.style = *f;
+            if(pre > 0) {  // Helix-style prefix; keep the row tint underneath
+                Style ws = theme_ui("ui.wrap", Style{.attrs = ATTR_DIM});
+                const uint32_t bg = scr.at(g_px + g, y).style.bg;
+                if(bg != 0xFFFFFFFF) ws.bg = bg;
+                put_text(g, y, kWrapPrefix, E.term_cols, ws);
+            }
             if(opts.colorcolumn > 0) {
-                const int x = g_px + g + (opts.colorcolumn - 1) - s0;
-                if(x >= g_px + g && x < g_px + g + cols && x < scr.width())
+                const int x = g_px + x0 + (opts.colorcolumn - 1) - s0;
+                if(x >= g_px + x0 && x < g_px + x0 + cols && x < scr.width())
                     style_patch(scr.at(x, y).style, cc_st);
             }
             if(seg + 1 == nseg) {  // virtual text goes after the last segment
@@ -474,7 +529,7 @@ void editor_draw_rows() {
                         eols.push_back({kPrioDiag - w->severity, &diag_vt});
                     }
                 E.buf().decos.eol_on_line(ls, len, eols);
-                put_eols(y, line, g, eols, s0);
+                put_eols(y, line, x0, eols, s0);
             }
             if(++seg >= nseg) {
                 seg = 0;
@@ -498,7 +553,8 @@ ScreenPos cursor_screen() {
     const int W = text_cols();
     const auto st = wrap_starts(E.cy, W);
     const int cs = seg_of(st, g_crx);
-    return {base + g_crx - st[cs],
+    const int pre = cs > 0 ? wrap_prefix_cols() : 0;
+    return {base + pre + g_crx - st[cs],
             rows_between({E.row_offset, E.row_sub}, {E.cy, cs}, W)};
 }
 

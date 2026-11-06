@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "columns.hpp"
+#include "comment.hpp"
 #include "core.hpp"
 #include "editor.hpp"
 #include "indent.hpp"
@@ -21,6 +22,7 @@ namespace {
 std::vector<std::string> g_replaced;
 std::string g_pending;
 size_t g_ai = SIZE_MAX;
+std::string g_ai_text;
 }  // namespace
 
 // edits
@@ -216,8 +218,7 @@ std::string one_level_less(std::string_view lw) {
     std::string s(lw);
     if(!s.empty() && s.back() == '\t') s.pop_back();
     else
-        for(int i = 0; i < opt_sw() && !s.empty() && s.back() == ' ';
-            ++i)
+        for(int i = 0; i < opt_sw() && !s.empty() && s.back() == ' '; ++i)
             s.pop_back();
     return s;
 }
@@ -249,9 +250,12 @@ void electric_indent() {
 void editor_strip_autoindent() {
     Buffer& B = E.buf();
     const size_t l = std::exchange(g_ai, SIZE_MAX);
+    const std::string lead = std::exchange(g_ai_text, {});
     if(l == SIZE_MAX || l >= B.pt.line_count()) return;
     const std::string t = B.pt.line_text(l);
-    if(t.empty() || t.find_first_not_of(" \t") != std::string::npos) return;
+    if(t.empty() ||
+       t.find_first_not_of(" \t") != std::string::npos && t != lead)
+        return;
     B.pt.remove(B.pt.line_start(l), t.size());
     if(static_cast<size_t>(E.cy) == l) E.cx = 0;
 }
@@ -262,7 +266,7 @@ void editor_insert_newline() {
     const size_t cx = static_cast<size_t>(E.cx);
     const std::string_view before = std::string_view(line).substr(0, cx);
     const std::string_view after = std::string_view(line).substr(cx);
-
+    const auto cc = comment_continue(E.cy, cx, false);
     const std::string base(indent::leading_ws(before));
     const size_t last = before.find_last_not_of(" \t");
     const char prev = last == std::string_view::npos ? 0 : before[last];
@@ -273,11 +277,18 @@ void editor_insert_newline() {
         E.cx = 0;
     }
 
+    if(cc && cc->lone && last != std::string_view::npos) {
+        if(const size_t tw = before.size() - (last + 1)) {
+            B.pt.remove(cursor_offset() - tw, tw);
+            E.cx -= static_cast<int>(tw);
+        }
+    }
+
     // whitespace right after cursor is replaced by indent
     if(const size_t lw = indent::leading_ws(after).size())
         B.pt.remove(cursor_offset(), lw);
 
-    const char cl = closer_for(prev);
+    const char cl = cc ? '\0' : closer_for(prev);
     const bool split =
         cl && after.substr(indent::leading_ws(after).size()).starts_with(cl);
     B.pt.insert(cursor_offset(), split ? "\n\n" : "\n");
@@ -286,11 +297,13 @@ void editor_insert_newline() {
         const auto t = indent::from_tree(B.indent, B.syntax, B.pt, B.eol, l);
         return t ? *t : fallback;
     };
-    const std::string mid = ws(E.cy, indent::for_newline(before));
+    const std::string mid =
+        cc ? cc->prefix : ws(E.cy, indent::for_newline(before));
     const std::string close = split ? ws(E.cy + 1, base) : std::string{};
     if(split) B.pt.insert(B.pt.line_start(E.cy + 1), close);
     B.pt.insert(B.pt.line_start(E.cy), mid);
     g_ai = mid.empty() ? SIZE_MAX : static_cast<size_t>(E.cy);
+    g_ai_text = cc ? mid : std::string{};
     E.cx = static_cast<int>(mid.size());
 }
 
@@ -358,23 +371,32 @@ void editor_type_char(int c) {
 
 void editor_open_below() {
     Buffer& B = E.buf();
-    const std::string heur = indent::for_newline(B.pt.line_text(E.cy));
+    const std::string cur = B.pt.line_text(E.cy);
+    const auto cc = comment_continue(E.cy, cur.size(), false);
+    const std::string heur = indent::for_newline(cur);
     B.pt.insert(B.pt.line_end(E.cy), "\n");
     E.cy++;
     const auto t = indent::from_tree(B.indent, B.syntax, B.pt, B.eol, E.cy);
-    const std::string ws = t ? *t : heur;
+    const std::string ws = cc ? cc->prefix : (t ? *t : heur);
     B.pt.insert(B.pt.line_start(E.cy), ws);
     g_ai = ws.empty() ? SIZE_MAX : static_cast<size_t>(E.cy);
+    g_ai_text = cc ? ws : std::string{};
     E.cx = static_cast<int>(ws.size());
 }
 
 void editor_open_above() {
     Buffer& B = E.buf();
-    const std::string heur = indent::for_open_above(B.pt.line_text(E.cy));
+    const std::string cur = B.pt.line_text(E.cy);
+    const auto cc = comment_continue(E.cy, cur.size(), true);
+    const std::string heur = indent::for_open_above(cur);
     B.pt.insert(E.cy > 0 ? B.pt.line_end(E.cy - 1) : 0, "\n");
     const auto t = indent::from_tree(B.indent, B.syntax, B.pt, B.eol, E.cy);
-    const std::string ws = t ? *t : heur;
+    const std::string ws = cc ? cc->prefix : (t ? *t : heur);
     B.pt.insert(B.pt.line_start(E.cy), ws);
+    if(cc) {
+        g_ai = static_cast<size_t>(E.cy);
+        g_ai_text = ws;
+    }
     E.cx = static_cast<int>(ws.size());
 }
 

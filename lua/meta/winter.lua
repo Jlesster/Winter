@@ -160,6 +160,10 @@ function winter.selection() end
 ---@field numberwidth integer Gutter width (1..10, default 4)
 ---@field nuw integer Alias of `numberwidth`.
 ---@field wrap boolean Wrap long lines at the screen edge (default false)
+---@field wrap_indicator boolean Prefix wrapped continuation rows with a marker (default false)
+---@field wrapind boolean Alias of `wrap_indicator`.
+---@field indent_leads boolean Show a chevron at the start of each indent level (default false)
+---@field ileads boolean Alias of `indent_leads`.
 ---@field scrolloff integer Lines kept visible above/below the cursor (0..999, default 5)
 ---@field so integer Alias of `scrolloff`.
 ---@field scrolleof boolean Allow scrolling past the end of the file (default false)
@@ -779,7 +783,8 @@ function winter.statusline.reset() end
 ---| "diag.message" | "ui.menu.doc" | "ui.menu.key"
 ---| "ui.hover" | "ui.hover.code" | "ui.hover.heading"
 ---| "ui.cursorline" | "ui.colorcolumn" | "ui.matchparen"
----| "ui.trailing" | "ui.snippet" | "ui.snippet.active"
+---| "ui.trailing" | "ui.indent_lead" | "ui.wrap"
+---| "ui.snippet" | "ui.snippet.active"
 ---| "ui.reference" | "ui.reference.read" | "ui.reference.write"
 ---| "ui.subst.match" | "ui.subst.replace" | "ui.tree.git.staged"
 ---| string

@@ -52,6 +52,8 @@ Opt kTable[] = {
     {"nerdicons", "ni", Kind::Bool, &opts.nerdicons, 0, 1},
     {"border", "bs", Kind::BorderStyle, &opts.border, 0, 0},
     {"wrap", "", Kind::Bool, &opts.wrap, 0, 0},
+    {"wrap_indicator", "wrapind", Kind::Bool, &opts.wrap_indicator, 0, 1},
+    {"indent_leads", "ileads", Kind::Bool, &opts.indent_leads, 0, 1},
     {"indent_engine", "ie", Kind::Int, &opts.indent_engine, 0, 2},
     {"semantic_tokens", "sem", Kind::Bool, &opts.semantic_tokens, 0, 0},
     {"treewidth", "", Kind::Int, &opts.tree_width, 10, 80},

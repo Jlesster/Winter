@@ -188,6 +188,8 @@ local ui = {
   ['ui.colorcolumn'] = { bg = c.bg1 },
   ['ui.matchparen'] = { bg = c.bg3, bold = true },
   ['ui.trailing'] = { bg = c.red_d },
+  ['ui.indent_lead'] = { fg = c.gray },
+  ['ui.wrap'] = { fg = c.gray },
 
   ['ui.visual'] = { bg = c.bg3 },
   ['ui.search'] = { fg = c.bg0_h, bg = c.yellow_d },
