@@ -76,7 +76,10 @@ void report(Buffer& b, Res r) {
     switch(r) {
         case Res::Applied:
             editor_set_status_message("{} reloaded (changed on disk)", base(b));
-            events_emit("buf_reload", {b.filename});
+            {
+                EventBufScope scope(&b);
+                events_emit("buf_reload", {b.filename});
+            }
             break;
         case Res::Conflict:
             editor_set_status_message(

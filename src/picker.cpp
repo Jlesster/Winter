@@ -27,6 +27,7 @@
 #include "overlay.hpp"
 #include "piece.hpp"
 #include "preview.hpp"
+#include "state.hpp"
 #include "theme.hpp"
 #include "tree.hpp"
 
@@ -551,6 +552,34 @@ void picker_grep() {
     picker_open(std::move(s));
 }
 
+void picker_recent() {
+    PickerSpec s;
+    s.prompt = "Recent> ";
+    s.fuzzy = true;
+    s.preview = true;
+    s.paths = true;
+    s.max_results = 200;
+    s.on_accept = [](const PickItem& it) { open_at(it.text, 0, 0); };
+    picker_open(std::move(s));
+    // skip the file you are in, so <space>fr + Enter is "previous file"
+    const std::string cur =
+        E.buf().filename.empty() ? std::string{} : state_file_key(E.buf().filename);
+    std::error_code ec;
+    const std::filesystem::path cwd =
+        std::filesystem::weakly_canonical(std::filesystem::current_path(ec), ec);
+    std::vector<PickItem> items;
+    for(const std::string& p : recent_list(300)) {
+        if(p == cur) continue;
+        std::string shown = p;  // relative to cwd when under it, like Files
+        if(!ec) {
+            const auto rel = std::filesystem::path(p).lexically_relative(cwd);
+            if(!rel.empty() && *rel.begin() != "..") shown = rel.string();
+        }
+        items.push_back({.text = std::move(shown)});
+    }
+    picker_add(std::move(items));
+}
+
 void picker_register_commands() {
     command_add({.name = "Files",
         .desc = "Fuzzy file finder",
@@ -560,4 +589,8 @@ void picker_register_commands() {
                  .desc = "Live grep (rg)",
                  .nargs = Nargs::None,
                  .run = [](const CmdLine&) { picker_grep(); }});
+    command_add({.name = "Recent",
+                 .desc = "Recently opened files",
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine&) { picker_recent(); }});
 }

@@ -76,9 +76,26 @@ struct Options {
     CursorStyle cursor_replace{CursorShape::Underline, false};
 };
 
+// Per-buffer overrides of the indent options. nullopt = use the global value.
+struct BufOpts {
+    std::optional<int> tab_stop, shift_width;
+    std::optional<bool> expand_tab;
+};
+
 extern Options opts;
 
-enum class OptResult { Ok, Unknown, BadValue };
+enum class OptResult { Ok, Unknown, BadValue, NotLocal };
+
+// effective values for the current buffer (its override, else the global)
+int opt_ts();
+int opt_sw();
+bool opt_et();
+
+// buffer-local write/read; only tabstop, shiftwidth and expandtab have a
+// local form (anything else -> OptResult::NotLocal)
+struct Buffer;
+OptResult set_option_local(Buffer& b, std::string_view name, std::string_view value);
+std::optional<std::string> get_option_local(const Buffer& b, std::string_view name);
 
 // string-keyed access: this is the surface `:set` and Lua talk to.
 // Names follow vim where one exists (tabstop/ts, shiftwidth/sw, expandtab/et).

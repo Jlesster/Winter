@@ -45,7 +45,7 @@ size_t lead_bytes(const std::string& s) {
 std::optional<int> Syntax::indent_for(size_t line) const {
     if(!_iquery || !_tree || !_pt) return std::nullopt;
     const PieceTable& pt = *_pt;
-    const int sw = opts.shift_width;
+    const int sw = opt_sw();
     const uint32_t L = static_cast<uint32_t>(line);
     const TSNode root = ts_tree_root_node(_tree);
     auto line_str = [&](size_t l) { return pt.line_text(l); };
@@ -53,7 +53,7 @@ std::optional<int> Syntax::indent_for(size_t line) const {
         int c = 0;
         for(const char ch : line_str(l)) {
             if(ch == ' ') ++c;
-            else if(ch == '\t') c += opts.tab_stop - c % opts.tab_stop;
+            else if(ch == '\t') c += opt_ts() - c % opt_ts();
             else break;
         }
         return c;

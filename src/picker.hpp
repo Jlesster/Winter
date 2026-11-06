@@ -34,4 +34,5 @@ void picker_reset();
 
 void picker_files();
 void picker_grep();
+void picker_recent();
 void picker_register_commands();

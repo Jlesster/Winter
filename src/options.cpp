@@ -1,4 +1,5 @@
 #include "options.hpp"
+#include "editor.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -285,4 +286,58 @@ std::string apply_set_command(std::string_view args) {
     std::string out;
     for(size_t i = 0; i < msgs.size(); ++i) out += (i ? ", " : "") + msgs[i];
     return out;
+}
+
+int opt_ts() {
+    if(!E.buffers.empty())
+        if(const auto& v = E.buf().bo.tab_stop) return *v;
+    return opts.tab_stop;
+}
+
+int opt_sw() {
+    if(!E.buffers.empty())
+        if(const auto& v = E.buf().bo.shift_width) return *v;
+    return opts.shift_width;
+}
+
+bool opt_et() {
+    if(!E.buffers.empty())
+        if(const auto& v = E.buf().bo.expand_tab) return *v;
+    return opts.expand_tab;
+}
+
+OptResult set_option_local(Buffer& b, std::string_view name, std::string_view value) {
+    const Opt* o = find(name);
+    if(!o) return OptResult::Unknown;
+    if(o->ptr == &opts.expand_tab) {
+        const auto v = parse_bool(value);
+        if(!v) return OptResult::BadValue;
+        b.bo.expand_tab = *v;
+        return OptResult::Ok;
+    }
+    std::optional<int>* slot = o->ptr == &opts.tab_stop      ? &b.bo.tab_stop
+                               : o->ptr == &opts.shift_width ? &b.bo.shift_width
+                                                             : nullptr;
+    if(!slot) return OptResult::NotLocal;
+    int n = 0;
+    const auto [end, ec] =
+        std::from_chars(value.data(), value.data() + value.size(), n);
+    if(ec != std::errc{} || end != value.data() + value.size() || n < o->lo ||
+       n > o->hi)
+        return OptResult::BadValue;
+    *slot = n;
+    b.indent.on_edit(TextEdit{.reset = true});  // cached indent state used the old width
+    return OptResult::Ok;
+}
+
+std::optional<std::string> get_option_local(const Buffer& b, std::string_view name) {
+    const Opt* o = find(name);
+    if(!o) return std::nullopt;
+    if(o->ptr == &opts.tab_stop && b.bo.tab_stop)
+        return std::to_string(*b.bo.tab_stop);
+    if(o->ptr == &opts.shift_width && b.bo.shift_width)
+        return std::to_string(*b.bo.shift_width);
+    if(o->ptr == &opts.expand_tab && b.bo.expand_tab)
+        return *b.bo.expand_tab ? "true" : "false";
+    return show(*o);
 }

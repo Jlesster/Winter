@@ -128,10 +128,19 @@ int join_values(lua_State* L) {
     return 1;
 }
 
-int opt_index(lua_State* L) {
+// buffer an `opt_local` write lands on: the buffer the running event is about
+// (file_type fires before the new buffer is current), else the current one
+Buffer* opt_target() {
+    if(Buffer* b = events_buf()) return b;
+    return E.buffers.empty() ? nullptr : &E.buf();
+}
+
+int opt_index_impl(lua_State* L, bool local) {
     const char* name = luaL_checkstring(L, 2);
+    Buffer* target = local ? opt_target() : nullptr;
+    if(local && !target) return luaL_error(L, "no buffer");
     {
-        const auto v = get_option(name);
+        const auto v = local ? get_option_local(*target, name) : get_option(name);
         if(v) {
             if(*v == "true") lua_pushboolean(L, 1);
             else if(*v == "false") lua_pushboolean(L, 0);
@@ -145,11 +154,13 @@ int opt_index(lua_State* L) {
     return luaL_error(L, "unknown option '%s'", name);
 }
 
-int opt_newindex(lua_State* L) {
+int opt_newindex_impl(lua_State* L, bool local) {
     const char* name = luaL_checkstring(L, 2);
     const int t = lua_type(L, 3);
     if(t != LUA_TBOOLEAN && t != LUA_TNUMBER && t != LUA_TSTRING)
         return luaL_argerror(L, 3, "expected number, boolean or string");
+    Buffer* target = local ? opt_target() : nullptr;
+    if(local && !target) return luaL_error(L, "no buffer");
 
     OptResult r;
     {
@@ -161,10 +172,14 @@ int opt_newindex(lua_State* L) {
                         ? std::to_string(static_cast<long long>(d))
                         : std::to_string(d);
         } else value = lua_tostring(L, 3);
-        r = set_option(name, value);
+        r = local ? set_option_local(*target, name, value)
+                  : set_option(name, value);
     }
     if(r == OptResult::Unknown)
         return luaL_error(L, "unknown option '%s'", name);
+    if(r == OptResult::NotLocal)
+        return luaL_error(
+            L, "option '%s' has no buffer-local form (use winter.opt)", name);
     if(r == OptResult::BadValue) {
         lua_pushvalue(L, 3);
         return luaL_error(L,
@@ -173,6 +188,23 @@ int opt_newindex(lua_State* L) {
                           luaL_tolstring(L, -1, nullptr));
     }
     return 0;
+}
+
+int opt_index(lua_State* L) { return opt_index_impl(L, false); }
+int opt_newindex(lua_State* L) { return opt_newindex_impl(L, false); }
+int optl_index(lua_State* L) { return opt_index_impl(L, true); }
+int optl_newindex(lua_State* L) { return opt_newindex_impl(L, true); }
+
+// winter.<field> = proxy table whose reads/writes go through idx/nidx
+void set_opt_table(const char* field, lua_CFunction idx, lua_CFunction nidx) {
+    lua_newtable(g_L);  // proxy
+    lua_newtable(g_L);  // its metatable
+    lua_pushcfunction(g_L, idx);
+    lua_setfield(g_L, -2, "__index");
+    lua_pushcfunction(g_L, nidx);
+    lua_setfield(g_L, -2, "__newindex");
+    lua_setmetatable(g_L, -2);
+    lua_setfield(g_L, -2, field);
 }
 
 int l_snippet(lua_State* L) {
@@ -506,14 +538,8 @@ bool script_init() {
     luaL_openlibs(g_L);
     prepend_package_path("/etc/xdg/winter/themes");
     lua_newtable(g_L);  // winter
-    lua_newtable(g_L);
-    lua_newtable(g_L);
-    lua_pushcfunction(g_L, opt_index);
-    lua_setfield(g_L, -2, "__index");
-    lua_pushcfunction(g_L, opt_newindex);
-    lua_setfield(g_L, -2, "__newindex");
-    lua_setmetatable(g_L, -2);
-    lua_setfield(g_L, -2, "opt");
+    set_opt_table("opt", opt_index, opt_newindex);
+    set_opt_table("opt_local", optl_index, optl_newindex);
     lua_pushstring(g_L, WINTER_VERSION);
     lua_setfield(g_L, -2, "version");
     lua_setglobal(g_L, "winter");
@@ -627,6 +653,7 @@ void reset_config_state() {
     theme_clear();
     snippet_clear();
     opts = g_opts0;
+    for(const auto& b : E.buffers) b->bo = {};  // re-applied by file_type below
     set_cursor_for_mode(E.mode);
     normal_reset();  // a half-typed chord may point at a mapping that is gone
 
@@ -765,6 +792,11 @@ bool script_reload() {
     watch_config_tree();
     g_reloading = false;
     if(g_last_error.empty()) editor_set_status_message("Config reloaded");
+    for(const auto& b : E.buffers) {  // open buffers get their file_type handlers again
+        if(b->syntax.lang().empty()) continue;
+        EventBufScope scope(b.get());
+        events_emit("file_type", {b->filename, std::string(b->syntax.lang())});
+    }
     events_emit("reload");  // handlers from the new config see this one
     return g_last_error.empty();
 }

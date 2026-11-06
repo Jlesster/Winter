@@ -7,7 +7,7 @@
 bool is_ctl(char32_t cp) { return cp < 0x20 || (cp >= 0x7F && cp < 0xA0); }
 
 int cell_width(char32_t cp, int rx) {
-    if(cp == '\t') return opts.tab_stop - (rx % opts.tab_stop);
+    if(cp == '\t') return opt_ts() - (rx % opt_ts());
     if(is_ctl(cp)) return 1;
     return utf8_width(cp);
 }

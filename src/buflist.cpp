@@ -44,7 +44,9 @@ void switch_to(size_t idx) {
     E.row_offset = to.row_offset;
     E.row_sub = 0;
     E.col_offset = to.col_offset;
+    EventBufScope scope(&to);
     events_emit("buf_enter", {to.filename});
+    if(!to.nofile) recent_touch(to.filename);
 }
 
 void prune_scratch() {

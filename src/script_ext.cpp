@@ -1,5 +1,7 @@
 // winter.keymap, winter.action, winter.cmd, winter.ext, winter.ev
 #include <algorithm>
+#include <fnmatch.h>
+
 #include <cctype>
 #include <cstring>
 #include <format>
@@ -460,39 +462,108 @@ const std::vector<const char*>& fields_for(std::string_view ev) {
     return it == known.end() ? none : it->second;
 }
 
-// winter.ev.on(event, fn [, {once=bool}]) -> id. fn gets {event=, [1]=, ...}
+// {pattern = "x" | {"x", "y"}}: false on a bad shape
+bool read_patterns(lua_State* L, int t, std::vector<std::string>& out) {
+    if(!t) return true;
+    lua_getfield(L, t, "pattern");
+    bool ok = true;
+    if(lua_type(L, -1) == LUA_TSTRING) {
+        out.emplace_back(lua_tostring(L, -1));
+    } else if(lua_type(L, -1) == LUA_TTABLE) {
+        const lua_Unsigned n = lua_rawlen(L, -1);
+        for(lua_Unsigned i = 1; i <= n; ++i) {
+            lua_rawgeti(L, -1, static_cast<lua_Integer>(i));
+            if(lua_type(L, -1) == LUA_TSTRING) out.emplace_back(lua_tostring(L, -1));
+            else ok = false;
+            lua_pop(L, 1);
+        }
+    } else if(!lua_isnil(L, -1)) {
+        ok = false;
+    }
+    lua_pop(L, 1);
+    return ok;
+}
+
+// file_type: pattern is a language name; every other event with a leading
+// filename: a glob matched against the full path and the basename
+bool pattern_hit(std::string_view ev,
+                 const std::vector<std::string>& pats,
+                 const std::vector<std::string>& args) {
+    if(pats.empty()) return true;
+    if(args.empty()) return false;
+    if(ev == "file_type") {
+        if(args.size() < 2) return false;
+        return std::ranges::find(pats, args[1]) != pats.end();
+    }
+    const std::string& f = args[0];
+    const size_t sl = f.rfind('/');
+    const std::string base = sl == std::string::npos ? f : f.substr(sl + 1);
+    for(const std::string& p : pats)
+        if(fnmatch(p.c_str(), f.c_str(), 0) == 0 ||
+           fnmatch(p.c_str(), base.c_str(), 0) == 0)
+            return true;
+    return false;
+}
+
+// winter.ev.on(event, fn [, {once=bool, pattern=...}]) -> id. fn gets {event=, [1]=, ...}
 // plus named fields: buf_enter/buf_write_pre/buf_write_post {filename},
 // file_type {filename, lang}, mode_changed {old, new}. Also emitted without
-// arguments: ready, quit, text_changed, cursor_moved.
+// arguments: ready, quit, text_changed, cursor_moved, reload.
+// pattern = "lua" | {"lua", "nix"}: file_type runs only for those languages;
+// buf_enter/buf_write_*/buf_reload only for files matching those globs.
+// Inside the handler winter.opt_local targets the buffer the event is about.
 int l_ev_on(lua_State* L) {
     const char* event = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
     const int t = lua_table_arg(L, 3);
     const bool once = lua_opt_bool(L, t, "once", false);
-    const auto id = std::make_shared<int>(0);
-    *id = events_on(event,
-                    [fn = lua_fn(L, 2), id, once, name = std::string(event)](
-                        const std::vector<std::string>& args) {
-                        if(once) events_off(*id);
-                        lua_State* L = script_state();
-                        if(!L) return;
-                        fn->push();
-                        lua_createtable(L, static_cast<int>(args.size()), 3);
-                        lua_pushlstring(L, name.data(), name.size());
-                        lua_setfield(L, -2, "event");
-                        const auto& names = fields_for(name);
-                        for(size_t i = 0; i < args.size(); ++i) {
-                            lua_pushlstring(L, args[i].data(), args[i].size());
-                            if(i < names.size()) {
-                                lua_pushvalue(L, -1);
-                                lua_setfield(L, -3, names[i]);
-                            }
-                            lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+    const std::string_view ev = event;
+    const bool argless = ev == "ready" || ev == "quit" ||
+                         ev == "text_changed" || ev == "cursor_moved" ||
+                         ev == "reload";
+    const char* err = nullptr;  // raised after the block: no C++ objects live
+    int new_id = 0;             // across luaL_error
+    {
+        std::vector<std::string> pats;
+        if(!read_patterns(L, t, pats))
+            err = "pattern must be a string or a list of strings";
+        else if(!pats.empty() && argless)
+            err = "this event has no pattern to match";
+        else {
+            const auto id = std::make_shared<int>(0);
+            *id = events_on(
+                event,
+                [fn = lua_fn(L, 2),
+                 id,
+                 once,
+                 pats = std::move(pats),
+                 name = std::string(event)](
+                    const std::vector<std::string>& args) {
+                    if(!pattern_hit(name, pats, args)) return;
+                    if(once) events_off(*id);
+                    lua_State* L = script_state();
+                    if(!L) return;
+                    fn->push();
+                    lua_createtable(L, static_cast<int>(args.size()), 3);
+                    lua_pushlstring(L, name.data(), name.size());
+                    lua_setfield(L, -2, "event");
+                    const auto& names = fields_for(name);
+                    for(size_t i = 0; i < args.size(); ++i) {
+                        lua_pushlstring(L, args[i].data(), args[i].size());
+                        if(i < names.size()) {
+                            lua_pushvalue(L, -1);
+                            lua_setfield(L, -3, names[i]);
                         }
-                        script_call(1);
-                    });
-    g_lua_subs.push_back(*id);
-    lua_pushinteger(L, *id);
+                        lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+                    }
+                    script_call(1);
+                });
+            g_lua_subs.push_back(*id);
+            new_id = *id;
+        }
+    }
+    if(err) return luaL_error(L, "%s", err);
+    lua_pushinteger(L, new_id);
     return 1;
 }
 

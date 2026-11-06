@@ -168,7 +168,7 @@ public:
         int c = 0;
         for(const char ch : text(l)) {
             if(ch == ' ') ++c;
-            else if(ch == '\t') c += opts.tab_stop - c % opts.tab_stop;
+            else if(ch == '\t') c += opt_ts() - c % opt_ts();
             else break;
         }
         return c;
@@ -287,7 +287,7 @@ public:
         size_t k = l - 1;
         while(k > 0 && rtrim(text(k - 1)).ends_with('\\')) --k;
         if(!ltrim(text(k)).starts_with('#')) return std::nullopt;
-        return k == l - 1 ? opts.shift_width : ind(l - 1);
+        return k == l - 1 ? opt_sw() : ind(l - 1);
     }
 
     std::optional<size_t> init_chain(size_t q) {  // q ends in ','
@@ -344,7 +344,7 @@ private:
 std::optional<int> structural(Syntax& syn, const PieceTable& pt, size_t line,
                               const Rules& r) {
     Scan sc(syn, pt, r);
-    const int sw = opts.shift_width;
+    const int sw = opt_sw();
     const std::string_view cur = sc.head(line);
     if(r.preproc && ltrim(sc.text(line)).starts_with('#')) return 0;
     if(const auto pc = sc.pp_cont(line)) return *pc;
@@ -400,8 +400,8 @@ bool is_label_prefix(std::string_view tok) {
 
 namespace indent {
 std::string unit() {
-    return opts.expand_tab
-               ? std::string(static_cast<size_t>(opts.shift_width), ' ')
+    return opt_et()
+               ? std::string(static_cast<size_t>(opt_sw()), ' ')
                : std::string("\t");
 }
 
@@ -413,9 +413,9 @@ std::string_view leading_ws(std::string_view line) {
 
 std::string ws_for_cols(int cols) {
     if(cols <= 0) return {};
-    if(opts.expand_tab) return std::string(static_cast<size_t>(cols), ' ');
-    return std::string(static_cast<size_t>(cols / opts.tab_stop), '\t') +
-           std::string(static_cast<size_t>(cols % opts.tab_stop), ' ');
+    if(opt_et()) return std::string(static_cast<size_t>(cols), ' ');
+    return std::string(static_cast<size_t>(cols / opt_ts()), '\t') +
+           std::string(static_cast<size_t>(cols % opt_ts()), ' ');
 }
 
 std::string for_newline(std::string_view before) {

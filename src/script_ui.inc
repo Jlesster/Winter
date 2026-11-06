@@ -727,6 +727,11 @@ int l_picker_files(lua_State*) {
     return 0;
 }
 
+int l_picker_recent(lua_State*) {
+    picker_recent();
+    return 0;
+}
+
 int l_picker_grep(lua_State*) {
     picker_grep();
     return 0;
@@ -991,6 +996,7 @@ const luaL_Reg kPicker[] = {{"open", l_picker_open},
                             {"active", l_picker_active},
                             {"files", l_picker_files},
                             {"grep", l_picker_grep},
+                            {"recent", l_picker_recent},
                             {nullptr, nullptr}};
 const luaL_Reg kUiExt[] = {{"select", l_ui_select}, {nullptr, nullptr}};
 const luaL_Reg kDiag[] = {{"get", l_diag_get},

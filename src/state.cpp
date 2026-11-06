@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <string>
 
 #include "file.hpp"
@@ -213,4 +214,32 @@ bool cursor_recall(const std::string& file, int& line, int& col) {
     line = it->second.line;
     col = it->second.col;
     return true;
+}
+
+void recent_touch(const std::string& file) {
+    if(file.empty()) return;
+    static std::string last;  // switching back and forth shouldn't grow the log
+    const std::string key = state_file_key(file);
+    if(key == last || key.find('\n') != std::string::npos) return;
+    last = key;
+    state_append("recent", key);
+}
+
+std::vector<std::string> recent_list(size_t max) {
+    const auto lines = state_read_lines("recent");
+    std::vector<std::string> out;
+    std::set<std::string> seen;
+    for(size_t i = lines.size(); i-- > 0;)  // newest copy of a path wins
+        if(seen.insert(lines[i]).second) out.push_back(lines[i]);
+    constexpr size_t kKeep = 500;
+    if(lines.size() > 2 * kKeep) {  // log bloated: compact it, oldest first
+        if(out.size() > kKeep) out.resize(kKeep);
+        state_rewrite("recent",
+                      std::vector<std::string>(out.rbegin(), out.rend()));
+    }
+    std::erase_if(out, [](const std::string& p) {
+        return access(p.c_str(), F_OK) != 0;
+    });
+    if(out.size() > max) out.resize(max);
+    return out;
 }

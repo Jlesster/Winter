@@ -33,10 +33,10 @@ void editor_insert_char(int c) {
 
 void editor_insert_tab() {
     g_ai = SIZE_MAX;
-    if(!opts.expand_tab) return editor_insert_char('\t');
+    if(!opt_et()) return editor_insert_char('\t');
     // pad to the next shift-width column, not a fixed 4 spaces
     const int rx = cx_to_rx(E.buf().pt.line_text(E.cy), E.cx);
-    const int n = opts.shift_width - (rx % opts.shift_width);
+    const int n = opt_sw() - (rx % opt_sw());
     E.buf().pt.insert(cursor_offset(),
                       std::string(static_cast<size_t>(n), ' '));
     E.cx += n;
@@ -216,7 +216,7 @@ std::string one_level_less(std::string_view lw) {
     std::string s(lw);
     if(!s.empty() && s.back() == '\t') s.pop_back();
     else
-        for(int i = 0; i < opts.shift_width && !s.empty() && s.back() == ' ';
+        for(int i = 0; i < opt_sw() && !s.empty() && s.back() == ' ';
             ++i)
             s.pop_back();
     return s;

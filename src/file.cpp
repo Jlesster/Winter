@@ -32,6 +32,7 @@ void buffer_detect_syntax(Buffer& b) {
     if(b.nofile || b.filename.empty()) return;
     if(b.syntax.attach(b.filename)) {
         b.syntax.parse(b.pt, b.eol);
+        EventBufScope scope(&b);
         events_emit("file_type", {b.filename, std::string(b.syntax.lang())});
         return;
     }
@@ -140,6 +141,7 @@ int editor_write_file(Buffer& b, const std::string& path,
 
 static int write_buffer(Buffer& b) {
     uint64_t dh = 0, ds = 0;
+    EventBufScope scope(&b);
     if(opts.format_on_save) format_on_save(b);
     events_emit("buf_write_pre", {b.filename});
     if(const int err = editor_write_file(b, b.filename, &dh, &ds)) return err;

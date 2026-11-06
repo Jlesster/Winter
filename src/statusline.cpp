@@ -168,7 +168,7 @@ StatusBlock c_indent() {
     b.prio = 10;
     b.base = on_bar("ui.statusline.indent");
     b.pieces.push_back(
-        {std::format("{}:{}", opts.expand_tab ? "sp" : "tab", opts.shift_width),
+        {std::format("{}:{}", opt_et() ? "sp" : "tab", opt_sw()),
          {}});
     return b;
 }

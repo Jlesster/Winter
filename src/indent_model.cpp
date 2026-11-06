@@ -16,7 +16,7 @@ int indent_cols(std::string_view s) {
     int c = 0;
     for(const char ch : s) {
         if(ch == ' ') ++c;
-        else if(ch == '\t') c += opts.tab_stop - c % opts.tab_stop;
+        else if(ch == '\t') c += opt_ts() - c % opt_ts();
         else break;
     }
     return c;
@@ -92,7 +92,7 @@ std::optional<int> Model::indent_for(Syntax& syn, const PieceTable& pt,
         if(line == 0) return 0;
         const std::string prev = pt.line_text(line - 1);
         const size_t p = prev.find_first_not_of(" \t");
-        return p != std::string::npos && prev[p] == '#' ? opts.shift_width
+        return p != std::string::npos && prev[p] == '#' ? opt_sw()
                                                         : indent_cols(prev);
     }
     const std::string code = mask_line(syn, pt, line, raw);
@@ -100,7 +100,7 @@ std::optional<int> Model::indent_for(Syntax& syn, const PieceTable& pt,
     const std::string_view cur = k == std::string::npos
                                      ? std::string_view{}
                                      : std::string_view(code).substr(k);
-    const Cfg cfg{opts.shift_width, opts.indent_namespace, opts.indent_case};
+    const Cfg cfg{opt_sw(), opts.indent_namespace, opts.indent_case};
 
     // first word and indent of a later line that sits directly in a frame
     const auto peek_line = [&](size_t l,

@@ -221,7 +221,7 @@ void shift(const Range& r, int dir) {  // > and <
             size_t n = 0;
             if(s < e && E.buf().pt.at(s) == '\t') n = 1;
             else
-                while(n < static_cast<size_t>(opts.shift_width) && s + n < e &&
+                while(n < static_cast<size_t>(opt_sw()) && s + n < e &&
                       E.buf().pt.at(s + n) == ' ')
                     ++n;
             if(n) E.buf().pt.remove(s, n);

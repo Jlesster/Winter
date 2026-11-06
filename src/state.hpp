@@ -22,5 +22,9 @@ bool state_write_blob(std::string_view name, std::string_view data);
 std::optional<std::string> state_read_blob(std::string_view name);
 void state_remove(std::string_view name);
 
+// recently entered files, newest first (absolute keys, existing files only)
+void recent_touch(const std::string& file);
+std::vector<std::string> recent_list(size_t max);
+
 void cursor_remember(const std::string& file, int line, int col);
 bool cursor_recall(const std::string& file, int& line, int& col);

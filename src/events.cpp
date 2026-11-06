@@ -8,6 +8,7 @@ struct Sub {
     EventHandler fn;
 };
 std::vector<Sub> g_subs;
+Buffer* g_event_buf = nullptr;
 int g_next_id = 1;
 }  // namespace
 
@@ -36,3 +37,7 @@ void events_emit(std::string_view name, const std::vector<std::string>& args) {
         if(alive) s.fn(args);
     }
 }
+
+Buffer* events_buf() { return g_event_buf; }
+EventBufScope::EventBufScope(Buffer* b) : prev_(g_event_buf) { g_event_buf = b; }
+EventBufScope::~EventBufScope() { g_event_buf = prev_; }

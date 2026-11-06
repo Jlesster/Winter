@@ -151,8 +151,8 @@ std::string lsp_format(Buffer& b, int timeout_ms) {
         "textDocument/formatting",
         Json::obj({{"textDocument", Json::obj({{"uri", doc->uri}})},
                    {"options",
-                    Json::obj({{"tabSize", opts.shift_width},
-                               {"insertSpaces", opts.expand_tab},
+                    Json::obj({{"tabSize", opt_sw()},
+                               {"insertSpaces", opt_et()},
                                {"trimTrailingWhitespace", true},
                                {"insertFinalNewline", true}})}}),
         [st](const Json& r, const Json& e) {

@@ -11,6 +11,7 @@
 #include "diag.hpp"
 #include "edit_bus.hpp"
 #include "indent_model.hpp"
+#include "options.hpp"
 #include "piece.hpp"
 #include "syntax.hpp"
 #include "virt.hpp"
@@ -47,6 +48,7 @@ struct Buffer {
     uint64_t disk_hash = 0, disk_size = 0;  // bytes as last read/written by us
     bool disk_changed = false;  // changed on disk while we hold unsaved edits
     bool disk_gone = false;
+    BufOpts bo{};  // buffer-local ts/sw/et, set via winter.opt_local
 
     void sync_anchors() {
         for(const TextEdit& e : pt.drain_deco_edits()) {
