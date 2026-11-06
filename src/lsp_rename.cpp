@@ -29,7 +29,7 @@ bool stale(const Ctx& c) {
 Json position(const Ctx& c) {
     const PieceTable& pt = c.buf->pt;
     return Json::obj({{"line", pt.line_of(c.at)},
-        {"character", lsp_col(pt, c.at, c.doc.utf16)}});
+                      {"character", lsp_col(pt, c.at, c.doc.utf16)}});
 }
 
 std::string word_under(const PieceTable& pt, size_t at) {
@@ -48,8 +48,8 @@ std::string word_under(const PieceTable& pt, size_t at) {
 void submit(const Ctx& c, std::string name) {
     if(name.empty() || stale(c)) return;
     Json p = Json::obj({{"textDocument", Json::obj({{"uri", c.doc.uri}})},
-        {"position", position(c)},
-        {"newName", name}});
+                        {"position", position(c)},
+                        {"newName", name}});
     lsp_request(
         c.doc.server,
         "textDocument/rename",
@@ -75,7 +75,7 @@ void submit(const Ctx& c, std::string name) {
 
 void prompt(const Ctx& c, std::string initial) {
     InputSpec s;
-    s.prompt = "rename";
+    s.prompt = "rename: ";
     s.initial = std::move(initial);
     s.on_submit = [c](std::string n) { submit(c, std::move(n)); };
     input_open(std::move(s));
@@ -105,7 +105,7 @@ void lsp_rename(std::string_view preset) {
         return;
     }
     Json p = Json::obj({{"textDocument", Json::obj({{"uri", doc->uri}})},
-        {"position", position(c)}});
+                        {"position", position(c)}});
     lsp_request(
         doc->server,
         "textDocument/prepareRename",
@@ -146,7 +146,7 @@ void lsp_rename(std::string_view preset) {
 
 void lsp_rename_register() {
     command_add({.name = "Rename",
-        .desc = "LSP rename symbol",
-            .nargs = Nargs::Opt,
-            .run = [](const CmdLine& cl) { lsp_rename(cl.args); }});
+                 .desc = "LSP rename symbol",
+                 .nargs = Nargs::Opt,
+                 .run = [](const CmdLine& cl) { lsp_rename(cl.args); }});
 }

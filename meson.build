@@ -1,7 +1,7 @@
 project(
   'winter',
   ['c', 'cpp'],
-  version: '0.0.1',
+  version: '0.1.0',
   default_options: [
     'cpp_std=c++23',
     'warning_level=3',
@@ -147,7 +147,8 @@ executable(
 subdir('tests')
 
 install_subdir(
-    'lua',
-    install_dir: '/etc' / 'xdg' / 'winter',
-    strip_directory: true,
+  'lua',
+  install_dir: '/etc' / 'xdg' / 'winter',
+  strip_directory: true,
 )
+
