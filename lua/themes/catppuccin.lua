@@ -52,6 +52,49 @@
 
 local M = {}
 
+local function transparency_path()
+  local config_home = os.getenv('XDG_STATE_HOME')
+  if not config_home or config_home == '' then
+    config_home = os.getenv('HOME') .. '/.local/state'
+  end
+  return config_home .. '/winter/themes/catppuccin.state'
+end
+
+local function read_transparency()
+  local file = io.open(transparency_path(), 'r')
+  if not file then return nil end
+  local value = file:read('*l')
+  file:close()
+  if value == 'true' then return true end
+  if value == 'false' then return false end
+  return nil
+end
+
+local function write_transparency(value)
+  local path = transparency_path()
+  local dir = path:match('^(.*)/[^/]+$')
+
+  local ok = os.execute('mkdir -p "' .. dir .. '"')
+  if not ok then error('catppuccin: unable to create state directory: ' .. dir) end
+
+  local file, err = io.open(path, 'w')
+  if not file then
+    error(
+      'catppuccin: unable to save transparency state at '
+        .. path
+        .. ': '
+        .. tostring(err)
+    )
+  end
+
+  file:write(value and 'true\n' or 'false\n')
+
+  local closed, close_err = file:close()
+  if not closed then
+    error('catppuccin: unable to close transparency state: ' .. tostring(close_err))
+  end
+end
+
 M.palettes = {
   latte = {
     rosewater = '#dc8a78',
@@ -1658,7 +1701,15 @@ end
 ---------------------------------------------------------------------------
 
 function M.setup(opts)
+  local persisted = read_transparency()
   M._user = opts or {}
+
+  if persisted ~= nil then
+    M._user = deep_keep({
+      transparent_background = persisted,
+    }, M._user)
+  end
+
   local O = deep_keep(M._user, M.default_options)
   local flavour = O.flavour
   if flavour == 'auto' then flavour = O.background.dark end
@@ -1698,6 +1749,15 @@ function M.setup(opts)
     })
   end
   return C
+end
+
+function M.toggle_transparency()
+  local enabled = not M.options.transparent_background
+  write_transparency(enabled)
+  local opts = deep_keep({
+    transparent_background = enabled,
+  }, M._user or {})
+  return M.setup(opts)
 end
 
 --- Switch flavour, keeping the options given to setup().
