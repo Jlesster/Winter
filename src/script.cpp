@@ -23,6 +23,7 @@
 #include "core.hpp"
 #include "diag.hpp"
 #include "editor.hpp"
+#include "fold_buf.hpp"
 #include "events.hpp"
 #include "file.hpp"
 #include "glyphs.hpp"
@@ -475,6 +476,56 @@ int l_theme_link(lua_State* L) {
     return 0;
 }
 
+// winter.fold.setup{ providers = {"treesitter","indent"},
+//                    open = {"search","jump","undo","insert","quickfix","lsp"},
+//                    minlines = 1, levelstart = -1 }
+int l_fold_setup(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    FoldConfig& c = fold_config();
+    lua_getfield(L, 1, "providers");
+    if(lua_istable(L, -1)) {
+        std::vector<std::string> v;
+        for(lua_Integer i = 1;; ++i) {
+            lua_rawgeti(L, -1, i);
+            if(lua_isnil(L, -1)) { lua_pop(L, 1); break; }
+            const std::string n = luaL_checkstring(L, -1);
+            if(n != "treesitter" && n != "indent")
+                return luaL_error(L, "winter.fold.setup: unknown provider '%s'", n.c_str());
+            v.push_back(n);
+            lua_pop(L, 1);
+        }
+        c.providers = std::move(v);
+    }
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "open");
+    if(lua_istable(L, -1)) {
+        unsigned m = 0;
+        for(lua_Integer i = 1;; ++i) {
+            lua_rawgeti(L, -1, i);
+            if(lua_isnil(L, -1)) { lua_pop(L, 1); break; }
+            const std::string n = luaL_checkstring(L, -1);
+            if(n == "search") m |= kFoldSearch;
+            else if(n == "jump") m |= kFoldJump;
+            else if(n == "undo") m |= kFoldUndo;
+            else if(n == "insert") m |= kFoldInsert;
+            else if(n == "quickfix") m |= kFoldQuickfix;
+            else if(n == "lsp") m |= kFoldLsp;
+            else return luaL_error(L, "winter.fold.setup: unknown foldopen '%s'", n.c_str());
+            lua_pop(L, 1);
+        }
+        c.open = m;
+    }
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "minlines");
+    if(lua_isnumber(L, -1)) c.minlines = std::max(1, static_cast<int>(lua_tointeger(L, -1)));
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "levelstart");
+    if(lua_isnumber(L, -1)) c.levelstart = static_cast<int>(lua_tointeger(L, -1));
+    lua_pop(L, 1);
+    for(auto& b : E.buffers) b->folds.stale = true;  // providers may have changed
+    return 0;
+}
+
 #include "script_ui.inc"
 
 const luaL_Reg kBuf[] = {{"replace", l_replace}, {nullptr, nullptr}};
@@ -496,6 +547,7 @@ const luaL_Reg kLsp[] = {{"setup", l_lsp},
                          {"switch_source_header", l_lsp_switch},
                          {"code_action", l_lsp_code_action},
                          {nullptr, nullptr}};
+const luaL_Reg kFold[] = {{"setup", l_fold_setup}, {nullptr, nullptr}};
 const luaL_Reg kJump[] = {
     {"older", l_jump_older}, {"newer", l_jump_newer}, {nullptr, nullptr}};
 const luaL_Reg kSnippet[] = {
@@ -550,6 +602,7 @@ bool script_init() {
     script_register("deco", kDeco);
     script_register("lsp", kLsp);
     script_register("jump", kJump);
+    script_register("fold", kFold);
     script_register("snippet", kSnippet);
     script_register("lang", kLang);
     script_register("theme", kTheme);

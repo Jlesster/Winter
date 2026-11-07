@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 #include "buffer.hpp"
+#include "fold.hpp"
 #include "parser.hpp"
 #include "piece.hpp"
 
@@ -47,6 +48,14 @@ public:
     };
     LitSpan literal_at(size_t byte) const;
     void restyle();
+
+    // Fold ranges from the syntax tree. `override_src` is a user folds.scm
+    // (captures named @fold*); empty = the built-in body-block list for this
+    // language. Heads follow the body-block rule: a captured node that starts
+    // its own line (Allman `{`, a Python/Lua block) folds under the line
+    // before it. False when there is no tree.
+    bool fold_ranges(std::vector<fold::Raw>& out,
+                     const std::string& override_src) const;
 
 private:
     using Meta = std::vector<std::pair<std::string, std::string>>;

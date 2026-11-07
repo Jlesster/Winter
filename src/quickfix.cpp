@@ -10,6 +10,7 @@
 #include "buflist.hpp"
 #include "command.hpp"
 #include "core.hpp"
+#include "fold_buf.hpp"
 #include "editor.hpp"
 #include "keys.hpp"
 #include "menu.hpp"
@@ -244,6 +245,7 @@ bool qf_jump(size_t idx) {
     while(off > ls && (static_cast<unsigned char>(pt.text(off, 1)[0]) & 0xC0) == 0x80)
         --off;  // don't land inside a UTF-8 sequence
     set_cursor_offset(off);
+    fold_reveal(kFoldQuickfix);
 
     editor_set_status_message("({}/{}) {}: {}",
                               idx + 1,

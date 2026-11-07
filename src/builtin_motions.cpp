@@ -6,6 +6,7 @@
 
 #include "builtin.hpp"
 #include "core.hpp"
+#include "fold_buf.hpp"
 #include "editor.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
@@ -39,8 +40,12 @@ void bind_op_motion(const char* name, Pure fn, const char* keys) {
 
 void bind_motion(const char* name, Pure fn, const char* keys) {
     registry().add_motion(name, wrap(fn));
-    registry().add_action(name, [fn](Ctx& c) {
+    const bool far = std::string_view(name) == "motion.file_start" ||
+                     std::string_view(name) == "motion.file_end" ||
+                     std::string_view(name) == "motion.match_pair";
+    registry().add_action(name, [fn, far](Ctx& c) {
         apply_motion(fn(E.buf().pt, cursor_offset(), c.count));
+        if(far) fold_reveal(kFoldJump);  // gg G % open the fold they land in
     });
     map_shared(name, keys);
 }

@@ -59,8 +59,12 @@ void update_want() { E.want_rx = cx_to_rx(E.buf().pt.line_text(E.cy), E.cx); }
 
 // j / k keep a goal column, so passing over a short line doesn't lose it
 void move_vertical(int dir, int count) {
-    const int target =
-        std::clamp(E.cy + dir * std::max(count, 1), 0, E.num_rows() - 1);
+    // visible lines: a closed fold counts as one, and we land on its head
+    const PieceTable& pt = E.buf().pt;
+    const size_t from = static_cast<size_t>(E.cy);
+    const int n = std::max(count, 1);
+    const int target = static_cast<int>(dir > 0 ? motion::lines_down(pt, from, n)
+                                                : motion::lines_up(pt, from, n));
     if(target == E.cy) return;
     E.cy = target;
     const std::string line = E.buf().pt.line_text(E.cy);

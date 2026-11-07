@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <optional>
 #include <string_view>
+#include "fold_buf.hpp"
 #include "editor.hpp"
 #include "normal.hpp"
 #include "options.hpp"
@@ -105,6 +106,8 @@ void editor_find() {
     };
     editor_prompt("Search: ", hooks);
     set_mode(NORMAL);
+    if(E.cy != g_origin.cy || E.cx != g_origin.cx)  // not cancelled
+        fold_reveal(kFoldSearch);
 }
 
 void search_step(int dir, int count) {
@@ -125,6 +128,7 @@ void search_step(int dir, int count) {
     }
     g_hl = g_last;
     jump_to(p);
+    fold_reveal(kFoldSearch);
 }
 
 void search_clear_highlight() { g_hl.clear(); }

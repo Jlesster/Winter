@@ -9,6 +9,7 @@
 #include "diag.hpp"
 #include "edit.hpp"
 #include "editor.hpp"
+#include "fold_buf.hpp"
 #include "jumplist.hpp"
 #include "lsp_actions.hpp"
 #include "lsp_nav.hpp"
@@ -78,15 +79,19 @@ void register_builtin_actions() {
     bind(
         "edit.open_below",
         [](Ctx&) {
+            fold_hold_reveal(true);  // the fold stays closed under the new line
             set_mode(
                 INSERT);  // first: the new line joins the insert's undo group
+            fold_hold_reveal(false);
             editor_open_below();
         },
         "o");
     bind(
         "edit.open_above",
         [](Ctx&) {
+            fold_hold_reveal(true);
             set_mode(INSERT);
+            fold_hold_reveal(false);
             editor_open_above();
         },
         "O");
@@ -185,6 +190,7 @@ void register_builtin_actions() {
             if(auto at = E.buf().pt.undo()) {
                 set_cursor_offset(motion::clamp_normal(E.buf().pt, *at));
                 update_want();
+                fold_reveal(kFoldUndo);
             } else editor_set_status_message("Already at oldest change");
         },
         "u");
@@ -195,6 +201,7 @@ void register_builtin_actions() {
             if(auto at = E.buf().pt.redo()) {
                 set_cursor_offset(motion::clamp_normal(E.buf().pt, *at));
                 update_want();
+                fold_reveal(kFoldUndo);
             } else editor_set_status_message("Already at newest change");
         },
         "<C-r>");
@@ -285,4 +292,6 @@ void register_builtins() {
     register_builtin_actions();
     register_builtin_operators();
     register_builtin_commands();
+
+    register_fold_actions();
 }

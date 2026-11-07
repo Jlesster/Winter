@@ -11,6 +11,12 @@
 namespace motion {
 namespace {
 
+FoldProbe g_probe = nullptr;
+const fold::State* folds_of(const PieceTable& t) {
+    const fold::State* f = g_probe ? g_probe(t) : nullptr;
+    return f && f->any_closed() ? f : nullptr;
+}
+
 enum Cls { Space, Word, Punct };
 
 // '\n' is whitespace on purpose: word motions walk straight across lines
@@ -162,31 +168,55 @@ Target paragraph(const PieceTable& t, size_t p, int count, int dir) {
 
 }  // namespace
 
+void set_fold_probe(FoldProbe p) { g_probe = p; }
+
+size_t lines_down(const PieceTable& t, size_t l, int n) {
+    const size_t last = t.line_count() - 1;
+    const fold::State* f = folds_of(t);
+    if(!f) return std::min(l + static_cast<size_t>(std::max(n, 0)), last);
+    int cur = f->head_of(static_cast<int>(l));
+    for(; n > 0; --n) {
+        const int nx = f->next_visible(cur);
+        if(nx > static_cast<int>(last)) break;
+        cur = nx;
+    }
+    return static_cast<size_t>(cur);
+}
+
+size_t lines_up(const PieceTable& t, size_t l, int n) {
+    const fold::State* f = folds_of(t);
+    if(!f) return l - std::min(l, static_cast<size_t>(std::max(n, 0)));
+    int cur = f->head_of(static_cast<int>(l));
+    for(; n > 0; --n) {
+        const int pv = f->prev_visible(cur);
+        if(pv < 0) break;
+        cur = pv;
+    }
+    return static_cast<size_t>(cur);
+}
+
 Target line_n(const PieceTable& t, size_t p, int count) {
-    const size_t l =
-        std::min(t.line_of(p) + static_cast<size_t>(std::max(count, 1)) - 1,
-                 t.line_count() - 1);
+    const size_t l = lines_down(t, t.line_of(p), std::max(count, 1) - 1);
     return {t.line_start(l), MKind::Linewise, true, false};
 }
 
 Target down(const PieceTable& t, size_t p, int count) {
-    const size_t l = t.line_of(p), last = t.line_count() - 1;
-    if(l == last) return fail(p);
-    return {t.line_start(
-                std::min(l + static_cast<size_t>(std::max(count, 1)), last)),
-            MKind::Linewise,
-            true,
-            false};
+    const size_t l = t.line_of(p);
+    const size_t to = lines_down(t, l, std::max(count, 1));
+    const fold::State* f = folds_of(t);
+    if(f ? to == static_cast<size_t>(f->head_of(static_cast<int>(l)))
+         : l == t.line_count() - 1)
+        return fail(p);
+    return {t.line_start(to), MKind::Linewise, true, false};
 }
 
 Target up(const PieceTable& t, size_t p, int count) {
     const size_t l = t.line_of(p);
-    if(l == 0) return fail(p);
-    return {
-        t.line_start(l - std::min(l, static_cast<size_t>(std::max(count, 1)))),
-        MKind::Linewise,
-        true,
-        false};
+    const size_t to = lines_up(t, l, std::max(count, 1));
+    const fold::State* f = folds_of(t);
+    if(f ? to == static_cast<size_t>(f->head_of(static_cast<int>(l))) : l == 0)
+        return fail(p);
+    return {t.line_start(to), MKind::Linewise, true, false};
 }
 
 Target right_op(const PieceTable& t, size_t p, int count) {

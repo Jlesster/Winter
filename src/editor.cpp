@@ -4,6 +4,7 @@
 #include "core.hpp"
 #include "edit.hpp"
 #include "events.hpp"
+#include "fold_buf.hpp"
 #include "keys.hpp"
 #include "loop.hpp"
 #include "motion.hpp"
@@ -58,7 +59,10 @@ void set_mode(EditorMode m) {
         E.buf().pt.end_group();
         replace_reset();
     }
-    if(!was_ins && will_ins) E.buf().pt.begin_group();
+    if(!was_ins && will_ins) {
+        E.buf().pt.begin_group();
+        fold_reveal(kFoldInsert);
+    }
     const EditorMode old = E.mode;
     E.mode = m;
     events_emit("mode_changed", {mode_name(old), mode_name(m)});

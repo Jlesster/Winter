@@ -182,8 +182,16 @@ Range resolve(const PieceTable& t, size_t from, Target tg, bool word_motion) {
     size_t a = std::min(from, tg.pos), b = std::max(from, tg.pos);
     const size_t la = t.line_of(a), lb = t.line_of(b);
 
-    if(tg.kind == MKind::Linewise)
-        return {t.line_start(la), std::min(t.line_end(lb) + 1, t.size()), true};
+    if(tg.kind == MKind::Linewise) {
+        // dd yy >> and friends take a closed fold whole, at both ends
+        size_t fa = la, fb = lb;
+        const fold::State& F = E.buf().folds;
+        if(&t == &E.buf().pt && F.any_closed()) {
+            fa = static_cast<size_t>(F.head_of(static_cast<int>(la)));
+            fb = static_cast<size_t>(F.end_of(static_cast<int>(lb)));
+        }
+        return {t.line_start(fa), std::min(t.line_end(fb) + 1, t.size()), true};
+    }
 
     if(tg.kind == MKind::Inclusive) {
         if(b < t.line_end(lb)) {  // empty line: `$` selects nothing
@@ -245,7 +253,8 @@ void paste(bool after, int count) {  // p and P
         bool lead_nl = false;
         if(!after) {
             at = E.buf().pt.line_start(E.cy);
-        } else if(const size_t e = E.buf().pt.line_end(E.cy);
+        } else if(const size_t e = E.buf().pt.line_end(static_cast<size_t>(
+                      E.buf().folds.end_of(E.cy)));
                   e == E.buf().pt.size()) {
             // last line has no '\n' to step over: move it to the paste's front
             at = e;
@@ -275,7 +284,8 @@ void paste(bool after, int count) {  // p and P
 void paste_indented(bool after, int count) {
     PieceTable& pt = E.buf().pt;
     PieceTable::Group g(pt);
-    const size_t first = after ? E.cy + 1 : E.cy;
+    const size_t first =
+        after ? static_cast<size_t>(E.buf().folds.end_of(E.cy)) + 1 : E.cy;
     paste(after, count);
     if(unnamed.linewise) return;
     const size_t n =
@@ -449,11 +459,17 @@ void alias_obj(const char* keys, const char* name) {
 Range visual_range() {
     const size_t cur = cursor_offset();
     const size_t a = std::min(E.v_anchor, cur), b = std::max(E.v_anchor, cur);
-    if(E.v_line)
-        return {E.buf().pt.line_start(E.buf().pt.line_of(a)),
-                std::min(E.buf().pt.line_end(E.buf().pt.line_of(b)) + 1,
-                         E.buf().pt.size()),
+    if(E.v_line) {
+        const fold::State& F = E.buf().folds;
+        size_t la = E.buf().pt.line_of(a), lb = E.buf().pt.line_of(b);
+        if(F.any_closed()) {  // visual-line takes closed folds whole
+            la = static_cast<size_t>(F.head_of(static_cast<int>(la)));
+            lb = static_cast<size_t>(F.end_of(static_cast<int>(lb)));
+        }
+        return {E.buf().pt.line_start(la),
+                std::min(E.buf().pt.line_end(lb) + 1, E.buf().pt.size()),
                 true};
+    }
     size_t end = b;
     if(end < E.buf().pt.size()) {
         ++end;

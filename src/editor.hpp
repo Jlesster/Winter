@@ -10,6 +10,7 @@
 #include "core.hpp"
 #include "diag.hpp"
 #include "edit_bus.hpp"
+#include "fold.hpp"
 #include "indent_model.hpp"
 #include "markdown.hpp"
 #include "options.hpp"
@@ -24,9 +25,16 @@ struct Buffer {
     // PieceTable(..)`
     void wire() {
         indent.on_edit(TextEdit{.reset = true});
+        folds.clear();
         pt.set_edit_sink([this](const TextEdit& e, Origin o) {
             syntax.on_edit(e);
             indent.on_edit(e);
+            if(e.reset) folds.clear();
+            else
+                folds.shift({static_cast<int>(e.start_pt.line),
+                             static_cast<int>(e.start_pt.col),
+                             static_cast<int>(e.old_end_pt.line),
+                             static_cast<int>(e.new_end_pt.line)});
             edit_emit(make_event(pt, e, o));
         });
         pt.set_group_end_sink([] { edit_group_end(); });
@@ -35,6 +43,7 @@ struct Buffer {
     PieceTable pt{};
     Syntax syntax{};
     indent::Model indent{};
+    fold::State folds{};  // ranges + closed set; see fold.hpp
     std::vector<Diag> diags{};
     DecoStore decos{};
     MdState md{};

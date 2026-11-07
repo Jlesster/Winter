@@ -31,3 +31,12 @@ chord_test = executable(
   link_args: san,
 )
 test('chord', chord_test)
+
+fold_test = executable(
+  'fold_test',
+  files('../src/fold.cpp', '../src/registry.cpp', 'fold_test.cpp'),
+  cpp_args: san,
+  link_args: san,
+)
+test('fold', fold_test)
+

@@ -10,6 +10,7 @@
 #include "buflist.hpp"
 #include "command.hpp"
 #include "diag.hpp"
+#include "fold_buf.hpp"
 #include "editor.hpp"
 #include "jumplist.hpp"
 #include "json.hpp"
@@ -93,6 +94,7 @@ void jump_to(const Loc& l, bool utf16) {
     const size_t off = lsp_offset(pt, static_cast<int64_t>(line),
                                   static_cast<int64_t>(l.col), utf16);
     set_cursor_offset(motion::clamp_normal(pt, off));
+    fold_reveal(kFoldLsp);
 }
 
 struct LineCache {

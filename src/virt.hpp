@@ -43,6 +43,7 @@ struct SpanDeco {
 struct EolItem {
     int prio;
     const VirtText* vt;
+    int gap = 2;  // columns after this item, before the next
 };
 
 class DecoStore {

@@ -12,6 +12,7 @@
 #include "comment.hpp"
 #include "core.hpp"
 #include "editor.hpp"
+#include "fold_buf.hpp"
 #include "indent.hpp"
 #include "keys.hpp"
 #include "options.hpp"
@@ -371,6 +372,7 @@ void editor_type_char(int c) {
 
 void editor_open_below() {
     Buffer& B = E.buf();
+    E.cy = B.folds.end_of(E.cy);  // on a closed fold: after its last line
     const std::string cur = B.pt.line_text(E.cy);
     const auto cc = comment_continue(E.cy, cur.size(), false);
     const std::string heur = indent::for_newline(cur);

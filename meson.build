@@ -72,6 +72,8 @@ sources = files(
   'src/extend.cpp',
   'src/external.cpp',
   'src/file.cpp',
+  'src/fold.cpp',
+  'src/fold_buf.cpp',
   'src/format.cpp',
   'src/format_run.cpp',
   'src/fuzzy.cpp',

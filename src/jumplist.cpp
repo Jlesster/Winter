@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <vector>
 #include "buflist.hpp"
+#include "fold_buf.hpp"
 #include "editor.hpp"
 #include "motion.hpp"
 #include "piece.hpp"
@@ -57,6 +58,7 @@ bool jump_goto(const std::string& path, size_t line, size_t col) {
           (static_cast<unsigned char>(pt.text(off, 1)[0]) & 0xC0) == 0x80)
         --off;
     set_cursor_offset(motion::clamp_normal(pt, off));
+    fold_reveal(kFoldJump);
     return true;
 }
 

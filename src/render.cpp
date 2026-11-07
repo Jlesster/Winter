@@ -13,9 +13,11 @@
 
 #include "buffer.hpp"
 #include "columns.hpp"
+#include "command.hpp"
 #include "diag.hpp"
 #include "editor.hpp"
 #include "events.hpp"
+#include "fold_buf.hpp"
 #include "glyphs.hpp"
 #include "gutter.hpp"
 #include "lsp_sync.hpp"
@@ -26,7 +28,6 @@
 #include "search.hpp"
 #include "snippet.hpp"
 #include "statusline.hpp"
-#include "src/command.hpp"
 #include "terminal.hpp"
 #include "theme.hpp"
 #include "tree.hpp"
@@ -37,6 +38,8 @@ namespace {
 
 Screen scr;
 int g_px = 0;
+
+const fold::State& fs() { return E.buf().folds; }
 
 int put_text(int x, int y, std::string_view s, int limit, Style st) {
     x += g_px;
@@ -57,6 +60,32 @@ int put_text(int x, int y, std::string_view s, int limit, Style st) {
     return x - g_px;
 }
 
+std::string fold_text(int head, int last, std::string_view glyph) {
+    const int n = last - head;
+    if(fold_config().text_closer && n > 1) {
+        const std::string s = E.buf().pt.line_text(static_cast<size_t>(last));
+        if(closers_only(s))
+            return std::format("{} {} lines {}", glyph, n - 1, glyph);
+    }
+    return std::format("{} {} line{}", glyph, n, n == 1 ? "" : "s");
+}
+
+// The hidden closing line shown at the end of a fold summary (`}`), or empty
+// when foldcloser is off or the line is not made only of closers.
+std::string fold_closer(int head, int last) {
+    if(!fold_config().text_closer || last - head <= 1) return {};
+    const std::string s = E.buf().pt.line_text(static_cast<size_t>(last));
+    if(!closers_only(s)) return {};
+    return s.substr(s.find_first_not_of(" \t"));
+}
+
+Style style_at(const std::vector<Span>& spans, size_t pos) {
+    const auto it = std::ranges::upper_bound(spans, pos, {}, &Span::start);
+    if(it == spans.begin()) return {};
+    const Span& s = *std::prev(it);
+    return pos < s.end ? s.st : Style{};
+}
+
 void put_eols(int y, std::string_view line, int g, std::vector<EolItem>& items,
               int col_off) {
     std::ranges::stable_sort(items, std::greater<>{}, &EolItem::prio);
@@ -65,7 +94,7 @@ void put_eols(int y, std::string_view line, int g, std::vector<EolItem>& items,
     int x = std::max(g + 1, end_x + 2);
     for(const EolItem& it : items) {
         if(x >= E.term_cols - 4) break;
-        x = put_text(x, y, it.vt->text, E.term_cols, it.vt->style) + 2;
+        x = put_text(x, y, it.vt->text, E.term_cols, it.vt->style) + it.gap;
     }
 }
 
@@ -190,9 +219,9 @@ std::vector<int> wrap_starts(int line, int W) {
     };
     const std::string raw = E.buf().pt.line_text(line);
     SubstView view;  // a concealed markdown line wraps as it is drawn
-    const std::string_view text =
-        md_line_view(line, raw, W, view) ? std::string_view(view.text)
-                                         : std::string_view(raw);
+    const std::string_view text = md_line_view(line, raw, W, view)
+                                      ? std::string_view(view.text)
+                                      : std::string_view(raw);
     std::vector<int> st{0};
     int rx = 0, s = 0;
     for(size_t i = 0; i < text.size();) {
@@ -230,7 +259,7 @@ RowPos step_down(RowPos p, int n, int W) {  // n screen rows forward
             return p;
         }
         n -= left;
-        ++p.line;
+        p.line = fs().next_visible(p.line);  // closed folds draw as one row
         p.sub = 0;
     }
     return p;
@@ -244,8 +273,9 @@ RowPos step_up(RowPos p, int n, int W) {  // n screen rows back, clamps at 0
             n -= k;
             continue;
         }
-        if(p.line == 0) return p;
-        --p.line;
+        const int pv = fs().prev_visible(p.line);
+        if(pv < 0) return p;
+        p.line = pv;
         p.sub = rows_of(p.line, W);
     }
     return p;
@@ -255,7 +285,9 @@ RowPos step_up(RowPos p, int n, int W) {  // n screen rows back, clamps at 0
 int rows_between(RowPos a, RowPos b, int W, int cap = INT_MAX) {
     if(a.line == b.line) return b.sub - a.sub;
     int n = rows_of(a.line, W) - a.sub;
-    for(int l = a.line + 1; l < b.line && n < cap; ++l) n += rows_of(l, W);
+    for(int l = fs().next_visible(a.line); l < b.line && n < cap;
+        l = fs().next_visible(l))
+        n += rows_of(l, W);
     return n + b.sub;
 }
 
@@ -265,7 +297,8 @@ void scroll_wrapped(int so, int bot, int pad) {
     const int W = text_cols();
     E.col_offset = 0;
     const RowPos cur{E.cy, seg_of(wrap_starts(E.cy, W), g_crx)};
-    RowPos top{std::clamp(E.row_offset, 0, E.num_rows() - 1), E.row_sub};
+    RowPos top{fs().head_of(std::clamp(E.row_offset, 0, E.num_rows() - 1)),
+               E.row_sub};
     top.sub = std::clamp(top.sub, 0, rows_of(top.line, W) - 1);
 
     const RowPos lim = step_up(cur, so, W);  // highest top that keeps `so` rows
@@ -279,16 +312,21 @@ void scroll_wrapped(int so, int bot, int pad) {
 }
 
 void editor_scroll() {
+    fold_snap_cursor();  // the cursor never rests inside a closed fold
     E.rx = cx_to_rx(E.buf().pt.line_text(E.cy), E.cx);
     g_crx = cursor_rx();
-    const int total = E.num_rows();
+    // Rows, not lines: a closed fold is one row. Without folds the two agree.
+    const fold::State& F = fs();
+    const int total = F.visible_count(E.num_rows());
     const int so = std::min(opts.scrolloff, (E.term_rows - 1) / 2);
     const int bot = std::min(opts.scrolloff, E.term_rows - 1 - so);
     const int pad = opts.scrolleof ? bot : 0;
-    int off = E.row_offset;
-    if(E.cy < off + so) off = E.cy - so;
-    if(E.cy > off + E.term_rows - 1 - bot) off = E.cy - (E.term_rows - 1 - bot);
-    E.row_offset = std::clamp(off, 0, std::max(0, total + pad - E.term_rows));
+    const int cur = F.visible_row(E.cy);
+    int off = F.visible_row(E.row_offset);
+    if(cur < off + so) off = cur - so;
+    if(cur > off + E.term_rows - 1 - bot) off = cur - (E.term_rows - 1 - bot);
+    off = std::clamp(off, 0, std::max(0, total + pad - E.term_rows));
+    E.row_offset = F.line_at_row(off);
     if(g_crx < E.col_offset) { E.col_offset = g_crx; }
     if(g_crx >= E.col_offset + text_cols()) {
         E.col_offset = g_crx - text_cols() + 1;
@@ -347,17 +385,36 @@ ParenPair find_paren_pair() {
 void editor_draw_rows() {
     g_px = tree_cols();
     const int total = E.num_rows();
-    const int last = std::min(total, E.row_offset + E.term_rows);  // exclusive
-    size_t base = 0;
-    std::string view_text;
-    if(E.row_offset < last) {
-        base = E.buf().pt.line_start(static_cast<size_t>(E.row_offset));
-        const size_t end = E.buf().pt.line_end(static_cast<size_t>(last - 1));
-        view_text = E.buf().pt.text(base, end - base);
+    const fold::State& F = fs();
+    // Lines are looked up one by one: with closed folds the lines on screen
+    // are not contiguous.
+    const int first = std::min(F.head_of(E.row_offset), std::max(total - 1, 0));
+    size_t base = 0, view_end = 0;
+    if(first < total) {
+        const int last_line = std::min(
+            total - 1, F.line_at_row(F.visible_row(first) + E.term_rows - 1));
+        base = E.buf().pt.line_start(static_cast<size_t>(first));
+        view_end = E.buf().pt.line_end(static_cast<size_t>(last_line));
+        // A closed fold draws its hidden closing line in the summary. Those
+        // bytes can sit past the last visible line, so widen rainbow prep to
+        // cover them or the closer loses its delimiter color.
+        if(opts.rainbow && fold_config().text_closer) {
+            const auto& spans = F.spans();
+            const auto begin =
+                std::ranges::lower_bound(spans, first, {}, &fold::Span::head);
+            for(auto it = begin; it != spans.end() && it->head <= last_line;
+                ++it) {
+                if(F.hidden(it->head) || it->end < 0 || it->end >= total)
+                    continue;
+                view_end = std::max(
+                    view_end,
+                    E.buf().pt.line_end(static_cast<size_t>(it->end)));
+            }
+        }
     }
-    E.buf().syntax.rainbow_prepare(base, base + view_text.size());
+    E.buf().syntax.rainbow_prepare(base, view_end);
     const int g = gutter();
-    size_t pos = 0;
+    std::string row_text;
     const bool vis = E.mode == VISUAL || (E.mode == COMMAND && E.cmd_sel);
     const Range sel = E.mode == VISUAL ? visual_range()
                       : vis            ? Range{E.cmd_sel_start, E.cmd_sel_end}
@@ -377,11 +434,11 @@ void editor_draw_rows() {
     E.buf().sync_anchors();
     md_buffer_refresh(E.buf());
     const bool wrap = opts.wrap;
-    int wrap_line = E.row_offset;
+    int cur_line = first;  // the file line drawn on this screen row
     int seg = wrap ? E.row_sub : 0;
     std::vector<int> starts;
     for(int y = 0; y < E.term_rows; ++y) {
-        const int file_row = wrap ? wrap_line : y + E.row_offset;
+        const int file_row = cur_line;
         if(E.buf().pt.size() == 0 && y == 0) {
             const std::string welcome =
                 std::format("Winter Editor -- version {}", WINTER_VERSION);
@@ -392,16 +449,17 @@ void editor_draw_rows() {
         } else if(file_row >= total) {
             put_text(0, y, "~", E.term_cols, theme_ui("ui.tilde", Style{}));
         } else {
-            const size_t nl = view_text.find('\n', pos);
-            const size_t len =
-                (nl == std::string::npos ? view_text.size() : nl) - pos;
-            const std::string_view real(view_text.data() + pos, len);
-            const auto& real_spans = E.buf().syntax.line_spans(base + pos, len);
+            const size_t ls =
+                E.buf().pt.line_start(static_cast<size_t>(file_row));
+            row_text = E.buf().pt.line_text(static_cast<size_t>(file_row));
+            const size_t len = row_text.size();
+            const std::string_view real(row_text);
+            const auto& real_spans = E.buf().syntax.line_spans(ls, len);
             const bool pvw = subst_preview_line(file_row, real, pv);
-            const bool mdv = !pvw && md_line_view(file_row, real, text_cols(), pv);
+            const bool mdv =
+                !pvw && md_line_view(file_row, real, text_cols(), pv);
             const bool xf = pvw || mdv;  // `line` is a transformed view
-            const std::string_view line =
-                xf ? std::string_view(pv.text) : real;
+            const std::string_view line = xf ? std::string_view(pv.text) : real;
             const size_t dlen = line.size();  // length of what gets drawn
             if(xf) {
                 pv_syn.clear();
@@ -429,7 +487,6 @@ void editor_draw_rows() {
                         : theme_ui("ui.linenr", Style{.attrs = ATTR_DIM});
                 put_text(0, y, gutter_label(file_row, E.cy, g), g, gst);
             }
-            const size_t ls = base + pos;
             size_t lo = 0, hi = 0;
             if(vis && sel.end > ls && sel.start <= ls + len) {
                 lo = std::max(sel.start, ls) - ls;
@@ -471,7 +528,8 @@ void editor_draw_rows() {
                 if(pp.ok)
                     for(const size_t o : {pp.a, pp.b})
                         if(o >= ls && o < ls + len)
-                            view_decos.push_back({o - ls, o - ls + 1, 20, mp_st});
+                            view_decos.push_back(
+                                {o - ls, o - ls + 1, 20, mp_st});
                 snippet_spans(ls, len, view_decos);
                 E.buf().decos.spans_on_line(ls, len, view_decos);
                 for(const LineSpan& v : view_decos)
@@ -501,7 +559,8 @@ void editor_draw_rows() {
                     if(Cell& c = scr.at(x, y); c == Cell{}) c.style = cl_st;
             if(!pvw)  // whole-line bands (markdown headings, code blocks)
                 if(const auto f = E.buf().decos.fill_on_line(ls, len))
-                    for(int x = g_px + g; x < g_px + x0 + cols && x < scr.width();
+                    for(int x = g_px + g;
+                        x < g_px + x0 + cols && x < scr.width();
                         ++x)
                         if(Cell& c = scr.at(x, y); c == Cell{}) c.style = *f;
             if(pre > 0) {  // Helix-style prefix; keep the row tint underneath
@@ -529,13 +588,67 @@ void editor_draw_rows() {
                         eols.push_back({kPrioDiag - w->severity, &diag_vt});
                     }
                 E.buf().decos.eol_on_line(ls, len, eols);
-                put_eols(y, line, x0, eols, s0);
+                VirtText fold_vt;
+                std::vector<VirtText> closer_vts;
+                if(const fold::Span* sp = F.span_at(file_row);
+                   sp && sp->head == file_row) {
+                    // brighter while the cursor is on the fold line
+                    const Style fst =
+                        file_row == E.cy
+                            ? theme_ui(
+                                  "ui.fold.cursor",
+                                  Style{.fg = 0xa6adc8, .attrs = ATTR_ITALIC})
+                            : theme_ui(
+                                  "ui.fold",
+                                  Style{.fg = 0x6c7086, .attrs = ATTR_ITALIC});
+                    fold_vt = {
+                        fold_text(
+                            sp->head, sp->end, opts.nerdicons ? "\uf141" : "⋯"),
+                        fst};
+                    const std::string closer = fold_closer(sp->head, sp->end);
+                    // first, next to the head; the closer follows one space on
+                    eols.push_back(
+                        {INT_MAX, &fold_vt, closer.empty() ? 0 : 1});
+                    if(!closer.empty()) {
+                        // Draw the hidden closer with the syntax (and rainbow)
+                        // style of the line it actually comes from.
+                        const size_t ls_end = E.buf().pt.line_start(
+                            static_cast<size_t>(sp->end));
+                        const std::string ct =
+                            E.buf().pt.line_text(static_cast<size_t>(sp->end));
+                        const auto& cspans =
+                            E.buf().syntax.line_spans(ls_end, ct.size());
+                        const size_t off = ct.find_first_not_of(" \t");
+                        if(off != std::string::npos) {
+                            closer_vts.reserve(ct.size() - off);
+                            for(size_t p = off; p < ct.size();) {
+                                const Style st = style_at(cspans, p);
+                                size_t q = p + 1;
+                                while(q < ct.size() &&
+                                      style_at(cspans, q) == st)
+                                    ++q;
+                                closer_vts.push_back({ct.substr(p, q - p), st});
+                                p = q;
+                            }
+                            for(VirtText& vt : closer_vts)
+                                eols.push_back({INT_MAX, &vt, 0});
+                        }
+                    }
+                }
+                put_eols(y, line, g, eols, s0);
+                // End-of-line text is drawn after the cursorline tint and
+                // replaces those cells, so carry the tint over to it
+                if(cl_on && file_row == E.cy && cl_st.bg != 0xFFFFFFFF)
+                    for(int x = g_px + g;
+                        x < g_px + g + cols && x < scr.width();
+                        ++x)
+                        if(Cell& c = scr.at(x, y); c.style.bg == 0xFFFFFFFF)
+                            c.style.bg = cl_st.bg;
             }
             if(++seg >= nseg) {
                 seg = 0;
-                ++wrap_line;
+                cur_line = F.next_visible(cur_line);
                 starts.clear();
-                pos += len + 1;
             }
         }
     }
@@ -549,7 +662,9 @@ struct ScreenPos {
 
 ScreenPos cursor_screen() {
     const int base = tree_cols() + gutter();
-    if(!opts.wrap) return {base + g_crx - E.col_offset, E.cy - E.row_offset};
+    if(!opts.wrap)
+        return {base + g_crx - E.col_offset,
+                fs().visible_row(E.cy) - fs().visible_row(E.row_offset)};
     const int W = text_cols();
     const auto st = wrap_starts(E.cy, W);
     const int cs = seg_of(st, g_crx);
@@ -568,8 +683,9 @@ void editor_draw_tree() {
         const TreeLine& l = lines[static_cast<size_t>(y)];
         const Style sel =
             theme_ui("ui.tree.select", Style{.attrs = ATTR_REVERSE});
-        const Style vsel = theme_ui(
-            "ui.tree.visual", theme_ui("ui.visual", Style{.attrs = ATTR_REVERSE}));
+        const Style vsel =
+            theme_ui("ui.tree.visual",
+                     theme_ui("ui.visual", Style{.attrs = ATTR_REVERSE}));
         const Style fill = l.selected ? sel : l.visual ? vsel : Style{};
         for(int x = 0; x < w; ++x) scr.at(x, y) = Cell{U' ', 1, fill};
         int x = 0;
@@ -744,6 +860,11 @@ void editor_refresh_screen() {
     lsp_sync_tick();
     E.buf().sync_anchors();
     emit_change_events();
+    // Ranges are only shifted while typing; recompute once it is over, and
+    // only when something is closed (nothing else needs them).
+    if(E.mode != INSERT && E.buf().folds.stale &&
+       !E.buf().folds.anchors().empty())
+        fold_ensure(E.buf());
     editor_scroll();
     overlay_tick();
     scr.clear();

@@ -1,5 +1,6 @@
 #include "options.hpp"
 #include "editor.hpp"
+#include "fold_buf.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -39,6 +40,9 @@ Opt kTable[] = {
     {"diag_undercurl", "", Kind::Bool, &opts.diag_undercurl, 0, 1},
     {"diag_severity", "", Kind::Int, &opts.diag_severity, 1, 4},
     {"scrolloff", "so", Kind::Int, &opts.scrolloff, 0, 999},
+    {"foldminlines", "fml", Kind::Int, &fold_config().minlines, 1, 100},
+    {"foldlevelstart", "fls", Kind::Int, &fold_config().levelstart, -1, 99},
+    {"foldcloser", "", Kind::Int, &fold_config().text_closer, 0, 1},
     {"scrolleof", "", Kind::Bool, &opts.scrolleof, 0, 1},
     {"history", "hi", Kind::Int, &opts.history, 0, 10000},
     {"remember_cursor", "", Kind::Bool, &opts.remember_cursor, 0, 1},
@@ -308,7 +312,8 @@ bool opt_et() {
     return opts.expand_tab;
 }
 
-OptResult set_option_local(Buffer& b, std::string_view name, std::string_view value) {
+OptResult set_option_local(Buffer& b, std::string_view name,
+                           std::string_view value) {
     const Opt* o = find(name);
     if(!o) return OptResult::Unknown;
     if(o->ptr == &opts.expand_tab) {
@@ -328,11 +333,13 @@ OptResult set_option_local(Buffer& b, std::string_view name, std::string_view va
        n > o->hi)
         return OptResult::BadValue;
     *slot = n;
-    b.indent.on_edit(TextEdit{.reset = true});  // cached indent state used the old width
+    b.indent.on_edit(
+        TextEdit{.reset = true});  // cached indent state used the old width
     return OptResult::Ok;
 }
 
-std::optional<std::string> get_option_local(const Buffer& b, std::string_view name) {
+std::optional<std::string> get_option_local(const Buffer& b,
+                                            std::string_view name) {
     const Opt* o = find(name);
     if(!o) return std::nullopt;
     if(o->ptr == &opts.tab_stop && b.bo.tab_stop)

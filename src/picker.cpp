@@ -15,6 +15,7 @@
 #include "command.hpp"
 #include "core.hpp"
 #include "jumplist.hpp"
+#include "fold_buf.hpp"
 #include "editor.hpp"
 #include "fuzzy.hpp"
 #include "glyphs.hpp"
@@ -256,6 +257,7 @@ void open_at(const std::string& path, int line, int col) {
     while(off > ls && (static_cast<unsigned char>(pt.text(off, 1)[0]) & 0xC0) == 0x80)
         --off;
     set_cursor_offset(off);
+    fold_reveal(kFoldJump);
 }
 
 bool have(const char* exe) {

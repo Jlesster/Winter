@@ -1044,3 +1044,96 @@ std::optional<std::vector<Span>> syntax_highlight(std::string_view lang,
     }
     return it->second->highlight_text(code);
 }
+
+// ---- folds -----------------------------------------------------------------
+
+namespace {
+// Body nodes per language. Names a grammar doesn't have are skipped (checked
+// against the language), so one list can serve several grammar versions.
+struct FoldKinds {
+    std::string_view lang, kinds;
+};
+const FoldKinds kFoldKinds[] = {
+    {"c", "compound_statement field_declaration_list enumerator_list "
+          "initializer_list"},
+    {"cpp", "compound_statement field_declaration_list enumerator_list "
+            "initializer_list declaration_list"},
+    {"rust", "block declaration_list field_declaration_list enum_variant_list "
+             "match_block field_initializer_list"},
+    {"java", "block class_body interface_body enum_body switch_block "
+             "constructor_body annotation_type_body array_initializer"},
+    {"kotlin", "function_body class_body enum_class_body "
+               "control_structure_body lambda_literal"},
+    {"lua", "block table_constructor"},
+    {"python", "block"},
+    {"go", "block field_declaration_list literal_value"},
+    {"javascript", "statement_block class_body switch_body object array"},
+    {"typescript", "statement_block class_body switch_body object array "
+                   "interface_body enum_body object_type"},
+    {"tsx", "statement_block class_body switch_body object array "
+            "interface_body enum_body object_type"},
+    {"c_sharp", "block declaration_list switch_body "
+                "enum_member_declaration_list initializer_expression"},
+    {"qml", "ui_object_initializer statement_block"},
+    {"json", "object array"},
+};
+}  // namespace
+
+bool Syntax::fold_ranges(std::vector<fold::Raw>& out,
+                         const std::string& override_src) const {
+    if(!_tree || !_pt) return false;
+    const TSLanguage* lang = ts_tree_language(_tree);
+    std::string src = override_src;
+    if(src.empty()) {
+        std::string alts;
+        for(const FoldKinds& k : kFoldKinds) {
+            if(k.lang != _name) continue;
+            size_t i = 0;
+            while(i < k.kinds.size()) {
+                size_t j = k.kinds.find(' ', i);
+                if(j == std::string_view::npos) j = k.kinds.size();
+                const std::string_view n = k.kinds.substr(i, j - i);
+                if(!n.empty() &&
+                   ts_language_symbol_for_name(
+                       lang, n.data(), static_cast<uint32_t>(n.size()), true))
+                    alts += std::format(" ({})", n);
+                i = j + 1;
+            }
+        }
+        if(alts.empty()) return true;
+        src = std::format("[{} ] @fold", alts);
+    }
+    uint32_t off = 0;
+    TSQueryError et{};
+    TSQuery* q = ts_query_new(
+        lang, src.data(), static_cast<uint32_t>(src.size()), &off, &et);
+    if(!q) return true;
+    TSQueryCursor* qc = ts_query_cursor_new();
+    ts_query_cursor_exec(qc, q, ts_tree_root_node(_tree));
+    TSQueryMatch m;
+    while(ts_query_cursor_next_match(qc, &m)) {
+        for(uint16_t i = 0; i < m.capture_count; ++i) {
+            uint32_t n = 0;
+            const char* c = ts_query_capture_name_for_id(q, m.captures[i].index, &n);
+            if(std::string_view(c, n).substr(0, 4) != "fold") continue;
+            const TSNode node = m.captures[i].node;
+            const TSPoint sp = ts_node_start_point(node);
+            const TSPoint ep = ts_node_end_point(node);
+            int head = static_cast<int>(sp.row);
+            int end = static_cast<int>(ep.row);
+            if(ep.column == 0 && end > head) --end;  // ends with its newline
+            if(head > 0) {  // the node starts its line: fold under the line above
+                const size_t ls = _pt->line_start(sp.row);
+                const size_t sb = ts_node_start_byte(node);
+                if(sb >= ls) {
+                    const std::string pre = _pt->text(ls, sb - ls);
+                    if(pre.find_first_not_of(" \t") == std::string::npos) --head;
+                }
+            }
+            if(end > head) out.push_back({head, end});
+        }
+    }
+    ts_query_cursor_delete(qc);
+    ts_query_delete(q);
+    return true;
+}

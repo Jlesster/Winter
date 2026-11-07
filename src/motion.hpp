@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <string_view>
 
+#include "fold.hpp"
 #include "piece.hpp"
 
 // How an operator (d/c/y, next step) treats the span between the cursor and
@@ -19,6 +20,15 @@ struct Target {
 // Every motion is a pure function: (text, where I am, count) -> target.
 // count == 0 means "no count typed" (G and gg care about the difference).
 namespace motion {
+
+// Fold awareness without making motions depend on the editor: while a probe
+// is set, line-wise stepping (j k, counts, dd) walks visible lines. The probe
+// returns the fold state of the buffer owning the table, or null.
+using FoldProbe = const fold::State* (*)(const PieceTable&);
+void set_fold_probe(FoldProbe);
+// `n` visible lines down / up from `line`; lands on a closed fold's head.
+size_t lines_down(const PieceTable&, size_t line, int n);
+size_t lines_up(const PieceTable&, size_t line, int n);
 
 using Fn =
     std::function<Target(const PieceTable&, size_t, int, std::string_view arg)>;
