@@ -17,6 +17,7 @@
 #include "editor.hpp"
 #include "indent.hpp"
 #include "keys.hpp"
+#include "multicursor.hpp"
 #include "piece.hpp"
 #include "theme.hpp"
 #include "virt.hpp"
@@ -36,6 +37,41 @@ struct Session {
 };
 
 std::optional<Session> S;
+
+// The tab stops of the other cursors: one map per cursor, stop -> its range
+// (the first one, mirrors are not followed).
+std::vector<std::map<int, Range>> g_peers;
+PieceTable* g_peer_pt = nullptr;
+int g_peer_stop = -1;  // the stop snippet_place_peers puts them on
+
+size_t PP(size_t id) { return *g_peer_pt->anchor_pos(id); }
+
+void normalize_peer(Range& r, bool active) {
+    const bool inside = active || PP(r.s) == PP(r.e);
+    g_peer_pt->anchor_set_gravity(r.s, inside ? Gravity::Left : Gravity::Right);
+    g_peer_pt->anchor_set_gravity(r.e, inside ? Gravity::Right : Gravity::Left);
+}
+
+void clear_peers() {
+    for(auto& m : g_peers)
+        for(auto& [n, r] : m) {
+            g_peer_pt->anchor_remove(r.s);
+            g_peer_pt->anchor_remove(r.e);
+        }
+    g_peers.clear();
+    g_peer_stop = -1;
+}
+
+void place_peers(int idx) {
+    if(g_peers.empty()) return;
+    std::vector<size_t> offs;
+    for(auto& m : g_peers) {
+        for(auto& [n, r] : m) normalize_peer(r, n == idx);
+        if(const auto it = m.find(idx); it != m.end())
+            offs.push_back(PP(it->second.e));
+    }
+    mc_set_extras(offs);
+}
 std::map<std::string, std::string> g_snips;
 
 size_t P(size_t id) { return *S->pt->anchor_pos(id); }
@@ -216,7 +252,7 @@ Parsed parse(std::string_view b, std::string_view base,
     return Parser(b, base, unit).run();
 }
 
-void go_to(int idx) {
+void go_to(int idx, bool peers = true) {
     S->cur = idx;
     for(auto& [n, v] : S->stops)
         for(size_t i = 0; i < v.size(); ++i)
@@ -225,6 +261,7 @@ void go_to(int idx) {
     set_cursor_offset(P(r.e));
     S->sel = P(r.s) != P(r.e);
     S->last = text_of(r);
+    if(peers) place_peers(idx);
 }
 
 void rewrite_mirror(Range& r, const std::string& text) {
@@ -279,9 +316,20 @@ void snippet_spans(size_t ls, size_t len, std::vector<LineSpan>& out) {
                            3,
                            n == S->cur ? live : idle});
         }
+    if(g_peer_pt != &E.buf().pt) return;
+    for(const auto& m : g_peers)
+        for(const auto& [n, r] : m) {
+            const size_t s = PP(r.s), e = PP(r.e);
+            if(e <= s || e <= ls || s >= ls + len) continue;
+            out.push_back({std::max(s, ls) - ls,
+                           std::min(e, ls + len) - ls,
+                           3,
+                           n == S->cur ? live : idle});
+        }
 }
 
-void snippet_end() {
+namespace {
+void end_session() {
     if(!S) return;
     for(auto& [n, v] : S->stops)
         for(Range& r : v) {
@@ -290,10 +338,17 @@ void snippet_end() {
         }
     S.reset();
 }
+}  // namespace
+
+void snippet_end() {
+    clear_peers();
+    end_session();
+}
 
 bool snippet_expand(std::string_view body) {
     if(E.mode != EditorMode::INSERT) return false;
-    snippet_end();
+    end_session();  // not the peers: they may be in already
+    g_peer_stop = -1;
     PieceTable& pt = E.buf().pt;
     const std::string line = pt.line_text(E.cy);
     std::string_view base = indent::leading_ws(line);
@@ -325,9 +380,42 @@ bool snippet_expand(std::string_view body) {
             S->last.clear();
             sync(true);
         }
-    go_to(S->order.front());
-    if(S->order.front() == 0) snippet_end();
+    go_to(S->order.front(), false);
+    g_peer_stop = S->order.front();
+    if(S->order.front() == 0) end_session();
     return true;
+}
+
+void snippet_peer(std::string_view body) {
+    if(E.mode != EditorMode::INSERT) return;
+    PieceTable& pt = E.buf().pt;
+    if(g_peer_pt && g_peer_pt != &pt) clear_peers();
+    g_peer_pt = &pt;
+    const std::string line = pt.line_text(E.cy);
+    std::string_view base = indent::leading_ws(line);
+    base = base.substr(0, std::min(base.size(), static_cast<size_t>(E.cx)));
+    const Parsed p = parse(body, base, indent::unit());
+    const size_t at = cursor_offset();
+    PieceTable::Group g(pt);
+    pt.insert(at, p.text);
+    set_cursor_offset(at + p.text.size());
+    if(p.ph.empty()) return;
+    std::map<int, Range> m;
+    for(const auto& [n, s, e] : p.ph)
+        if(!m.contains(n))
+            m[n] = {pt.anchor_add(at + s, Gravity::Right),
+                    pt.anchor_add(at + e, Gravity::Left)};
+    if(!m.contains(0)) {
+        const size_t end = at + p.text.size();
+        m[0] = {pt.anchor_add(end, Gravity::Right),
+                pt.anchor_add(end, Gravity::Left)};
+    }
+    g_peers.push_back(std::move(m));
+}
+
+void snippet_place_peers() {
+    if(g_peer_stop >= 0) place_peers(g_peer_stop);
+    if(!S) clear_peers();
 }
 
 void snippet_next() {
@@ -346,7 +434,8 @@ bool snippet_pre_key(int c) {
     if(!S || !S->sel) return false;
     const bool typed = (c >= 32 && c < 127) || (c >= 0x80 && c < 0x100);
     const bool del = c == BACKSPACE || c == DELETE || c == CTRL_BACKSPACE ||
-                     c == CTRL_KEY('h') || c == CTRL_KEY('w');
+                     c == DELETE_WORD || c == CTRL_KEY('h') ||
+                     c == CTRL_KEY('w');
     if(!typed && !del) {
         S->sel = false;
         return false;
@@ -356,6 +445,11 @@ bool snippet_pre_key(int c) {
     S->sel = false;
     S->pt->remove(s, n);
     set_cursor_offset(s);
+    for(auto& m : g_peers)
+        if(const auto it = m.find(S->cur); it != m.end()) {
+            const size_t ps = PP(it->second.s), pn = PP(it->second.e) - ps;
+            if(pn) g_peer_pt->remove(ps, pn);
+        }
     return del;
 }
 

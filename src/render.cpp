@@ -12,17 +12,22 @@
 #include <vector>
 
 #include "buffer.hpp"
+#include "buflist.hpp"
 #include "columns.hpp"
 #include "command.hpp"
 #include "diag.hpp"
+#include "dock.hpp"
 #include "editor.hpp"
 #include "events.hpp"
 #include "fold_buf.hpp"
 #include "glyphs.hpp"
 #include "gutter.hpp"
 #include "lsp_sync.hpp"
+#include "marks.hpp"
+#include "multicursor.hpp"
 #include "normal.hpp"
 #include "options.hpp"
+#include "output.hpp"
 #include "overlay.hpp"
 #include "prompt.hpp"
 #include "search.hpp"
@@ -33,27 +38,55 @@
 #include "tree.hpp"
 #include "utf8.hpp"
 #include "virt.hpp"
+#include "window_ed.hpp"
 
 namespace {
 
 Screen scr;
 int g_px = 0;
+bool g_win_active = true;  // drawing the focused window (cursorline, selection)
 
 const fold::State& fs() { return E.buf().folds; }
+
+// The rest of the cluster s[at, end) after its first code point, interned.
+uint32_t cluster_tail(std::string_view s, size_t at, size_t end) {
+    const size_t first = utf8_decode(s, at).len;
+    if(at + first >= end) return 0;
+    std::u32string t;
+    for(size_t k = at + first; k < end;) {
+        const Decoded d = utf8_decode(s, k);
+        t += d.cp;
+        k += d.len;
+    }
+    return gr_tail_intern(t);
+}
+
+// A zero-width cluster (ZWSP, a stray format char) rides on the cell before it.
+void attach_to(Cell& c, std::string_view s, size_t at, size_t end) {
+    std::u32string t(gr_tail_get(c.tail));
+    for(size_t k = at; k < end;) {
+        const Decoded d = utf8_decode(s, k);
+        t += d.cp;
+        k += d.len;
+    }
+    c.tail = gr_tail_intern(t);
+}
 
 int put_text(int x, int y, std::string_view s, int limit, Style st) {
     x += g_px;
     limit += g_px;
     for(size_t i = 0; i < s.size();) {
-        const Decoded d = utf8_decode(s, i);
-        i += d.len;
-        const int w = cell_width(d.cp, 0);
+        const size_t at = i;
+        i = gr_next(s, at);
+        const Decoded d = utf8_decode(s, at);
+        const int w = cluster_width(s, at, i, 0);
         if(w == 0) {
-            if(x > 0) scr.at(x - 1, y).mark = d.cp;
+            if(x > 0) attach_to(scr.at(x - 1, y), s, at, i);
             continue;
         }
         if(x + w > limit) break;
-        scr.at(x, y) = Cell{d.cp, static_cast<uint8_t>(w), st};
+        scr.at(x, y) =
+            Cell{d.cp, static_cast<uint8_t>(w), st, 0, cluster_tail(s, at, i)};
         if(w == 2) scr.at(x + 1, y) = Cell{U'\0', 0, st};
         x += w;
     }
@@ -140,7 +173,7 @@ void put_line(int y, std::string_view line, int col_off, int cols, int x0,
     for(size_t i = 0; i < line.size() && rx < end;) {
         const size_t at = i;
         const Decoded d = utf8_decode(line, i);
-        i += d.len;
+        i = gr_next(line, at);  // one grapheme cluster per iteration
         while(si < spans.size() && spans[si].end <= at) ++si;
         Style st = (si < spans.size() && spans[si].start <= at) ? spans[si].st
                                                                 : Style{};
@@ -148,9 +181,9 @@ void put_line(int y, std::string_view line, int col_off, int cols, int x0,
         if(ri < runs.size() && runs[ri].lo <= at) style_patch(st, runs[ri].st);
         if(at >= sel_lo && at < sel_hi) style_patch(st, vis);
         const char32_t cp = d.cp;
-        const int w = cell_width(cp, rx);
+        const int w = cluster_width(line, at, i, rx);
         if(w == 0) {
-            if(last >= 0) scr.at(last, y).mark = cp;
+            if(last >= 0) attach_to(scr.at(last, y), line, at, i);
             continue;
         }
         const int next = rx + w;
@@ -166,7 +199,11 @@ void put_line(int y, std::string_view line, int col_off, int cols, int x0,
                 scr.at(x, y) = Cell{static_cast<char32_t>(shown), 1, ctl};
                 last = -1;
             } else {
-                scr.at(x, y) = Cell{cp, static_cast<uint8_t>(w), st};
+                scr.at(x, y) = Cell{cp,
+                                    static_cast<uint8_t>(w),
+                                    st,
+                                    0,
+                                    cluster_tail(line, at, i)};
                 if(w == 2) scr.at(x + 1, y) = Cell{u'\0', 0, st};
                 last = x;
             }
@@ -226,8 +263,9 @@ std::vector<int> wrap_starts(int line, int W) {
     int rx = 0, s = 0;
     for(size_t i = 0; i < text.size();) {
         const Decoded d = utf8_decode(text, i);
-        i += d.len;
-        const int w = cell_width(d.cp, rx);
+        const size_t at = i;
+        i = gr_next(text, at);
+        const int w = cluster_width(text, at, i, rx);
         if(w == 0) continue;
         if(d.cp == U'\t') {
             while(rx + w > s + seg_width(st.size() - 1))
@@ -293,7 +331,7 @@ int rows_between(RowPos a, RowPos b, int W, int cap = INT_MAX) {
 
 }  // namespace
 
-void scroll_wrapped(int so, int bot, int pad) {
+static void scroll_wrapped(int so, int bot, int pad) {
     const int W = text_cols();
     E.col_offset = 0;
     const RowPos cur{E.cy, seg_of(wrap_starts(E.cy, W), g_crx)};
@@ -321,6 +359,11 @@ void editor_scroll() {
     const int so = std::min(opts.scrolloff, (E.term_rows - 1) / 2);
     const int bot = std::min(opts.scrolloff, E.term_rows - 1 - so);
     const int pad = opts.scrolleof ? bot : 0;
+    if(opts.wrap) {
+        scroll_wrapped(so, bot, pad);
+        return;
+    }
+    E.row_sub = 0;
     const int cur = F.visible_row(E.cy);
     int off = F.visible_row(E.row_offset);
     if(cur < off + so) off = cur - so;
@@ -383,7 +426,7 @@ ParenPair find_paren_pair() {
 }  // namespace
 
 void editor_draw_rows() {
-    g_px = tree_cols();
+    g_px = 0;  // the window's viewport already carries its offset
     const int total = E.num_rows();
     const fold::State& F = fs();
     // Lines are looked up one by one: with closed folds the lines on screen
@@ -406,14 +449,15 @@ void editor_draw_rows() {
                 ++it) {
                 if(F.hidden(it->head) || it->end < 0 || it->end >= total)
                     continue;
-                view_end = std::max(
-                    view_end,
-                    E.buf().pt.line_end(static_cast<size_t>(it->end)));
+                view_end =
+                    std::max(view_end,
+                             E.buf().pt.line_end(static_cast<size_t>(it->end)));
             }
         }
     }
     E.buf().syntax.rainbow_prepare(base, view_end);
     const int g = gutter();
+    const auto mark_rows = mark_lines(E.buf().id);
     std::string row_text;
     const bool vis = E.mode == VISUAL || (E.mode == COMMAND && E.cmd_sel);
     const Range sel = E.mode == VISUAL ? visual_range()
@@ -421,7 +465,7 @@ void editor_draw_rows() {
                                        : Range{};
     const bool dg = opts.diagnostics;
     const ParenPair pp = find_paren_pair();
-    const bool cl_on = opts.cursorline && !vis;
+    const bool cl_on = opts.cursorline && !vis && g_win_active;
     const Style cl_st = theme_ui("ui.cursorline", Style{.bg = 0x313244});
     const Style cc_st = theme_ui("ui.colorcolumn", Style{.bg = 0x45475a});
     const Style tr_st = theme_ui("ui.trailing", Style{.bg = 0xf38ba8});
@@ -486,6 +530,10 @@ void editor_draw_rows() {
                                    Style{.attrs = ATTR_BOLD})
                         : theme_ui("ui.linenr", Style{.attrs = ATTR_DIM});
                 put_text(0, y, gutter_label(file_row, E.cy, g), g, gst);
+                if(const auto mk = mark_rows.find(static_cast<size_t>(file_row));
+                   mk != mark_rows.end())  // mark letter over the gutter's last column
+                    put_text(g - 1, y, std::string(1, mk->second), 1,
+                             theme_ui("ui.mark", Style{.attrs = ATTR_BOLD}));
             }
             size_t lo = 0, hi = 0;
             if(vis && sel.end > ls && sel.start <= ls + len) {
@@ -607,13 +655,12 @@ void editor_draw_rows() {
                         fst};
                     const std::string closer = fold_closer(sp->head, sp->end);
                     // first, next to the head; the closer follows one space on
-                    eols.push_back(
-                        {INT_MAX, &fold_vt, closer.empty() ? 0 : 1});
+                    eols.push_back({INT_MAX, &fold_vt, closer.empty() ? 0 : 1});
                     if(!closer.empty()) {
                         // Draw the hidden closer with the syntax (and rainbow)
                         // style of the line it actually comes from.
-                        const size_t ls_end = E.buf().pt.line_start(
-                            static_cast<size_t>(sp->end));
+                        const size_t ls_end =
+                            E.buf().pt.line_start(static_cast<size_t>(sp->end));
                         const std::string ct =
                             E.buf().pt.line_text(static_cast<size_t>(sp->end));
                         const auto& cspans =
@@ -635,12 +682,12 @@ void editor_draw_rows() {
                         }
                     }
                 }
-                put_eols(y, line, g, eols, s0);
+                put_eols(y, line, x0, eols, s0);
                 // End-of-line text is drawn after the cursorline tint and
                 // replaces those cells, so carry the tint over to it
                 if(cl_on && file_row == E.cy && cl_st.bg != 0xFFFFFFFF)
                     for(int x = g_px + g;
-                        x < g_px + g + cols && x < scr.width();
+                        x < g_px + x0 + cols && x < scr.width();
                         ++x)
                         if(Cell& c = scr.at(x, y); c.style.bg == 0xFFFFFFFF)
                             c.style.bg = cl_st.bg;
@@ -660,17 +707,70 @@ struct ScreenPos {
     int x, y;
 };
 
+// The extra cursors (and their visual selections) as styled cells.
+void draw_extra_cursors() {
+    if(!mc_active()) return;
+    const win::Win* fw = win::focus();
+    const int ox = fw ? fw->rect.x : tree_cols();
+    const int oy = fw ? fw->rect.y : 0;
+    const int rows = fw ? fw->rect.h - 1 : win_area_rows();  // minus status row
+    const int base = ox + gutter();
+    const int W = text_cols();
+    const Style cur = theme_ui("ui.multicursor", Style{.attrs = ATTR_REVERSE});
+    const Style sel = theme_ui("ui.multicursor.select",
+                               theme_ui("ui.visual", Style{.bg = 0x45475a}));
+    const PieceTable& pt = E.buf().pt;
+
+    const auto paint = [&](size_t off, const Style& st) {
+        const LineCol lc = pt.to_linecol(std::min(off, pt.size()));
+        const int line = static_cast<int>(lc.line);
+        if(fs().head_of(line) != line) return;  // inside a closed fold
+        const int rx =
+            cx_to_rx(pt.line_text(lc.line), static_cast<int>(lc.col));
+        int x, y;
+        if(!opts.wrap) {
+            x = base + rx - E.col_offset;
+            y = oy + fs().visible_row(line) - fs().visible_row(E.row_offset);
+        } else {
+            const auto starts = wrap_starts(line, W);
+            const int seg = seg_of(starts, rx);
+            if(line < E.row_offset || (line == E.row_offset && seg < E.row_sub))
+                return;
+            x = base + (seg > 0 ? wrap_prefix_cols() : 0) + rx - starts[seg];
+            y = oy + rows_between(
+                         {E.row_offset, E.row_sub}, {line, seg}, W, rows + 1);
+        }
+        if(y < oy || y >= oy + rows || x < base || x >= scr.width()) return;
+        style_patch(scr.at(x, y).style, st);
+    };
+
+    for(const McMark& m : mc_marks()) {
+        if(E.mode == VISUAL && m.anchor != m.pos) {
+            const size_t lo = std::min(m.pos, m.anchor);
+            const size_t hi = std::max(m.pos, m.anchor);
+            int budget = 4000;  // a huge selection is not worth painting
+            for(size_t o = lo; o < hi && budget-- > 0;
+                o += std::max<size_t>(utf8_seq_len(pt.at(o)), 1))
+                paint(o, sel);
+        }
+        paint(m.pos, cur);
+    }
+}
+
 ScreenPos cursor_screen() {
-    const int base = tree_cols() + gutter();
+    const win::Win* fw = win::focus();
+    const int ox = fw ? fw->rect.x : tree_cols();
+    const int oy = fw ? fw->rect.y : 0;
+    const int base = ox + gutter();
     if(!opts.wrap)
         return {base + g_crx - E.col_offset,
-                fs().visible_row(E.cy) - fs().visible_row(E.row_offset)};
+                oy + fs().visible_row(E.cy) - fs().visible_row(E.row_offset)};
     const int W = text_cols();
     const auto st = wrap_starts(E.cy, W);
     const int cs = seg_of(st, g_crx);
     const int pre = cs > 0 ? wrap_prefix_cols() : 0;
     return {base + pre + g_crx - st[cs],
-            rows_between({E.row_offset, E.row_sub}, {E.cy, cs}, W)};
+            oy + rows_between({E.row_offset, E.row_sub}, {E.cy, cs}, W)};
 }
 
 }  // namespace
@@ -678,8 +778,9 @@ ScreenPos cursor_screen() {
 void editor_draw_tree() {
     const int w = tree_cols() - 1;
     if(w <= 0) return;
-    const auto& lines = tree_view(E.term_rows);
-    for(int y = 0; y < E.term_rows; ++y) {
+    const int rows = win_area_rows();
+    const auto& lines = tree_view(rows);
+    for(int y = 0; y < rows; ++y) {
         const TreeLine& l = lines[static_cast<size_t>(y)];
         const Style sel =
             theme_ui("ui.tree.select", Style{.attrs = ATTR_REVERSE});
@@ -757,9 +858,58 @@ bool drop_one(std::vector<StatusItem>& l, std::vector<StatusItem>& r) {
 }
 }  // namespace
 
-void editor_draw_status_bar() {
-    const int y = E.term_rows;
+void editor_draw_output() {
+    const int rows = dock_rows();
+    if(rows == 0) return;
+    const int y0 = win_area_rows();
+    const int saved = g_px;
+    g_px = 0;
+    const int w = scr.width();
+    dock_paint(
+        [&](int x, int y, std::string_view s, Style st) {
+            put_text(x, y0 + y, s, w, st);
+        },
+        w,
+        rows);
+    g_px = saved;
+}
+
+// A column between side-by-side windows. Rows that are some window's status
+// bar stay filled with the bar colour, so the bars read as one line.
+void editor_draw_win_seps() {
+    const Style sep =
+        theme_ui("ui.winsep", theme_ui("ui.tree.sep", Style{.fg = 0x585b70}));
     const Style bar = statusline_bar_style();
+    for(const win::Rect& s : win::separators()) {
+        for(int y = s.y; y < s.y + s.h && y < scr.height(); ++y) {
+            bool status_row = false;
+            for(const win::Win* w : win::all())
+                if(w->rect.x + w->rect.w == s.x &&
+                   w->rect.y + w->rect.h - 1 == y)
+                    status_row = true;
+            scr.at(s.x, y) =
+                status_row ? Cell{U' ', 1, bar} : Cell{U'│', 1, sep};
+        }
+    }
+}
+
+// Inside a window's viewport; the bar is the viewport's last row. Only the
+// focused window gets the full statusline, the others a quiet name + position.
+void editor_draw_status_bar(bool active) {
+    const int y = scr.height() - 1;
+    Style bar = statusline_bar_style();
+    if(!active) {
+        bar = theme_ui("ui.statusline.nc", bar);
+        for(int x = 0; x < scr.width(); ++x) scr.at(x, y) = Cell{U' ', 1, bar};
+        const std::string pos = std::format("{}:{} ", E.cy + 1, E.cx + 1);
+        put_text(1, y, buffer_name(E.cur), scr.width(), bar);
+        put_text(std::max(scr.width() - static_cast<int>(pos.size()), 0),
+                 y,
+                 pos,
+                 scr.width(),
+                 bar);
+        return;
+    }
     for(int x = 0; x < scr.width(); ++x) scr.at(x, y) = Cell{U' ', 1, bar};
     const StatusLayout& lay = statusline_layout();
     if(!lay.enabled) return;
@@ -782,7 +932,7 @@ void editor_draw_status_bar() {
 void editor_draw_message_bar() {
     if(!E.status_message.empty() && time(nullptr) - E.status_message_time < 5) {
         put_text(0,
-                 E.term_rows + 1,
+                 editor_message_row(),
                  E.status_message,
                  scr.width(),
                  theme_ui("ui.message", Style{}));
@@ -792,7 +942,7 @@ void editor_draw_message_bar() {
         if(const Diag* w = diag_worst_on_line(
                E.buf().diags, ls, pt.line_end(static_cast<size_t>(E.cy)) - ls))
             put_text(0,
-                     E.term_rows + 1,
+                     editor_message_row(),
                      std::format(
                          "{}: {}", diag_name(w->severity), diag_first_line(*w)),
                      scr.width(),
@@ -855,43 +1005,91 @@ void editor_refresh_screen() {
         scr.invalidate();
     }
     tree_layout(scr.width());
-    E.term_cols = scr.width() - tree_cols();
-    E.buf().syntax.update(E.buf().pt, E.buf().eol);
+    dock_layout(scr.height() - 2);
+    windows_ensure();
+    {
+        const int area = std::max(scr.height() - 1 - dock_rows(), 2);
+        win_set_area_rows(area);
+        win::layout(
+            {tree_cols(), 0, std::max(scr.width() - tree_cols(), 1), area});
+        // The terminal's scroll-region trick only fits one full-height window.
+        if(term_caps().scroll_region)
+            scr.set_scroll_rows(win::count() == 1 ? area - 1 : 0);
+        win_apply_rect(win::focus());
+    }
     lsp_sync_tick();
-    E.buf().sync_anchors();
     emit_change_events();
-    // Ranges are only shifted while typing; recompute once it is over, and
-    // only when something is closed (nothing else needs them).
-    if(E.mode != INSERT && E.buf().folds.stale &&
-       !E.buf().folds.anchors().empty())
-        fold_ensure(E.buf());
-    editor_scroll();
-    overlay_tick();
     scr.clear();
-    editor_draw_rows();
+    {
+        win::Win* fw = win::focus();
+        const EditorMode real_mode = E.mode;
+        win_leave_view(fw);
+        for(win::Win* w : win::all()) {
+            const bool act = w == fw;
+            win_enter_view(w);
+            win_apply_rect(w);
+            E.mode = act ? real_mode : NORMAL;
+            g_win_active = act;
+            if(!act) win_clamp_view();  // its buffer may have shrunk
+            Buffer& b = E.buf();
+            b.syntax.update(b.pt, b.eol);
+            b.sync_anchors();
+            // Ranges are only shifted while typing; recompute once it is over,
+            // and only when something is closed (nothing else needs them).
+            if(E.mode != INSERT && b.folds.stale && !b.folds.anchors().empty())
+                fold_ensure(b);
+            editor_scroll();
+            scr.set_viewport(w->rect.x, w->rect.y, w->rect.w, w->rect.h);
+            editor_draw_rows();
+            editor_draw_status_bar(act);
+            scr.clear_viewport();
+            win_leave_view(w);
+        }
+        E.mode = real_mode;
+        g_win_active = true;
+        win_enter_view(fw);
+        win_apply_rect(fw);
+        editor_scroll();  // g_crx and E.rx for the focused window again
+        win_set_hint(cursor_screen().x, cursor_screen().y);
+        draw_extra_cursors();
+    }
+    overlay_tick();
+    editor_draw_win_seps();
     editor_draw_tree();
-    editor_draw_status_bar();
+    editor_draw_output();
     editor_draw_message_bar();
     const PromptView& pv = prompt_view();
     const ScreenPos cp = cursor_screen();
     const Viewport vp{.cols = scr.width(),
-                      .text_rows = E.term_rows,
+                      .text_rows = scr.height() - 1,
                       .rows = scr.height(),
                       .cur_x = cp.x,
                       .cur_y = cp.y};
     overlay_draw(scr, vp, pv.active);
     int ox = 0, oy = 0;
-    const bool ov_cur = !pv.active && overlay_cursor(vp, ox, oy);
+    bool ov_block = false;
+    const bool ov_cur =
+        !pv.active && overlay_cursor(vp, ox, oy, &ov_block);
+    // A focused panel that hides its cursor (a terminal can) leaves the text
+    // cursor where it was.
+    int dx = 0, dy = 0;
+    const bool dock_focus = !pv.active && !ov_cur && dock_cursor(dx, dy);
     const int sx = pv.active        ? std::min(pv.col, scr.width() - 1)
                    : ov_cur         ? ox
+                   : dock_focus     ? dx
                    : tree_focused() ? 0
                                     : vp.cur_x;
-    const int sy = pv.active        ? E.term_rows + 1
+    const int sy = pv.active        ? editor_message_row()
                    : ov_cur         ? oy
+                   : dock_focus     ? win_area_rows() + dy
                    : tree_focused() ? tree_cursor_row()
                                     : vp.cur_y;
     scr.cursor(sx, sy);
-    set_cursor_for_mode(pv.active || ov_cur ? INSERT : E.mode);
+    // text-entry overlays get the insert bar; a block overlay (the focused
+    // hover popup) reads like normal mode
+    set_cursor_for_mode(ov_cur && ov_block ? NORMAL
+                        : pv.active || ov_cur ? INSERT
+                                              : E.mode);
     // Cursor colour. Never "unset" while cursor_inverse is on: OSC 112 hands
     // the colour to the terminal, whose default can resolve to the background.
     constexpr uint32_t kNone = 0xFFFFFFFF;
@@ -900,7 +1098,8 @@ void editor_refresh_screen() {
     uint32_t col = theme_ui("ui.cursor", Style{}).fg;
     if(opts.cursor_inverse) {
         if(col == kNone) col = kCursorFallback;
-        const bool in_text = !pv.active && !ov_cur && !tree_focused();
+        const bool in_text =
+            !pv.active && !ov_cur && !tree_focused() && !dock_focus;
         if(in_text && sx >= 0 && sx < scr.width() && sy >= 0 &&
            sy < scr.height()) {
             const Cell& c = scr.at(sx, sy);
@@ -925,3 +1124,7 @@ void editor_refresh_screen() {
     set_cursor_color(col);
     scr.flush();
 }
+
+int editor_message_row() { return scr.height() - 1; }
+
+int editor_screen_cols() { return scr.width(); }

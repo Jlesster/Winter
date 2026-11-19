@@ -1,8 +1,16 @@
 #include "buflist.hpp"
+#include <charconv>
 #include <cstddef>
 #include <filesystem>
+#include <format>
 #include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include "core.hpp"
+#include "dock.hpp"
 #include "editor.hpp"
 #include "events.hpp"
 #include "external.hpp"
@@ -12,6 +20,7 @@
 #include "normal.hpp"
 #include "piece.hpp"
 #include "state.hpp"
+#include "window_ed.hpp"
 
 namespace {
 
@@ -47,13 +56,29 @@ void switch_to(size_t idx) {
     EventBufScope scope(&to);
     events_emit("buf_enter", {to.filename});
     if(!to.nofile) recent_touch(to.filename);
+    win_buffer_changed();
+}
+
+// A buffer was added to the list (file open, scratch). Handlers see it already
+// loaded, before it is entered.
+static void announce_new(Buffer& b) {
+    EventBufScope scope(&b);
+    events_emit("buf_new", {b.filename});
+}
+
+// Handlers still see the buffer (winter.api.* works on it) and get its id.
+static void announce_close(Buffer& b) {
+    EventBufScope scope(&b);
+    events_emit("buf_close", {b.filename});
 }
 
 void prune_scratch() {
     for(size_t i = E.buffers.size(); i-- > 0;) {
         if(E.buffers.size() <= 1) break;
         if(i == E.cur || !is_scratch(*E.buffers[i])) continue;
+        announce_close(*E.buffers[i]);
         if(E.alt == E.buffers[i].get()) E.alt = nullptr;
+        win_buffer_gone(E.buffers[i].get());
         E.buffers.erase(E.buffers.begin() + static_cast<std::ptrdiff_t>(i));
         if(E.cur > i) --E.cur;
     }
@@ -65,6 +90,12 @@ std::string norm(const std::string& p) {
 }
 
 }  // namespace
+
+void buffer_entered(Buffer& b) {
+    EventBufScope scope(&b);
+    events_emit("buf_enter", {b.filename});
+    if(!b.nofile) recent_touch(b.filename);
+}
 
 void buffer_switch(size_t idx) {
     switch_to(idx);
@@ -84,6 +115,7 @@ size_t buffer_open(const std::string& path) {
         return E.cur;
     }
     E.buffers.push_back(std::move(b));
+    announce_new(*E.buffers.back());
     lsp_sync_attach(*E.buffers.back());
     external_watch(*E.buffers.back());
     buffer_switch(E.buffers.size() - 1);
@@ -97,6 +129,7 @@ Buffer* buffer_get(const std::string& path) {
     auto b = std::make_unique<Buffer>();
     if(!load_file(*b, path)) return nullptr;
     E.buffers.push_back(std::move(b));
+    announce_new(*E.buffers.back());
     lsp_sync_attach(*E.buffers.back());
     external_watch(*E.buffers.back());
     return E.buffers.back().get();
@@ -113,13 +146,16 @@ bool buffer_close(size_t idx, bool force) {
             idx + 1);
         return false;
     }
+    announce_close(*E.buffers[idx]);
     lsp_sync_detach(*E.buffers[idx]);
     external_unwatch(*E.buffers[idx]);
     if(E.buffers.size() == 1) {
         set_mode(EditorMode::NORMAL);
         remember(*E.buffers[0], E.cy, E.cx);
         normal_reset();
+        Buffer* old = E.buffers[0].get();
         E.buffers[0] = std::make_unique<Buffer>();
+        win_buffer_replaced(old, E.buffers[0].get());
         E.alt = nullptr;
         E.cx = E.cy = E.want_rx = E.rx = E.row_offset = E.col_offset = 0;
         return true;
@@ -134,6 +170,7 @@ bool buffer_close(size_t idx, bool force) {
         switch_to(next);
     }
     if(E.alt == E.buffers[idx].get()) E.alt = nullptr;
+    win_buffer_gone(E.buffers[idx].get());
     E.buffers.erase(E.buffers.begin() + static_cast<std::ptrdiff_t>(idx));
     if(E.cur > idx) --E.cur;
     return true;
@@ -216,6 +253,7 @@ void fill(Buffer& b, const std::string& text) {
 }
 
 void buffer_show_text(const std::string& name, const std::string& text) {
+    dock_focus(false);
     for(size_t i = 0; i < E.buffers.size(); ++i) {
         Buffer& b = *E.buffers[i];
         if(!b.nofile || b.filename != name) continue;
@@ -230,5 +268,6 @@ void buffer_show_text(const std::string& name, const std::string& text) {
     b->nofile = true;
     fill(*b, text);
     E.buffers.push_back(std::move(b));
+    announce_new(*E.buffers.back());
     buffer_switch(E.buffers.size() - 1);
 }

@@ -55,7 +55,26 @@ public:
     void map(EditorMode m, KeySeq keys, std::string action);
     void map(EditorMode m, const char* notation, std::string action);  // "gg"
     bool unmap(EditorMode m, std::u32string_view keys);
-    Hit lookup(EditorMode m, std::u32string_view keys) const;
+    // `buf` (a stable Buffer::id, 0 = none) adds that buffer's own maps on top:
+    // a local map shadows the global one for the same keys, and a longer chord
+    // in either keeps the shorter one waiting.
+    Hit lookup(EditorMode m, std::u32string_view keys, uint64_t buf = 0) const;
+
+    // ---- buffer-local keymaps (`buf` must not be 0)
+    void map_local(uint64_t buf, EditorMode m, KeySeq keys, std::string action);
+    bool unmap_local(uint64_t buf, EditorMode m, std::u32string_view keys);
+    Hit lookup_local(uint64_t buf, EditorMode m, std::u32string_view keys) const;
+    // Forget every local map of `buf` (it was closed); returns the actions they
+    // pointed at, one per map, so anonymous ones can be released.
+    std::vector<std::string> drop_local(uint64_t buf);
+
+    struct MapEntry {
+        EditorMode mode;
+        KeySeq keys;
+        std::string action;
+    };
+    std::vector<MapEntry> maps(EditorMode m) const;         // the global ones
+    std::vector<MapEntry> local_maps(uint64_t buf) const;   // one buffer's
 
     void add_operator(std::string name, Operator fn);
     const Operator* op(std::string_view name) const;
@@ -70,6 +89,8 @@ private:
     std::map<std::string, Entry, std::less<>> actions_;
     std::map<std::string, motion::Fn, std::less<>> motions_;
     std::map<EditorMode, std::map<KeySeq, std::string, std::less<>>> keymaps_;
+    std::map<uint64_t, std::map<EditorMode, std::map<KeySeq, std::string, std::less<>>>>
+        local_;
     std::map<std::string, Operator, std::less<>> ops_;
     std::map<std::string, ObjectFn, std::less<>> objects_;
 };

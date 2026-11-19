@@ -1,6 +1,7 @@
 #include "complete.hpp"
 #include <algorithm>
 #include <cctype>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -21,6 +22,7 @@
 #include "markdown.hpp"
 #include "lsp_client.hpp"
 #include "lsp_sync.hpp"
+#include "multicursor.hpp"
 #include "overlay.hpp"
 #include "piece.hpp"
 #include "snippet.hpp"
@@ -117,6 +119,7 @@ unsigned g_seq = 0;
 TimerId g_timer = 0;
 TimerId g_rtimer = 0;
 std::string g_last;
+std::string g_trace;  // what the last request / reply / key did (CompletionLast)
 std::string g_hover_raw;  // raw text of the last hover, for :HoverLast
 
 bool word_byte(unsigned char c) {
@@ -195,20 +198,69 @@ std::vector<std::string> wrap(std::string_view text, int w, size_t max) {
     return out;
 }
 
+// The extra cursors are hidden from the server while the main cursor asks for
+// completions: the word each extra has typed so far is cut out of the copy
+// the server sees, so only the main cursor's surroundings are what it parses.
+// A Mask is those [start, end) byte ranges of the real buffer, ascending.
+using Mask = std::vector<std::pair<size_t, size_t>>;
+
+// What the reply being parsed was asked against (null: the real buffer).
+const Mask* g_unmask = nullptr;
+
+// An LSP position in the masked copy -> an offset in the real buffer. Only
+// ranges on the position's own line move its column.
+size_t to_off(const PieceTable& pt, int64_t line, int64_t ch, bool utf16) {
+    int64_t col = ch;
+    if(g_unmask && !g_unmask->empty()) {
+        int64_t shift = 0;
+        for(const auto& [a, z] : *g_unmask) {
+            if(static_cast<int64_t>(pt.line_of(a)) != line) continue;
+            const int64_t at =
+                static_cast<int64_t>(lsp_col(pt, a, utf16)) - shift;
+            if(at >= ch) break;
+            shift += static_cast<int64_t>(z - a);
+        }
+        col += shift;
+    }
+    return lsp_offset(pt, line, col, utf16);
+}
+
+// The ranges to hide: each extra cursor's own word prefix. Left alone are an
+// extra inside the main cursor's word (it is the same text), overlapping
+// ones, and prefixes with non-ASCII bytes (their columns would not line up).
+Mask mask_ranges(const PieceTable& pt, size_t ws, size_t cur) {
+    Mask r;
+    if(!mc_active()) return r;
+    for(const McMark& m : mc_marks()) {
+        if(m.pos > pt.size()) continue;
+        const size_t s = word_start_at(pt, m.pos);
+        if(s >= m.pos || (s <= cur && m.pos >= ws)) continue;
+        bool ascii = true;
+        for(size_t i = s; i < m.pos && ascii; ++i)
+            ascii = static_cast<unsigned char>(pt.at(i)) < 0x80;
+        if(ascii) r.emplace_back(s, m.pos);
+    }
+    std::ranges::sort(r);
+    Mask out;
+    for(const auto& x : r)
+        if(out.empty() || x.first >= out.back().second) out.push_back(x);
+    return out;
+}
+
 std::vector<Edit> parse_extras(const Json& list, const PieceTable& pt,
                                bool utf16, size_t limit) {
     std::vector<Edit> out;
     if(!list.is_array()) return out;
     for(const Json& e : list.items()) {
         const Json& r = e["range"];
-        Edit ed{lsp_offset(pt,
-                           r["start"]["line"].as_int(),
-                           r["start"]["character"].as_int(),
-                           utf16),
-                lsp_offset(pt,
-                           r["end"]["line"].as_int(),
-                           r["end"]["character"].as_int(),
-                           utf16),
+        Edit ed{to_off(pt,
+                       r["start"]["line"].as_int(),
+                       r["start"]["character"].as_int(),
+                       utf16),
+                to_off(pt,
+                       r["end"]["line"].as_int(),
+                       r["end"]["character"].as_int(),
+                       utf16),
                 std::string(e["newText"].as_str())};
         if(ed.end > limit) return {};
         out.push_back(std::move(ed));
@@ -251,14 +303,14 @@ Item parse_item(const Json& j, const PieceTable& pt, bool utf16,
     // te["insert"] here instead for VS Code's default insert behaviour.
     const Json& rg = te["range"].is_object() ? te["range"] : te["replace"];
     if(rg.is_object()) {
-        it.start = lsp_offset(pt,
-                              rg["start"]["line"].as_int(),
-                              rg["start"]["character"].as_int(),
-                              utf16);
-        const size_t end = lsp_offset(pt,
-                                      rg["end"]["line"].as_int(),
-                                      rg["end"]["character"].as_int(),
-                                      utf16);
+        it.start = to_off(pt,
+                          rg["start"]["line"].as_int(),
+                          rg["start"]["character"].as_int(),
+                          utf16);
+        const size_t end = to_off(pt,
+                                  rg["end"]["line"].as_int(),
+                                  rg["end"]["character"].as_int(),
+                                  utf16);
         it.tail = end > cursor ? end - cursor : 0;
     }
     it.start = std::min(it.start, cursor);
@@ -442,45 +494,83 @@ void accept() {
     const auto cur = static_cast<std::ptrdiff_t>(cursor_offset());
     close();
 
-    size_t start;
+    const bool multi = mc_active();
+    // what the user typed of the word, which every cursor replaces
+    const auto typed = static_cast<std::ptrdiff_t>(cur) -
+                       static_cast<std::ptrdiff_t>(it.start);
+    std::string prefix;
+    if(multi && typed > 0 && it.start < pt.size())
+        prefix = pt.text(it.start, static_cast<size_t>(typed));
+
+    size_t start = 0;
+    size_t primary_at = 0;  // anchor on the primary's replaced word
     {
         PieceTable::Group g(pt);
+        // The additional edits (auto import) are made once, for the whole
+        // pass; the extra cursors are anchors and follow them by themselves,
+        // the primary is moved by hand.
         const std::ptrdiff_t shift = apply_extras(pt, std::move(it.extra));
-        start =
-            static_cast<size_t>(static_cast<std::ptrdiff_t>(it.start) + shift);
-        std::ptrdiff_t end = std::clamp<std::ptrdiff_t>(
-            cur + shift + static_cast<std::ptrdiff_t>(it.tail),
-            static_cast<std::ptrdiff_t>(start),
-            static_cast<std::ptrdiff_t>(pt.size()));
-        if(!it.text.empty() && end < static_cast<std::ptrdiff_t>(pt.size()) &&
-           pt.at(static_cast<size_t>(end)) == it.text.back() &&
-           has_unmatched_tail(it.text))
-            ++end;
-        const std::string gone =
-            end > static_cast<std::ptrdiff_t>(start)
-                ? pt.text(start, static_cast<size_t>(end) - start)
-                : std::string();
-        g_last = std::format(
-            "label   : {}\nstart   : {}  tail: {}  cursor: {}  extras shift: "
-            "{}\n"
-            "replaced: [{}]\ninserted: [{}]  snippet: {}\nraw item: {}\n",
-            it.label,
-            start,
-            it.tail,
-            cur,
-            shift,
-            gone,
-            it.text,
-            it.snippet,
-            it.raw.dump());
-        if(end > static_cast<std::ptrdiff_t>(start))
-            pt.remove(start, static_cast<size_t>(end) - start);
-        if(it.snippet) {
-            set_cursor_offset(start);
-            snippet_expand(it.text);
+        if(multi)
+            set_cursor_offset(static_cast<size_t>(cur + shift));
+
+        // Replace the word before the cursor `at` and put the item in.
+        // Returns where the word started.
+        const auto put = [&](std::ptrdiff_t at, bool primary) -> size_t {
+            const std::ptrdiff_t s0 = std::clamp<std::ptrdiff_t>(
+                at - typed, 0, static_cast<std::ptrdiff_t>(pt.size()));
+            const auto st = static_cast<size_t>(s0);
+            std::ptrdiff_t end = std::clamp<std::ptrdiff_t>(
+                at + static_cast<std::ptrdiff_t>(it.tail),
+                s0,
+                static_cast<std::ptrdiff_t>(pt.size()));
+            if(!it.text.empty() && end < static_cast<std::ptrdiff_t>(pt.size()) &&
+               pt.at(static_cast<size_t>(end)) == it.text.back() &&
+               has_unmatched_tail(it.text))
+                ++end;
+            const std::string gone =
+                end > s0 ? pt.text(st, static_cast<size_t>(end) - st)
+                         : std::string();
+            if(primary)
+                g_last = std::format(
+                    "label   : {}\nstart   : {}  tail: {}  cursor: {}  "
+                    "extras shift: {}\nreplaced: [{}]\ninserted: [{}]  "
+                    "snippet: {}\nraw item: {}\n",
+                    it.label, st, it.tail, at, shift, gone, it.text,
+                    it.snippet, it.raw.dump());
+            if(end > s0) pt.remove(st, static_cast<size_t>(end) - st);
+            if(it.snippet && primary) {
+                set_cursor_offset(st);
+                snippet_expand(it.text);
+            } else if(it.snippet) {
+                // the others only remember where their tab stops are
+                set_cursor_offset(st);
+                snippet_peer(it.text);
+            } else {
+                pt.insert(st, it.text);
+                set_cursor_offset(st + it.text.size());
+            }
+            return st;
+        };
+
+        if(!multi) {
+            start = put(cur + shift, true);
         } else {
-            pt.insert(start, it.text);
-            set_cursor_offset(start + it.text.size());
+            if(it.snippet) snippet_end();
+            mc_each([&] {
+                const auto at = static_cast<std::ptrdiff_t>(cursor_offset());
+                const bool primary = mc_is_primary();
+                // a cursor that did not type the same word is left alone
+                const std::ptrdiff_t s0 = at - typed;
+                if(!primary && (s0 < 0 || (typed > 0 &&
+                    pt.text(static_cast<size_t>(s0),
+                            static_cast<size_t>(typed)) != prefix)))
+                    return;
+                const size_t st = put(at, primary);
+                if(primary) primary_at = pt.anchor_add(st, Gravity::Left);
+            });
+            start = pt.anchor_pos(primary_at).value_or(0);
+            pt.anchor_remove(primary_at);
+            if(it.snippet) snippet_place_peers();
         }
     }
     if(late) resolve_late(buf, server, utf16, it, start);
@@ -718,13 +808,34 @@ bool is_trigger(LspId s, int c) {
 }
 
 void on_reply(unsigned seq, uint64_t rev, Buffer* buf, LspId server,
-              size_t word_start, size_t cur, bool utf16, const Json& result,
-              const Json& error) {
-    if(seq != g_seq || buf != &E.buf() || E.mode != EditorMode::INSERT) return;
-    if(!error.is_null()) return;
-    if(buf->pt.revision() != rev || cursor_offset() != cur) return;
+              size_t word_start, size_t cur, bool utf16, const Mask& mask,
+              const Json& result, const Json& error) {
+    // The server got a masked copy: give it the real text back right away.
+    if(!mask.empty()) lsp_sync_doc(*buf, true);
+    struct Unmask {
+        explicit Unmask(const Mask& m) { g_unmask = &m; }
+        ~Unmask() { g_unmask = nullptr; }
+    } unmask(mask);
+    if(seq != g_seq || buf != &E.buf() || E.mode != EditorMode::INSERT) {
+        g_trace += std::format("reply #{} dropped: superseded (now #{}) or "
+                               "buffer/mode changed\n", seq, g_seq);
+        return;
+    }
+    if(!error.is_null()) {
+        g_trace += std::format("reply #{} dropped: server error\n", seq);
+        return;
+    }
+    if(buf->pt.revision() != rev || cursor_offset() != cur) {
+        g_trace += std::format(
+            "reply #{} dropped: buffer moved on (rev {} -> {}, cursor {} -> "
+            "{})\n", seq, rev, buf->pt.revision(), cur, cursor_offset());
+        return;
+    }
     const Json& list = result.is_array() ? result : result["items"];
-    if(!list.is_array()) return close();
+    if(!list.is_array()) {
+        g_trace += std::format("reply #{} had no item list\n", seq);
+        return close();
+    }
     S.items.clear();
     ++S.epoch;
     S.incomplete = result.is_object() && result["isIncomplete"].as_bool(false);
@@ -741,18 +852,33 @@ void on_reply(unsigned seq, uint64_t rev, Buffer* buf, LspId server,
     S.buf = buf;
     S.word_start = word_start;
     S.line = buf->pt.line_of(cursor_offset());
-    if(refilter()) show();
+    const bool any = refilter();
+    g_trace += std::format(
+        "reply #{}: {} items, {} match the prefix at {}..{} -> {}\n", seq,
+        S.items.size(), S.shown.size(), word_start, cur,
+        any ? "menu shown" : "menu NOT shown");
+    if(any) show();
     else close();
 }
 
 void request(int kind, const std::string& trigger) {
     if(E.mode != EditorMode::INSERT) return;
     Buffer& b = E.buf();
-    const auto doc = lsp_sync_doc(b, true);
-    if(!doc || !supports(doc->server)) return;
     const PieceTable& pt = b.pt;
     const size_t cur = cursor_offset();
     const size_t ws = word_start_at(pt, cur);
+    Mask mask = mask_ranges(pt, ws, cur);
+    const auto doc = mask.empty() ? lsp_sync_doc(b, true) : lsp_sync_mask(b, mask);
+    if(!doc || !supports(doc->server)) {
+        g_trace += "request skipped: no LSP document or no completion support\n";
+        return;
+    }
+    if(!mask.empty() && !lsp_sync_masked(b)) mask.clear();  // not applied
+    // The main cursor's column in the copy the server sees.
+    int64_t col = static_cast<int64_t>(lsp_col(pt, cur, doc->utf16));
+    for(const auto& [a, z] : mask)
+        if(a < ws && pt.line_of(a) == pt.line_of(cur))
+            col -= static_cast<int64_t>(z - a);
     Json ctx = Json::obj({{"triggerKind", kind}});
     if(!trigger.empty()) ctx.set("triggerCharacter", trigger);
     const unsigned seq = ++g_seq;
@@ -760,16 +886,24 @@ void request(int kind, const std::string& trigger) {
     Buffer* buf = &b;
     const bool utf16 = doc->utf16;
     const LspId server = doc->server;
+    g_trace = std::format(
+        "request #{} sent: line {} col {} (offset {}, word starts {}), extras "
+        "active: {}, rev {}\n", seq, pt.line_of(cur), col,
+        cur, ws, mc_active(), rev);
+    if(!mask.empty())
+        g_trace += std::format("  extras hidden from the server: {} word(s)\n",
+                               mask.size());
     lsp_request(
         doc->server,
         "textDocument/completion",
         Json::obj({{"textDocument", Json::obj({{"uri", doc->uri}})},
                    {"position",
                     Json::obj({{"line", pt.line_of(cur)},
-                               {"character", lsp_col(pt, cur, utf16)}})},
+                               {"character", col}})},
                    {"context", ctx}}),
         [=](const Json& result, const Json& error) {
-            on_reply(seq, rev, buf, server, ws, cur, utf16, result, error);
+            on_reply(seq, rev, buf, server, ws, cur, utf16, mask, result,
+                     error);
         });
 }
 
@@ -790,8 +924,207 @@ void schedule(int kind, std::string trigger = {}) {
 
 bool completion_active() { return S.id != 0; }
 
+namespace {
+
+// The K hover popup. The rows between rule rows are panes (signature, docs,
+// ...), each with its own height and scroll. K a second time focuses the
+// popup: it turns modal and on_key drives it, vim-window style.
+struct HoverPane {
+    size_t first = 0, n = 0;  // rows of HoverWin::lines
+    int h = 0;                // visible rows
+    int top = 0, cur = 0;     // scroll offset and cursor row, pane-relative
+    int want = 0;             // wanted cursor column (cells); INT_MAX = line end
+};
+
+struct HoverWin {
+    unsigned gen = 0;  // tells a stale on_close from the current popup's
+    OverlayId id = 0;
+    std::vector<MdRow> lines;
+    std::vector<HoverPane> panes;
+    size_t focus = 0, prev = 0;
+    bool focused = false;
+    bool cw = false;  // <C-w> pending
+    bool g = false;   // first g of gg pending
+    Style base, code, head, bul, quo, ring;
+};
+
+HoverWin g_hw;
+unsigned g_hw_gen = 0;
+
+constexpr size_t kHoverMaxRows = 400;  // layout cap, not a display cap
+
+// First inner row (overlay coordinates) of pane i.
+int hover_pane_y(const HoverWin& w, size_t i) {
+    int y = 1;
+    for(size_t j = 0; j < i; ++j) y += w.panes[j].h + 1;  // +1: the rule
+    return y;
+}
+
+int hover_row_width(const HoverWin& w, const HoverPane& p) {
+    int n = 0;
+    for(const MdSeg& s : w.lines[p.first + p.cur].segs) n += text_width(s.text);
+    return n;
+}
+
+// Cursor column on the current row: the wanted column, clamped to the text.
+int hover_col(const HoverWin& w, const HoverPane& p) {
+    return std::clamp(p.want, 0, std::max(0, hover_row_width(w, p) - 1));
+}
+
+void hover_pane_scroll(HoverPane& p) {
+    const int n = static_cast<int>(p.n);
+    p.cur = std::clamp(p.cur, 0, n - 1);
+    if(p.cur < p.top) p.top = p.cur;
+    if(p.cur >= p.top + p.h) p.top = p.cur - p.h + 1;
+    p.top = std::clamp(p.top, 0, std::max(0, n - p.h));
+}
+
+// Splits at the rules and gives each pane a height. The signature pane gets
+// at most 8 rows, the rest share about half the screen.
+void hover_split(HoverWin& w) {
+    w.panes.clear();
+    for(size_t i = 0; i < w.lines.size();) {
+        if(w.lines[i].rule) {
+            ++i;
+            continue;
+        }
+        HoverPane p;
+        p.first = i;
+        while(i < w.lines.size() && !w.lines[i].rule) ++i;
+        p.n = i - p.first;
+        w.panes.push_back(p);
+    }
+    const int np = static_cast<int>(w.panes.size());
+    int remaining =
+        std::max({np, 6, E.term_rows / 2 - 2 - std::max(0, np - 1)});
+    for(int i = 0; i < np; ++i) {
+        HoverPane& p = w.panes[i];
+        int cap = std::max(1, remaining - (np - 1 - i) * 3);
+        if(i == 0 && np > 1) cap = std::min(cap, 8);
+        p.h = std::clamp(static_cast<int>(p.n), 1, cap);
+        remaining -= p.h;
+    }
+}
+
+// Pushes footer, focus ring and hardware cursor to the overlay.
+void hover_sync() {
+    HoverWin& w = g_hw;
+    if(!w.id || w.panes.empty()) return;
+    const HoverPane& fp = w.panes[w.focus];
+    std::string foot;
+    if(w.focused) {
+        if(fp.n > static_cast<size_t>(fp.h))
+            foot = std::format("{}%", (fp.top + fp.h) * 100 /
+                                          static_cast<int>(fp.n));
+    } else {
+        for(const HoverPane& p : w.panes)
+            if(p.n > static_cast<size_t>(p.h)) foot = "\u2026";  // cut short
+    }
+    const int y = hover_pane_y(w, w.focus);
+    const bool focused = w.focused;
+    const Style ring = w.ring;
+    const int h = fp.h;
+    overlay_edit(w.id, [&](OverlaySpec& s) {
+        s.footer = foot;
+        if(focused) s.focus_span = std::pair{y, y + h}, s.focus_border = ring;
+        else s.focus_span.reset();
+    });
+    if(focused)
+        overlay_set_cursor(w.id, 2 + hover_col(w, fp), y + fp.cur - fp.top);
+}
+
+void hover_focus() {
+    HoverWin& w = g_hw;
+    if(!w.id || w.panes.empty()) return;
+    w.focused = true;
+    w.focus = w.prev = 0;
+    w.cw = w.g = false;
+    overlay_edit(w.id, [](OverlaySpec& s) {
+        s.modal = true;
+        s.cursor_block = true;
+        s.dismiss_on_move = false;
+        s.pass.clear();  // nothing leaks through, ':' included
+    });
+    hover_sync();
+}
+
+// Every key a focused popup gets is consumed, hits and misses alike, so a
+// no-op (<C-w>j on the last pane) never falls through to the editor.
+bool hover_key(int c) {
+    HoverWin& w = g_hw;
+    if(!w.id || !w.focused || w.panes.empty()) return false;
+    const size_t np = w.panes.size();
+
+    if(w.cw) {
+        w.cw = false;  // always cleared, hit or miss
+        w.g = false;
+        switch(c) {
+            case 'j':
+                if(w.focus + 1 < np) w.prev = w.focus, ++w.focus;
+                break;
+            case 'k':
+                if(w.focus > 0) w.prev = w.focus, --w.focus;
+                break;
+            case 'w': w.prev = w.focus, w.focus = (w.focus + 1) % np; break;
+            case 'W':
+                w.prev = w.focus, w.focus = (w.focus + np - 1) % np;
+                break;
+            case 'p': std::swap(w.focus, w.prev); break;
+            case 'c':
+            case 'q': overlay_close(w.id); return true;
+            default: break;  // h/l and anything else: no-op
+        }
+        hover_sync();
+        return true;
+    }
+
+    HoverPane& p = w.panes[w.focus];
+    const bool was_g = std::exchange(w.g, false);
+    const int page = std::max(1, p.h), half = std::max(1, p.h / 2);
+    int scroll = 0;  // cursor and view move together
+    switch(c) {
+        case 'q':
+        case '\x1b': overlay_close(w.id); return true;
+        case CTRL_KEY('w'): w.cw = true; return true;
+        case 'j':
+        case ARROW_DOWN: ++p.cur; break;
+        case 'k':
+        case ARROW_UP: --p.cur; break;
+        case CTRL_KEY('d'): scroll = half; break;
+        case CTRL_KEY('u'): scroll = -half; break;
+        case CTRL_KEY('f'):
+        case PAGE_DOWN: scroll = page; break;
+        case CTRL_KEY('b'):
+        case PAGE_UP: scroll = -page; break;
+        case 'h':
+        case ARROW_LEFT: p.want = std::max(0, hover_col(w, p) - 1); break;
+        case 'l':
+        case ARROW_RIGHT: p.want = hover_col(w, p) + 1; break;  // clamped
+        case '0':
+        case HOME: p.want = 0; break;
+        case '$':
+        case END: p.want = INT_MAX; break;
+        case 'G': p.cur = static_cast<int>(p.n) - 1; break;
+        case 'g':
+            if(was_g) p.cur = 0;
+            else w.g = true;
+            break;
+        default: break;
+    }
+    p.cur += scroll;
+    p.top += scroll;
+    hover_pane_scroll(p);
+    hover_sync();
+    return true;
+}
+
+}  // namespace
+
 void hover_show() {
-    static OverlayId g_hover = 0;
+    if(g_hw.id && !g_hw.focused) {  // K on an open popup: take focus
+        hover_focus();
+        return;
+    }
     Buffer& b = E.buf();
     const auto doc = lsp_sync_doc(b, true);
     if(!doc) {
@@ -810,6 +1143,7 @@ void hover_show() {
         [buf = &b, rev = b.pt.revision()](const Json& result,
                                           const Json& error) {
             if(buf != &E.buf() || buf->pt.revision() != rev) return;
+            if(g_hw.focused) return;  // don't replace a popup being used
             if(!error.is_null() || !result.is_object()) {
                 editor_set_status_message("hover: nothing here");
                 return;
@@ -821,9 +1155,9 @@ void hover_show() {
             else text = doc_text(c);
             g_hover_raw = text;
 
-            constexpr size_t kHoverRows = 16;
-            const auto lines = md_float_layout(
-                text, std::max(16, std::min(72, E.term_cols - 8)), kHoverRows);
+            auto lines = md_float_layout(
+                text, std::max(16, std::min(72, E.term_cols - 8)),
+                kHoverMaxRows);
             if(lines.empty()) {
                 editor_set_status_message("hover: nothing here");
                 return;
@@ -841,37 +1175,62 @@ void hover_show() {
             style_patch(head,
                         theme_ui("ui.hover.heading",
                                  md_style(MdRole::Heading)));
+            Style ring = theme_ui("ui.hover.focus", Style{.fg = 0x89b4fa});
+            ring.bg = base.bg;
 
-            if(g_hover) overlay_close(g_hover);
+            if(g_hw.id) overlay_close(g_hw.id);  // its on_close resets g_hw
+            HoverWin& w = g_hw;
+            w = HoverWin{};
+            w.gen = ++g_hw_gen;
+            w.lines = std::move(lines);
+            w.base = base, w.code = code, w.head = head, w.bul = bul;
+            w.quo = quo, w.ring = ring;
+            hover_split(w);
+
+            // a rule sits on the row after each pane but the last
+            std::vector<int> dividers;
+            for(size_t i = 0; i + 1 < w.panes.size(); ++i)
+                dividers.push_back(hover_pane_y(w, i) + w.panes[i].h);
+
             OverlaySpec o;
             o.at = OverlaySpec::At::Cursor;
             o.x = 0;
             o.y = 1;
             o.w = tw + 4;
-            o.h = static_cast<int>(lines.size()) + 2;
+            o.h = hover_pane_y(w, w.panes.size());  // panes, rules, frame
             o.z = 50;
             o.framed = true;
             o.border_style = pop_border(base);
-            if(lines.size() >= kHoverRows) o.footer = "\u2026";  // cut short
-            for(size_t i = 0; i < lines.size(); ++i)
-                if(lines[i].rule) o.dividers.push_back(1 + static_cast<int>(i));
-            o.on_paint = [lines, base, code, head, bul, quo](OverlayId id) {
-                overlay_clear(id, base);
-                for(size_t i = 0; i < lines.size(); ++i) {
-                    int x = 2;
-                    for(const MdSeg& s : lines[i].segs) {
-                        Style st = s.tone == MdTone::Code      ? code
-                                   : s.tone == MdTone::Heading ? head
-                                   : s.tone == MdTone::Bullet  ? bul
-                                   : s.tone == MdTone::Quote   ? quo
-                                                               : base;
-                        if(s.style) style_patch(st, *s.style);  // syntax colour
-                        x = overlay_put(
-                            id, x, 1 + static_cast<int>(i), s.text, st);
+            o.dividers = std::move(dividers);
+            o.on_key = hover_key;
+            o.on_close = [gen = w.gen] {
+                if(g_hw.gen == gen) g_hw = HoverWin{};
+            };
+            o.on_paint = [](OverlayId id) {
+                const HoverWin& w = g_hw;
+                if(w.id != id) return;
+                overlay_clear(id, w.base);
+                for(size_t pi = 0; pi < w.panes.size(); ++pi) {
+                    const HoverPane& p = w.panes[pi];
+                    const int y0 = hover_pane_y(w, pi);
+                    for(int r = 0; r < p.h; ++r) {
+                        const size_t li = p.first + p.top + r;
+                        if(li >= p.first + p.n) break;
+                        int x = 2;
+                        for(const MdSeg& s : w.lines[li].segs) {
+                            Style st = s.tone == MdTone::Code      ? w.code
+                                       : s.tone == MdTone::Heading ? w.head
+                                       : s.tone == MdTone::Bullet  ? w.bul
+                                       : s.tone == MdTone::Quote   ? w.quo
+                                                                   : w.base;
+                            if(s.style) style_patch(st, *s.style);
+                            x = overlay_put(id, x, y0 + r, s.text, st);
+                        }
                     }
                 }
             };
-            g_hover = overlay_open(std::move(o));
+            w.id = overlay_open(std::move(o));
+            hover_sync();
         });
 }
 
@@ -909,6 +1268,8 @@ void completion_post_key(int c) {
     if(ascii && is_trigger(doc->server, c))
         return schedule(2, std::string(1, static_cast<char>(c)));
     if(typed_word && cur - ws >= kMinPrefix) return schedule(1);
+    g_trace = std::format("key {}: no request (prefix {} < {} or not a word "
+                          "key)\n", c, cur - ws, kMinPrefix);
     cancel_pending();
 }
 
@@ -919,7 +1280,11 @@ void completion_register_commands() {
                  .run = [](const CmdLine&) {
                      buffer_show_text(
                          "[completion]",
-                         g_last.empty() ? "nothing accepted yet\n" : g_last);
+                         (g_last.empty() ? std::string("nothing accepted yet\n")
+                                         : g_last) +
+                             "\n-- last request --\n" +
+                             (g_trace.empty() ? std::string("none yet\n")
+                                              : g_trace));
                  }});
     command_add({.name = "HoverLast",
                  .desc = "Show the raw text of the last LSP hover",

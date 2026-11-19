@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "num.hpp"
 
 enum class CursorShape : uint8_t {
     Default = 0,
@@ -39,14 +40,14 @@ struct Options {
     bool hlsearch = true;           // search match highlighting
     bool paste_indent = true;       // indent pastes
     bool nerdicons = false;         // ui nerd icon toggle
-    bool tree_icons = false;     // no ui icons aside from the tree box glyphs
-    bool tree_hidden = false;    // show dotfiles when the tree is first opened
-    bool tree_follow = true;     // keep the cursor on the active buffer's file
-    bool tree_git = true;        // git status marks
-    bool tree_git_names = true;  // recolor file names by git stats
-    bool wrap = false;           // wrap long lines at screen edge
+    bool tree_icons = false;      // no ui icons aside from the tree box glyphs
+    bool tree_hidden = false;     // show dotfiles when the tree is first opened
+    bool tree_follow = true;      // keep the cursor on the active buffer's file
+    bool tree_git = true;         // git status marks
+    bool tree_git_names = true;   // recolor file names by git stats
+    bool wrap = false;            // wrap long lines at screen edge
     bool wrap_indicator = false;  // show a marker before wrapped rows
-    bool indent_leads = false;   // chevron at the start of each indent level
+    bool indent_leads = false;    // chevron at the start of each indent level
     bool hl_reference =
         false;  // highlight other uses of the symbol under the cursor (LSP)
     bool cursorline = false;      // tint the cursor row
@@ -64,12 +65,19 @@ struct Options {
     int tab_stop = 4;       // display width of a '\t'
     int shift_width = 4;    // one indent level
     int format_timeout = 1000;  // ms a formatter may block a save
-    int quit_times = 3;    // extra Ctrl-Q presses needed with unsaved changes
-    int history = 500;     // history entries per file
-    int number_width = 4;  // gutter width
-    int tree_width = 30;   // columns, before the separator
+    int history = 500;          // history entries per file
+    int number_width = 4;       // gutter width
+    int tree_width = 30;        // columns, before the separator
+    int tmux_nav = 1;     // CTRL-W h/j/k/l continue into tmux panes at the edge
+    int tmux_wrap = 0;    // ... and wrap around the tmux window
+    int resize_step = 1;  // cells per resize bind trigger multiplied by count
+    int output_mode = 0;  // build/run output: 0 bottom dock, 1 float, 2 buffer
+    int output_height = 12;  // dock rows, title bar included
+    int output_auto = 1;  // 0 manual, 1 streamed runs + failed builds, 2 always
     int indent_engine =
         0;  // 0 structural + ts fallback / 1 ts only / 2 structural only
+    unsigned numformats =
+        num::kDefault;  // see num.hpp: bin,hex,octal,real,version,ident
     Border border = Border::Rounded;  // ui border selection
     // DECSCUSR: 1/2 block, 3/4 underline, 5/6 bar (odd = blinking)
     CursorStyle cursor_normal{CursorShape::Block, false};
@@ -96,8 +104,10 @@ bool opt_et();
 // buffer-local write/read; only tabstop, shiftwidth and expandtab have a
 // local form (anything else -> OptResult::NotLocal)
 struct Buffer;
-OptResult set_option_local(Buffer& b, std::string_view name, std::string_view value);
-std::optional<std::string> get_option_local(const Buffer& b, std::string_view name);
+OptResult set_option_local(Buffer& b, std::string_view name,
+                           std::string_view value);
+std::optional<std::string> get_option_local(const Buffer& b,
+                                            std::string_view name);
 
 // string-keyed access: this is the surface `:set` and Lua talk to.
 // Names follow vim where one exists (tabstop/ts, shiftwidth/sw, expandtab/et).

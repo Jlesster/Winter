@@ -9,12 +9,14 @@
 #include "input.hpp"
 #include "job.hpp"
 #include "loop.hpp"
+#include "parser.hpp"
 #include "render.hpp"
 #include "script.hpp"
 #include "snippet.hpp"
-#include "src/tree.hpp"
 #include "terminal.hpp"
+#include "tree.hpp"
 #include "watch.hpp"
+#include "window_ed.hpp"
 
 void init_editor() {
     E.buffers.push_back(std::make_unique<Buffer>());
@@ -34,6 +36,8 @@ void init_editor() {
 
 int main(int argc, const char* argv[]) {
     enable_raw_mode();
+    tmux_announce(true);
+    std::atexit([] { tmux_announce(false); });
     init_editor();
     loop_init();
     job_init();
@@ -44,6 +48,7 @@ int main(int argc, const char* argv[]) {
     const bool lua_ok = script_init();
     format_init();
     if(lua_ok) script_load_config();
+    parser_autorefresh();
     bool open_config = false;
     std::vector<std::string> files;
     for(int i = 1; i < argc; ++i) {

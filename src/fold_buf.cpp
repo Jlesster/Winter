@@ -92,7 +92,7 @@ void fold_snap_cursor() {
     const int size = static_cast<int>(line.size());
     int cx = std::min(E.cx, size);
     if(E.mode == NORMAL && cx >= size && size > 0)
-        cx = static_cast<int>(utf8_prev(line, size));
+        cx = static_cast<int>(gr_prev(line, size));
     E.cx = snap_cx(line, cx);
 }
 

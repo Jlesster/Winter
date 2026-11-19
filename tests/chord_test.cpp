@@ -17,18 +17,25 @@ int main() {
     // Terminal normalization / fallback text
     CHECK(key_normalize(' ', MOD_SHIFT) == (' ' | MOD_SHIFT));
     CHECK(key_normalize(' ', MOD_CTRL) == 0);
-    CHECK(key_text(' ' | MOD_SHIFT) == ' ');
-    CHECK(key_text(0) == NONE);
-    CHECK(key_text('a') == 'a');
-    CHECK(key_text(ARROW_LEFT | MOD_CTRL) == ARROW_LEFT);
+    // Unclaimed keys fall back to their plain key, whatever the modifier
+    CHECK(key_passthrough('a') == 'a');
+    CHECK(key_passthrough('j' | MOD_ALT) == 'j');
+    CHECK(key_passthrough('J' | MOD_ALT) == 'J');
+    CHECK(key_passthrough(' ' | MOD_SHIFT) == ' ');
+    CHECK(key_passthrough(' ' | MOD_ALT) == ' ');
+    CHECK(key_passthrough(0) == NONE);
+    CHECK(key_passthrough(BACKSPACE | MOD_ALT) == BACKSPACE);
+    CHECK(key_passthrough(DELETE | MOD_ALT) == DELETE);
+    CHECK(key_passthrough(ARROW_LEFT | MOD_CTRL) == ARROW_LEFT);
+    CHECK(key_passthrough(CTRL_KEY('a')) == CTRL_KEY('a'));
 
     // Modified Enter stays distinct for mappings but falls back to Enter
     CHECK(key_normalize('\r', MOD_SHIFT) == ('\r' | MOD_SHIFT));
     CHECK(key_normalize('\r', MOD_CTRL) == ('\r' | MOD_CTRL));
     CHECK(key_normalize('\r', MOD_ALT) == ('\r' | MOD_ALT));
-    CHECK(key_text('\r' | MOD_SHIFT) == '\r');
-    CHECK(key_text('\r' | MOD_CTRL) == '\r');
-    CHECK(key_text('\r' | MOD_ALT) == '\r');
+    CHECK(key_passthrough('\r' | MOD_SHIFT) == '\r');
+    CHECK(key_passthrough('\r' | MOD_CTRL) == '\r');
+    CHECK(key_passthrough('\r' | MOD_ALT) == '\r');
 
     Registry& r = registry();
     int hits = 0;
@@ -46,11 +53,12 @@ int main() {
     r.map(INSERT, "<Space>z", "test.hit");
     r.map(INSERT, "<S-CR>a", "test.hit");
     r.map(INSERT, "<C-CR>b", "test.hit");
+    r.map(INSERT, "<A-j>x", "test.hit");
 
     Chord chord;
     std::string emitted;
     const auto emit = [&](int key) {
-        const int c = key_text(key);
+        const int c = key_passthrough(key);
         if(c != NONE && c < 256) emitted += static_cast<char>(c);
     };
 
@@ -140,6 +148,15 @@ int main() {
     chord.timeout(emit);
     CHECK(emitted == "\r");
     CHECK(!chord.pending());
+
+    // a pending modified key replays as its plain key
+    hits = 0;
+    emitted.clear();
+    CHECK(chord.feed(INSERT, 'j' | MOD_ALT, emit) ==
+          Chord::Result::Buffered);
+    CHECK(chord.feed(INSERT, 'q', emit) == Chord::Result::Pass);
+    CHECK(emitted == "j");
+    CHECK(hits == 0);
 
     // unmapped keys pass straight through
     CHECK(chord.feed(INSERT, 'z', emit) == Chord::Result::Pass);

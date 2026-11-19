@@ -8,6 +8,8 @@
 struct Buffer;
 
 void buffer_switch(size_t idx);
+void buffer_entered(
+    Buffer& b);  // buf_enter event + recent files, for window focus
 size_t buffer_open(const std::string& path);
 Buffer* buffer_get(const std::string& path);
 bool buffer_close(size_t idx, bool force);

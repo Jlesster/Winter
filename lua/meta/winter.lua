@@ -59,13 +59,16 @@
 ---@field linewise boolean
 
 ---Mode words accepted by keymaps. `"visual"` covers `v` and `x`.
----@alias winter.ModeName "normal"|"insert"|"replace"|"visual"|"command"|"search"|"files"
+---@alias winter.ModeName "normal"|"insert"|"replace"|"visual"|"command"|"search"|"files"|"terminal"
 
 ---Where a keymap applies. Any of:
 ---  letters: `n` normal, `i` insert, `r` replace, `v`/`x` visual, `c` command,
----           `s` search, `f` file tree; several at once: `"nv"`
+---           `s` search, `f` file tree, `t` focused terminal; several at once: `"nv"`
 ---  a word:  `"normal"`
 ---  a table of either: `{ "n", "x" }`, `{ "normal", "visual" }`, `{ "nx", "i" }`
+---`t` maps run before the shell sees the key, so they override shell binds.
+---A multi-key `t` map (`<C-w>h`) waits `timeoutlen` before unmatched keys go to
+---the shell.
 ---@alias winter.Modes string|(string|winter.ModeName)[]
 
 ---Border style of floats, inputs, pickers and menus.
@@ -115,6 +118,26 @@ function winter.mode() end
 ---@return winter.Range|nil
 function winter.selection() end
 
+---Run `keys` now, in the current mode, with your keymaps in effect (like `:normal`).
+---Anything left unfinished (a pending operator, insert mode, a command line) is
+---ended as if `<Esc>` was typed. Not remembered for `.`.
+---@param keys winter.Keys
+---@return true|nil ok, string? err
+function winter.normal(keys) end
+
+---Queue `keys` for the next turn of the event loop, treated exactly as typed:
+---remembered for `.`, and a half-typed command stays pending.
+---@param keys winter.Keys
+---@return true|nil ok, string? err
+function winter.feedkeys(keys) end
+
+---Run a shell command and wait for it. BLOCKS the editor: short commands only,
+---use `winter.job.run` for anything slow.
+---@param cmd string
+---@param stdin? string
+---@return string output, integer exit_code
+function winter.shell(cmd, stdin) end
+
 --------------------------------------------------------------------------
 -- Options
 --------------------------------------------------------------------------
@@ -129,15 +152,27 @@ function winter.selection() end
 ---@field et boolean Alias of `expandtab`.
 ---@field paste_indent boolean Re-indent pasted text (default true)
 ---@field pi boolean Alias of `paste_indent`.
+---@field numformats string Number kinds Ctrl-A / Ctrl-X bump: a list of `bin,hex,octal,real,version,ident`, or `all` / `none` (decimal only); `-octal,-ident` removes from the default (default `"all"`).
+---@field nf string Alias of `numformats`.
 ---@field indent_engine integer 0 structural with tree-sitter fallback, 1 tree-sitter only, 2 structural only (0..2, default 0)
 ---@field ie integer Alias of `indent_engine`.
 ---@field indentnamespace integer Indent inside `namespace` blocks: 0 flat, 1 indent, 2 follow the block's first line (0..2, default 2)
 ---@field inam integer Alias of `indentnamespace`.
 ---@field indentcase integer Indent `case` labels in a `switch`: 0 flat, 1 indent, 2 follow the block's first line (0..2, default 2)
 ---@field icase integer Alias of `indentcase`.
----@field quit_times integer Extra Ctrl-Q presses needed while there are unsaved changes (0..99, default 3)
 ---@field history integer History entries kept per file (0..10000, default 500)
 ---@field hi integer Alias of `history`.
+---@field foldminlines integer A fold must hide at least this many lines (1..100, default 1)
+---@field fml integer Alias of `foldminlines`.
+---@field foldlevelstart integer Close folds at this depth and deeper when first built; -1 leaves them open (-1..99, default -1)
+---@field fls integer Alias of `foldlevelstart`.
+---@field foldcloser integer Append the closing line (`}`) to the fold text: 0 off, 1 on (default 1)
+---@field tmux_nav integer `<C-w>h/j/k/l` continue into tmux panes at the edge: 0 off, 1 on (default 1)
+---@field tmux_wrap integer ...and wrap around the tmux window: 0 off, 1 on (default 0)
+---@field resize_step integer Cells per window-resize bind, multiplied by the count (1..50, default 1)
+---@field output_mode integer Where build/run output shows: 0 bottom dock, 1 float, 2 buffer (default 0)
+---@field output_height integer Dock rows, title bar included (3..50, default 12)
+---@field output_auto integer Auto-show output: 0 manual, 1 streamed runs and failed builds, 2 always (default 1)
 ---@field remember_cursor boolean Remember the cursor position per file (default true)
 ---@field undofile boolean Persist undo history per file (default true)
 ---@field udf boolean Alias of `undofile`.
@@ -213,7 +248,7 @@ function winter.selection() end
 ---@class winter.OptionInfo
 ---@field name string
 ---@field alias? string
----@field type "boolean"|"integer"|"cursor"|"border"
+---@field type "boolean"|"integer"|"cursor"|"border"|"numformats"
 ---@field min? integer Integers only.
 ---@field max? integer Integers only.
 ---@field value boolean|integer|string
@@ -364,6 +399,18 @@ function winter.buf.save_all() end
 ---@return boolean # `false` for an out-of-range index
 function winter.buf.modified(index) end
 
+---Stable buffer id of the buffer at `index` (default: the current one). Ids
+---survive buffer-list changes; `winter.win` and `winter.api` take ids, while
+---most `winter.buf` functions take list indices.
+---@param index? integer
+---@return integer|nil id
+function winter.buf.id(index) end
+
+---The list index `winter.buf.*` functions take for a buffer id.
+---@param id integer
+---@return integer|nil index
+function winter.buf.by_id(id) end
+
 ---@class winter.cursor
 winter.cursor = {}
 
@@ -389,6 +436,104 @@ function winter.win.size() end
 ---@return integer
 function winter.win.top() end
 
+---@class winter.WinInfo
+---@field id integer
+---@field buf integer Stable buffer id.
+---@field focused boolean
+---@field x integer
+---@field y integer
+---@field width integer Text area.
+---@field height integer Text area, status row excluded.
+---@field line integer
+---@field col integer
+---@field top integer First visible line.
+---@field left integer First visible column.
+
+---Id of the focused window.
+---@return integer
+function winter.win.current() end
+
+---Window ids in layout order (left to right, top to bottom).
+---@return integer[]
+function winter.win.list() end
+
+---@param id integer
+---@return winter.WinInfo|nil
+function winter.win.info(id) end
+
+---Ids of the windows showing buffer id `buf`.
+---@param buf integer
+---@return integer[]
+function winter.win.showing(buf) end
+
+---@param id integer
+---@return integer line, integer col
+function winter.win.get_cursor(id) end
+
+---Clamped into the buffer.
+---@param id integer
+---@param line integer
+---@param col? integer Default 1.
+function winter.win.set_cursor(id, line, col) end
+
+---Stable id of the buffer the window shows.
+---@param id integer
+---@return integer buf
+function winter.win.get_buf(id) end
+
+---Show buffer id `buf` in the window. An unfocused window gets the buffer's
+---remembered cursor and scroll; entering it later fires `buf_enter`.
+---@param id integer
+---@param buf integer
+---@return boolean
+function winter.win.set_buf(id, buf) end
+
+---Make `line` the first visible line (the cursor is pulled into view, keeping
+---`scrolloff`). Wrapped lines and closed folds are not accounted for.
+---@param id integer
+---@param line integer
+function winter.win.set_top(id, line) end
+
+---@param id integer
+---@return true
+function winter.win.focus(id) end
+
+---Split the focused window; the new one shows the same buffer and view and takes focus.
+---@param opts? { vertical?: boolean, before?: boolean }
+---@return integer id
+function winter.win.split(opts) end
+
+---Refuses the last window, and (without `force`) a window holding the only view of a modified buffer.
+---@param id integer
+---@param force? boolean
+---@return boolean ok, string? err
+function winter.win.close(id, force) end
+
+---Close every window but the focused one.
+function winter.win.only() end
+
+---Any CTRL-W command (`"x"` swap, `"r"` rotate, `"H"` move far left, `"="` equalize...), like `:wincmd`.
+---@param key string
+---@param count? integer
+---@return boolean
+function winter.win.cmd(key, count) end
+
+---The window next to the focused one: `"left"` `"down"` `"up"` `"right"` (or `h j k l`).
+---@param dir string
+---@return integer|nil id
+function winter.win.neighbor(dir) end
+
+---Grow (or shrink) the focused window by `dw` columns / `dh` rows.
+---@param dw integer
+---@param dh integer
+function winter.win.resize(dw, dh) end
+
+function winter.win.equalize() end
+
+---The focused window takes the space.
+---@param dim "width"|"height"
+function winter.win.maximize(dim) end
+
 ---@class winter.jump
 winter.jump = {}
 
@@ -399,6 +544,24 @@ function winter.jump.older(count) end
 ---Jumplist forward (default 1 step).
 ---@param count? integer
 function winter.jump.newer(count) end
+
+---@class winter.FoldSetup
+---Fold sources, tried in order.
+---@field providers? ("treesitter"|"indent")[]
+---Commands that open folds under the cursor.
+---@field open? ("search"|"jump"|"undo"|"insert"|"quickfix"|"lsp")[]
+---Same as the `foldminlines` option.
+---@field minlines? integer
+---Same as the `foldlevelstart` option.
+---@field levelstart? integer
+
+---@class winter.fold
+winter.fold = {}
+
+---Configure folding. Unknown provider or `open` names raise. Fields left out
+---keep their current value.
+---@param opts winter.FoldSetup
+function winter.fold.setup(opts) end
 
 --------------------------------------------------------------------------
 -- Keymaps and actions
@@ -436,6 +599,20 @@ function winter.jump.newer(count) end
 ---| "tree.toggle" | "buffer.next" | "buffer.prev" | "buffer.alt"
 ---| "diag.next" | "diag.prev" | "jump.older" | "jump.newer"
 ---| "search.next" | "search.prev"
+---| "win.left" | "win.down" | "win.up" | "win.right" | "win.split"
+---| "win.vsplit" | "win.close" | "win.only" | "win.next" | "win.prev"
+---| "win.last" | "win.swap" | "win.rotate" | "win.rotate_back"
+---| "win.move_left" | "win.move_bottom" | "win.move_top" | "win.move_right"
+---| "win.equalize" | "win.taller" | "win.shorter" | "win.wider"
+---| "win.narrower" | "win.max_height" | "win.max_width"
+---| "win.resize_left" | "win.resize_down" | "win.resize_up" | "win.resize_right"
+---| "edit.increment" | "edit.decrement" | "edit.increment_int" | "edit.decrement_int"
+---| "visual.increment" | "visual.decrement" | "visual.increment_int" | "visual.decrement_int"
+---| "mc.add_next" | "mc.add_down" | "mc.add_up" | "mc.add_all" | "mc.skip_next"
+---| "mc.remove_last" | "mc.next" | "mc.prev" | "mc.clear" | "mc.split_lines"
+---| "output.focus" | "output.toggle"
+---| "term.toggle" | "term.focus" | "term.new" | "term.next" | "term.prev"
+---| "term.float" | "term.bottom" | "term.close" | "term.kill"
 
 ---Passed to every action function.
 ---@class winter.ActionCtx
@@ -458,6 +635,12 @@ function winter.jump.newer(count) end
 ---`count` / `arg`.
 ---@alias winter.ActionStep string|winter.ActionStepTable
 
+---@class winter.KeymapOpts: winter.ActionOpts
+---Shown by `winter.keymap.list`.
+---@field desc? string
+---Map in one buffer only (`true` = the current one, or a buffer id), shadowing the global map. Modes `n i r v` only; dropped when the buffer closes.
+---@field buffer? true|integer
+
 ---@class winter.keymap
 winter.keymap = {}
 
@@ -468,14 +651,29 @@ winter.keymap = {}
 ---@param modes winter.Modes
 ---@param keys winter.Keys
 ---@param action winter.BuiltinAction|string|winter.ActionFn
----@param opts? winter.ActionOpts
+---@param opts? winter.KeymapOpts
 function winter.keymap.set(modes, keys, action, opts) end
 
 ---Remove a mapping. Returns whether anything was mapped (in any of `modes`).
+---With `buffer`, removes that buffer's own map and the global one shows through again.
 ---@param modes winter.Modes
 ---@param keys winter.Keys
+---@param opts? { buffer?: true|integer }
 ---@return boolean
-function winter.keymap.del(modes, keys) end
+function winter.keymap.del(modes, keys, opts) end
+
+---@class winter.KeymapEntry
+---@field mode string
+---@field keys string Key notation, e.g. `"<C-r>gg"`.
+---@field action string
+---@field desc? string
+---@field buffer? integer
+
+---List mappings. Without `buffer`: the global ones, built-ins included. With
+---`buffer`: that buffer's own maps. `mode` filters like `keymap.set` (default: all).
+---@param opts? { mode?: winter.Modes, buffer?: true|integer }
+---@return winter.KeymapEntry[]
+function winter.keymap.list(opts) end
 
 ---@class winter.action
 winter.action = {}
@@ -537,6 +735,51 @@ function winter.cmd.add(name, fn, opts) end
 function winter.cmd.run(line) end
 
 --------------------------------------------------------------------------
+-- Terminal
+--------------------------------------------------------------------------
+
+---Where to show the terminal.
+---@class winter.TermToggleOpts
+---`"float"` or `"bottom"`. Omitted: wherever it was last shown. Remembered
+---for later toggles. Asking for a different place than the one on show moves
+---the terminal there instead of closing it.
+---@field position? "float"|"bottom"
+
+---The integrated terminal (the `:Term` subcommands as Lua calls). Shells keep
+---running when the panel is hidden.
+---@class winter.term
+winter.term = {}
+
+---Show and focus the terminal, or hide it when it is already on show in the
+---requested place. Creates a shell if there is none.
+---@param opts? winter.TermToggleOpts
+function winter.term.toggle(opts) end
+
+---Show and focus the terminal (never hides it).
+function winter.term.open() end
+
+---Hide the panel; the shells keep running.
+function winter.term.close() end
+
+---Open a new terminal tab.
+function winter.term.new() end
+
+---Next terminal tab.
+function winter.term.next() end
+
+---Previous terminal tab.
+function winter.term.prev() end
+
+---Destroy the current terminal tab.
+function winter.term.kill() end
+
+---Show the terminal as a float.
+function winter.term.float() end
+
+---Show the terminal in the bottom dock.
+function winter.term.bottom() end
+
+--------------------------------------------------------------------------
 -- Extending the editing model
 --------------------------------------------------------------------------
 
@@ -565,6 +808,49 @@ function winter.ext.motion(name, fn, keys, opts) end
 ---@param fn fun(line: integer, col: integer, count: integer): integer?, integer?, integer?, integer?
 ---@param keys winter.Keys
 function winter.ext.object(name, fn, keys) end
+
+---What an error-parser function returns for a line (`nil` or `{}` = nothing).
+---@class winter.ErrEvent
+---`"diag"` (default) a diagnostic, `"context"` a line belonging to the previous
+---diagnostic, `"progress"`, `"summary"`, or `"test"`.
+---@field kind? "diag"|"context"|"progress"|"summary"|"test"
+---Diagnostics: `file` is required. `line`/`col`/`end_col` are 1-based.
+---@field file? string
+---@field line? integer
+---@field col? integer
+---@field end_col? integer
+---First letter decides: `w` warning, `n`/`i`/`h` note, anything else error.
+---@field type? string
+---@field text? string
+---@field code? string
+---`kind = "test"`: `"pass"`, `"fail"` or `"skip"` (first letter), and the test name.
+---@field status? string
+---@field name? string
+
+---Pattern form: `pattern` is matched with `string.match`; its captures are
+---stored under the names in `fields` (`"file"`, `"line"`, `"text"`, ...).
+---@class winter.ErrParserPattern
+---@field pattern string
+---@field fields string[]
+---Default `kind` / `type` for matches.
+---@field kind? string
+---@field type? string
+
+---`fn(line, state)`: `state` is a table that lives for one run, for parsers
+---that span several lines.
+---@alias winter.ErrParserFn fun(line: string, state: table): winter.ErrEvent?
+
+---@class winter.errparser
+winter.errparser = {}
+
+---Register a parser for build/run output under `name`.
+---@param name string
+---@param parser winter.ErrParserFn|winter.ErrParserPattern
+function winter.errparser.add(name, parser) end
+
+---Set the default parser chain, tried in order: `{ "gcc", "mylang" }`.
+---@param names string[]
+function winter.errparser.use(names) end
 
 --------------------------------------------------------------------------
 -- Events
@@ -912,6 +1198,10 @@ function winter.picker.recent() end
 ---The built-in live grep picker.
 function winter.picker.grep() end
 
+---Diagnostics picker: this buffer, or every file with diagnostics when `workspace` is true (`:Diagnostics!`).
+---@param workspace? boolean
+function winter.picker.diagnostics(workspace) end
+
 --------------------------------------------------------------------------
 -- Floating windows
 --------------------------------------------------------------------------
@@ -1137,6 +1427,26 @@ function winter.lsp.code_action() end
 ---@param preset? string
 function winter.lsp.rename(preset) end
 
+---Raw request for the current buffer's server. `textDocument` is filled in when
+---`params` omits it. The callback is dropped if you switched buffers meanwhile;
+---compare `winter.api.buf_changedtick` to drop replies for older text.
+---@param method string
+---@param params? table
+---@param cb fun(result: any, err: any)
+---@return true|nil ok, string? why
+function winter.lsp.request(method, params, cb) end
+
+---Does the server advertise this capability, e.g. `"documentSymbolProvider"`?
+---@param capability string
+---@return boolean
+function winter.lsp.supports(capability) end
+
+---LSP position (0-based line, UTF-16 character) to a 1-based line and byte column.
+---@param line0 integer
+---@param character integer
+---@return integer line, integer col
+function winter.lsp.from_pos(line0, character) end
+
 --------------------------------------------------------------------------
 -- Formatting
 --------------------------------------------------------------------------
@@ -1209,3 +1519,338 @@ winter.tree = {}
 ---Override file-tree icons by extension: `{ lua = "\u{e620}" }`.
 ---@param icons table<string, string>
 function winter.tree.icons(icons) end
+
+--------------------------------------------------------------------------
+-- Files
+--------------------------------------------------------------------------
+
+---@class winter.fs
+winter.fs = {}
+
+---@param kind "config"|"data"|"cache"|"state"
+---@return string dir May not exist.
+function winter.fs.stdpath(kind) end
+
+---@param path string
+---@return boolean
+function winter.fs.exists(path) end
+---@param path string
+---@return boolean
+function winter.fs.is_dir(path) end
+---@param path string
+---@return boolean
+function winter.fs.is_file(path) end
+---@param path string
+---@return boolean
+function winter.fs.executable(path) end
+
+---`type` is `"file"`, `"directory"`, `"link"` or `"other"`; links are not followed.
+---@param path string
+---@return { type: string, size: integer, mtime: integer, executable: boolean }|nil stat, string? err
+function winter.fs.stat(path) end
+
+---@param path string
+---@return string|nil data, string? err
+function winter.fs.read(path) end
+
+---@param path string
+---@param data string
+---@param opts? { append?: boolean, parents?: boolean }
+---@return true|nil ok, string? err
+function winter.fs.write(path, data, opts) end
+
+---Sorted by name.
+---@param path string
+---@return { name: string, type: string }[]|nil entries, string? err
+function winter.fs.readdir(path) end
+
+---An existing directory is success.
+---@param path string
+---@param opts? { parents?: boolean }
+---@return true|nil ok, string? err
+function winter.fs.mkdir(path, opts) end
+
+---@param path string
+---@param opts? { recursive?: boolean }
+---@return true|nil ok, string? err
+function winter.fs.remove(path, opts) end
+
+---@param from string
+---@param to string
+---@return true|nil ok, string? err
+function winter.fs.rename(from, to) end
+
+---`nil` when the path does not exist.
+---@param path string
+---@return string|nil
+function winter.fs.realpath(path) end
+
+---@return string
+function winter.fs.cwd() end
+---Empty parts are skipped.
+---@param ... string
+---@return string
+function winter.fs.joinpath(...) end
+---@param path string
+---@return string
+function winter.fs.dirname(path) end
+---@param path string
+---@return string
+function winter.fs.basename(path) end
+
+---Expands a leading `~`, collapses `.` `..` `//`, drops a trailing slash. Purely lexical.
+---@param path string
+---@return string
+function winter.fs.normalize(path) end
+
+---`names` is a name, a glob (`"*.rs"`) or a list of either. Downward searches
+---skip `.git` and `node_modules`; `upward` walks from `path` to `/` (or `stop`).
+---@param names string|string[]
+---@param opts? { path?: string, upward?: boolean, type?: "file"|"directory", limit?: integer, stop?: string }
+---@return string[]
+function winter.fs.find(names, opts) end
+
+---Nearest ancestor of `path` (default: the cwd) holding one of `markers`,
+---e.g. `root({ ".git", "Cargo.toml" }, winter.buf.name())`.
+---@param markers string|string[]
+---@param path? string
+---@return string|nil dir
+function winter.fs.root(markers, path) end
+
+---@class winter.json
+winter.json = {}
+
+---Tables with keys 1..n become arrays, others objects; functions and userdata are errors.
+---@param value any
+---@return string|nil text, string? err
+function winter.json.encode(value) end
+
+---JSON `null` becomes `nil`, so an array holding nulls has holes.
+---@param text string
+---@return any|nil value, string? err
+function winter.json.decode(text) end
+
+--------------------------------------------------------------------------
+-- Registers and marks
+--------------------------------------------------------------------------
+
+---@class winter.reg
+winter.reg = {}
+
+---`name` is one of `" 0-9 - a-z + * %` (default `"`).
+---@param name? string
+---@return string|nil text, boolean? linewise
+function winter.reg.get(name) end
+
+---An uppercase name appends. `"`, `+` and `*` also update the system clipboard.
+---`false` for a read-only or unknown register.
+---@param name string
+---@param text string
+---@param linewise? boolean
+---@return boolean
+function winter.reg.set(name, text, linewise) end
+
+---The registers holding something.
+---@return string[]
+function winter.reg.list() end
+
+---@class winter.MarkPos
+---@field name string
+---@field buf integer Stable buffer id; 0 = its file is closed, open `file` to use it.
+---@field file string
+---@field line integer
+---@field col integer
+
+---Marks for plugins. `a-z` live in a buffer, `A-Z` are file marks, `'` is the jump-origin mark.
+---@class winter.mark
+winter.mark = {}
+
+---Without a position: the cursor of the current buffer. `false` for a bad name.
+---@param name string
+---@param pos? { buf?: integer, line?: integer, col?: integer }
+---@return boolean
+function winter.mark.set(name, pos) end
+
+---@param name string
+---@param buf? integer
+---@return winter.MarkPos|nil
+function winter.mark.get(name, buf) end
+
+---@param name string
+---@param buf? integer
+---@return boolean
+function winter.mark.del(name, buf) end
+
+---That buffer's marks followed by the file marks and `'`.
+---@param buf? integer
+---@return winter.MarkPos[]
+function winter.mark.list(buf) end
+
+---Like `'{name}`, or `` `{name} `` with `exact`.
+---@param name string
+---@param opts? { exact?: boolean }
+---@return boolean
+function winter.mark.jump(name, opts) end
+
+--------------------------------------------------------------------------
+-- Buffer API by stable id (winter.api)
+--------------------------------------------------------------------------
+
+---Works on any buffer by stable id (`winter.buf.id()`), not just the current one.
+---Lines and columns are 1-based, ranges half-open.
+---@class winter.api
+winter.api = {}
+
+---@param buf integer
+---@return boolean
+function winter.api.buf_valid(buf) end
+---@param buf integer
+---@return integer
+function winter.api.buf_line_count(buf) end
+---`last < 0` counts from the end (`-1` = the last line).
+---@param buf integer
+---@param first? integer Default 1.
+---@param last? integer Default -1.
+---@return string[]
+function winter.api.buf_get_lines(buf, first, last) end
+---Replace lines `first..last` (inclusive); `last == first - 1` inserts before `first`. One undo step.
+---@param buf integer
+---@param first integer
+---@param last integer
+---@param lines string[]
+function winter.api.buf_set_lines(buf, first, last, lines) end
+---@param buf integer
+---@return string
+function winter.api.buf_get_text(buf, line1, col1, line2, col2) end
+---Replace `[start, end)` with `lines`. One undo step.
+---@param buf integer
+---@param lines string[]
+function winter.api.buf_set_text(buf, line1, col1, line2, col2, lines) end
+---@param buf integer
+---@return string
+function winter.api.buf_get_name(buf) end
+---Changes with every edit.
+---@param buf integer
+---@return integer
+function winter.api.buf_changedtick(buf) end
+---For a background buffer: the cursor it will have when entered.
+---@param buf integer
+---@return integer line, integer col
+function winter.api.buf_get_cursor(buf) end
+---@param buf integer
+---@param line integer
+---@param col? integer Default 1.
+function winter.api.buf_set_cursor(buf, line, col) end
+
+---@class winter.BufEditEvent
+---@field buf integer
+---@field tick integer
+---@field origin any
+---@field offset integer
+---@field old_len integer
+---@field new_len integer
+---@field first_line integer
+---@field first_col integer
+---@field old_last_line integer Positions in the text before the edit, end exclusive.
+---@field old_last_col integer
+---@field new_last_line integer Positions after the edit, end exclusive.
+---@field new_last_col integer
+
+---`on_edit` runs after each edit; returning `true` detaches. `on_close` runs when
+---the buffer closes. Attachments are dropped on config reload.
+---@param buf integer
+---@param cbs { on_edit?: fun(ev: winter.BufEditEvent): boolean|nil, on_close?: fun(buf: integer) }
+---@return integer handle
+function winter.api.buf_attach(buf, cbs) end
+---@param handle integer
+---@return boolean removed
+function winter.api.buf_detach(handle) end
+
+--------------------------------------------------------------------------
+-- Tree-sitter (winter.ts)
+--------------------------------------------------------------------------
+
+---Nodes are 1-based like the rest of the API; ranges are `line1, col1, line2, col2` (end column exclusive).
+---@class winter.TsNode
+---@field type fun(self): string
+---@field is_named fun(self): boolean
+---@field is_missing fun(self): boolean
+---@field is_extra fun(self): boolean
+---@field has_error fun(self): boolean
+---@field is_error fun(self): boolean
+---@field range fun(self): integer, integer, integer, integer
+---@field byte_range fun(self): integer, integer  0-based, end exclusive
+---@field text fun(self): string
+---@field parent fun(self): winter.TsNode|nil
+---@field next_sibling fun(self): winter.TsNode|nil
+---@field prev_sibling fun(self): winter.TsNode|nil
+---@field next_named_sibling fun(self): winter.TsNode|nil
+---@field prev_named_sibling fun(self): winter.TsNode|nil
+---@field child_count fun(self): integer
+---@field named_child_count fun(self): integer
+---@field child fun(self, i: integer): winter.TsNode|nil  1-based
+---@field named_child fun(self, i: integer): winter.TsNode|nil  1-based
+---@field children fun(self): winter.TsNode[]
+---@field named_children fun(self): winter.TsNode[]
+---@field field fun(self, name: string): winter.TsNode[]  children with that field name
+---@field descendant fun(self, line1: integer, col1: integer, line2?: integer, col2?: integer): winter.TsNode|nil
+---@field named_descendant fun(self, line1: integer, col1: integer, line2?: integer, col2?: integer): winter.TsNode|nil
+---@field id fun(self): integer  identifies the node within its tree (usable as a table key)
+---@field sexpr fun(self): string
+---@field buf fun(self): integer
+---@field lang fun(self): string
+---@field equals fun(self, other: winter.TsNode): boolean
+
+---Predicates: `#eq?` `#not-eq?` `#match?` `#not-match?` `#any-of?` `#not-any-of?`
+---(ECMAScript regex); directives such as `#set!` are accepted and ignored.
+---@class winter.TsQuery
+---@field captures fun(self, node: winter.TsNode, opts?: { first?: integer, last?: integer, limit?: integer }): any
+---@field matches fun(self, node: winter.TsNode, opts?: { first?: integer, last?: integer, limit?: integer }): any
+---@field capture_names fun(self): string[]
+---@field pattern_count fun(self): integer
+---@field lang fun(self): string
+
+---@class winter.ts
+winter.ts = {}
+
+---@param buf? integer Default: the current buffer.
+---@return winter.TsNode|nil root, string? err
+function winter.ts.root(buf) end
+
+---The smallest node containing the position; `named` skips punctuation and keywords.
+---@param buf integer
+---@param line integer
+---@param col integer
+---@param opts? { named?: boolean }
+---@return winter.TsNode|nil node, string? err
+function winter.ts.node_at(buf, line, col, opts) end
+
+---@param buf? integer
+---@return string|nil lang
+function winter.ts.lang(buf) end
+
+---@param lang string
+---@param source string
+---@return winter.TsQuery|nil query, string? err
+function winter.ts.query(lang, source) end
+
+--------------------------------------------------------------------------
+-- Plugins
+--------------------------------------------------------------------------
+
+---@class winter.PluginInfo
+---@field name string
+---@field path string
+---@field started boolean
+---@field disabled boolean
+---@field error? string
+
+---@class winter.plugin
+winter.plugin = {}
+
+---@return winter.PluginInfo[]
+function winter.plugin.list() end
+
+---Names to skip (call before they start).
+---@param ... string
+function winter.plugin.disable(...) end

@@ -24,6 +24,7 @@ struct Cell {
     uint8_t width = 1;
     Style style{};
     char32_t mark = 0;
+    uint32_t tail = 0;  // interned rest of a grapheme cluster (grapheme.hpp)
     bool operator==(const Cell&) const = default;
 };
 
@@ -44,6 +45,12 @@ class Screen {
     std::string out;
     int cur_x = 0, cur_y = 0;
     int scroll_rows = 0;
+    // While a viewport is set, at() / width() / height() are relative to it
+    // and writes outside it land in a scratch cell: the window code draws
+    // with its own coordinates and cannot touch its neighbours.
+    bool vp_on = false;
+    int vp_x = 0, vp_y = 0, vp_w = 0, vp_h = 0;
+    Cell scratch;
 
     void try_scroll();
 
@@ -55,13 +62,25 @@ public:
         back.assign(w * h, Cell{});
         front.assign(w * h, Cell{U'\0'});
     }
-    Cell& at(int x, int y) { return back[y * w + x]; }
+    Cell& at(int x, int y) {
+        if(!vp_on) return back[y * w + x];
+        if(x < 0 || y < 0 || x >= vp_w || y >= vp_h) return scratch = Cell{};
+        return back[(y + vp_y) * w + x + vp_x];
+    }
+    void set_viewport(int x, int y, int vw, int vh) {
+        vp_on = true;
+        vp_x = x;
+        vp_y = y;
+        vp_w = std::max(vw, 0);
+        vp_h = std::max(vh, 0);
+    }
+    void clear_viewport() { vp_on = false; }
     void cursor(int x, int y) {
         cur_x = x;
         cur_y = y;
     }
-    int width() const { return w; }
-    int height() const { return h; }
+    int width() const { return vp_on ? vp_w : w; }
+    int height() const { return vp_on ? vp_h : h; }
     void clear() { back.assign(w * h, Cell{}); }
     void invalidate() { front.assign(front.size(), Cell{U'\0'}); }
     void flush();

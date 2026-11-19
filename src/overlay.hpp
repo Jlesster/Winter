@@ -25,6 +25,7 @@ struct OverlaySpec {
     bool modal = false;
     bool framed = false;
     bool show_in_prompt = false;
+    bool cursor_block = false;  // hardware cursor keeps the normal-mode shape
 
     std::vector<int> pass{':'};
 
@@ -42,6 +43,11 @@ struct OverlaySpec {
         false;  // bottom corners become tees (box continues below)
     std::vector<int>
         dividers;  // rows inside the frame drawn as a rule joined to both sides
+
+    // Inner rows [first, last) drawn as the focused region: their side edges
+    // and the rules directly above and below take `focus_border`.
+    std::optional<std::pair<int, int>> focus_span;
+    Style focus_border{};
 };
 
 struct Viewport {
@@ -56,6 +62,9 @@ struct Rect {
 Rect overlay_place(const OverlaySpec& s, const Viewport& v);
 
 OverlayId overlay_open(OverlaySpec spec);
+// Changes an open overlay's spec in place (e.g. to make it modal). The cell
+// buffer is resized if fn changed w or h.
+void overlay_edit(OverlayId id, const std::function<void(OverlaySpec&)>& fn);
 void overlay_close(OverlayId id);
 void overlay_close_all();
 bool overlay_any();
@@ -71,6 +80,7 @@ bool overlay_modal();
 void overlay_set_title(OverlayId id, std::string title);
 void overlay_set_footer(OverlayId id, std::string footer);
 void overlay_set_cursor(OverlayId id, int x, int y);
-bool overlay_cursor(const Viewport& v, int& sx, int& sy);
+bool overlay_cursor(const Viewport& v, int& sx, int& sy,
+                    bool* block = nullptr);
 
 uint64_t overlay_stamp();

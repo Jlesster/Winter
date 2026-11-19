@@ -130,6 +130,10 @@ void register_builtin_motions() {
     bind_motion("motion.para_fwd", motion::para_fwd, "}");
     bind_motion("motion.match_pair", motion::match_pair, "%");
 
+    // insert mode: Ctrl+Left/Right reuse the b/w word motions
+    registry().map(INSERT, parse_keys("<C-Left>"), "motion.word_prev");
+    registry().map(INSERT, parse_keys("<C-Right>"), "motion.word_next");
+
     // the files pane (mode FILES) has its own keymap; these reuse the same
     // actions, which move the tree selection when the mode is FILES
     registry().map(FILES, "j", "motion.down");

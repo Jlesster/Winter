@@ -159,7 +159,7 @@ void cmd_cbuffer(const CmdLine& c) {
         if(e > i) names.push_back(c.args.substr(i, e - i));
         i = e + 1;
     }
-    if(names.empty()) names = {"gcc", "rustc", "go", "generic"};
+    if(names.empty()) names = {"gcc", "javac", "rustc", "go", "kotlin", "cmake", "meson", "generic"};
     ErrChain chain(names);
     const std::string text = E.buf().pt.text();
     std::error_code ec;
@@ -169,12 +169,20 @@ void cmd_cbuffer(const CmdLine& c) {
     for(size_t i = 0; i < text.size();) {
         const size_t j = text.find('\n', i);
         const size_t e = j == std::string::npos ? text.size() : j;
-        if(auto hit = chain.feed(std::string_view(text).substr(i, e - i))) {
-            hit->file = qf_resolve_path(hit->file, cwd);
-            qf_add(std::move(*hit));
+        ErrEvent ev = chain.feed(std::string_view(text).substr(i, e - i));
+        if(ev.kind == ErrEvent::Kind::Diag) {
+            ev.diag.file = qf_resolve_path(ev.diag.file, cwd);
+            qf_add(std::move(ev.diag));
+        } else if(ev.kind == ErrEvent::Kind::Context) {
+            qf_context(ev.text, ev.col, ev.end_col);
         }
         i = e + 1;
     }
+    while(ErrEvent ev = chain.finish())
+        if(ev.kind == ErrEvent::Kind::Diag) {
+            ev.diag.file = qf_resolve_path(ev.diag.file, cwd);
+            qf_add(std::move(ev.diag));
+        }
     const QfCounts n = qf_counts();
     if(qf_size() == 0) {
         editor_set_status_message("cbuffer: no errors found");
@@ -212,6 +220,18 @@ void qf_add(QfEntry e) {
 void qf_set(std::string title, std::vector<QfEntry> entries) {
     qf_begin(std::move(title));
     for(QfEntry& e : entries) qf_add(std::move(e));
+}
+
+void qf_context(std::string_view text, int col, int end_col) {
+    if(g_list.items.empty()) return;
+    QfEntry& e = g_list.items.back();
+    e.context.emplace_back(text);
+    if(col <= 0) return;
+    if(e.col == 0) e.col = col;
+    if(e.col == col && end_col > col) {
+        e.end_line = e.line;
+        e.end_col = end_col;
+    }
 }
 
 size_t qf_size() { return g_list.items.size(); }

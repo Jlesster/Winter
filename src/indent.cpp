@@ -1,5 +1,7 @@
 #include "indent.hpp"
 #include <cctype>
+#include <span>
+#include <algorithm>
 #include <cstddef>
 #include <cstdlib>
 #include <format>
@@ -131,7 +133,7 @@ public:
         std::string& s = it->second;
         if(!fresh) return s;
         s = text(l);
-        if(_r.preproc && ltrim(s).starts_with('#') || pp_cont(l)) {
+        if(_r.preproc && (ltrim(s).starts_with('#') || pp_cont(l))) {
             s.assign(s.size(), ' ');
             return s;
         }
@@ -400,9 +402,8 @@ bool is_label_prefix(std::string_view tok) {
 
 namespace indent {
 std::string unit() {
-    return opt_et()
-               ? std::string(static_cast<size_t>(opt_sw()), ' ')
-               : std::string("\t");
+    return opt_et() ? std::string(static_cast<size_t>(opt_sw()), ' ')
+                    : std::string("\t");
 }
 
 std::string_view leading_ws(std::string_view line) {

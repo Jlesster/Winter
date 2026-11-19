@@ -2,11 +2,17 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <format>
+#include <memory>
+#include <set>
 #include <vector>
 #include "buffer.hpp"
 #include "editor.hpp"
+#include "jumplist.hpp"
+#include "lsp_sync.hpp"
 #include "options.hpp"
+#include "picker.hpp"
 #include "piece.hpp"
 #include "theme.hpp"
 #include "utf8.hpp"
@@ -172,4 +178,118 @@ void diag_jump(int dir, int count) {
                 "{}: {}", diag_name(d.severity), diag_first_line(d));
             break;
         }
+}
+
+namespace {
+namespace fs = std::filesystem;
+
+struct DiagRow {
+    std::string path;
+    size_t line = 0;       // 0-based
+    size_t col = 0;        // live: byte column. published: server character
+    bool live = true;      // from an open buffer (col is bytes, else see utf16)
+    bool utf16 = false;
+    int severity = 1;
+    std::string msg, source;
+};
+
+std::string diag_abs_path(const Buffer& b) {
+    std::error_code ec;
+    return fs::absolute(b.filename, ec).lexically_normal().string();
+}
+
+void diag_rows_of(Buffer& b, std::vector<DiagRow>& out) {
+    if(b.nofile || b.filename.empty()) return;
+    b.sync_anchors();  // offsets below are for the current text
+    const std::string path = diag_abs_path(b);
+    for(const Diag& d : b.diags) {
+        if(d.severity > opts.diag_severity) continue;
+        const LineCol lc = b.pt.to_linecol(std::min(d.start, b.pt.size()));
+        out.push_back({path, lc.line, lc.col, true, false, d.severity,
+                       std::string(diag_first_line(d)), d.source});
+    }
+}
+}  // namespace
+
+void diag_picker(bool workspace) {
+    std::vector<DiagRow> rows;
+    if(!workspace) {
+        diag_rows_of(E.buf(), rows);
+    } else {
+        std::set<std::string> open;
+        for(auto& up : E.buffers) {
+            if(up->nofile || up->filename.empty()) continue;
+            open.insert(diag_abs_path(*up));
+            diag_rows_of(*up, rows);
+        }
+        for(const PublishedDiag& p : lsp_sync_published()) {
+            if(p.severity > opts.diag_severity || open.contains(p.path))
+                continue;
+            const std::string_view m(p.msg);
+            rows.push_back({p.path, static_cast<size_t>(p.line),
+                            static_cast<size_t>(p.character), false, p.utf16,
+                            p.severity, std::string(m.substr(0, m.find('\n'))),
+                            p.source});
+        }
+    }
+    if(rows.empty()) {
+        editor_set_status_message("No diagnostics");
+        return;
+    }
+    // buffer: reading order. workspace: worst first, then by file.
+    std::ranges::sort(rows, [&](const DiagRow& a, const DiagRow& b) {
+        if(workspace && a.severity != b.severity) return a.severity < b.severity;
+        if(workspace && a.path != b.path) return a.path < b.path;
+        return a.line != b.line ? a.line < b.line
+               : a.col != b.col ? a.col < b.col
+                                : a.severity < b.severity;
+    });
+
+    std::error_code ec;
+    const fs::path cwd = fs::current_path(ec);
+    std::vector<PickItem> items;
+    items.reserve(rows.size());
+    for(size_t i = 0; i < rows.size(); ++i) {
+        const DiagRow& r = rows[i];
+        std::string where = std::format("{}:{}", r.line + 1, r.col + 1);
+        if(workspace) {
+            const fs::path rel = fs::path(r.path).lexically_relative(cwd);
+            const bool inside = !rel.empty() && !rel.native().starts_with("..");
+            where = std::format("{}:{}", inside ? rel.string() : r.path,
+                                where);
+        }
+        PickItem it;
+        it.id = i;
+        it.path = r.path;
+        it.line = static_cast<int>(r.line) + 1;
+        it.col = r.live ? static_cast<int>(r.col) + 1 : 1;
+        it.text = std::format("{:<8}{}  {}{}", diag_name(r.severity), where,
+                              r.msg,
+                              r.source.empty() ? "" : "  [" + r.source + "]");
+        items.push_back(std::move(it));
+    }
+
+    auto keep = std::make_shared<std::vector<DiagRow>>(std::move(rows));
+    PickerSpec s;
+    s.prompt = workspace ? "Workspace diagnostics> " : "Diagnostics> ";
+    s.fuzzy = true;
+    s.preview = true;
+    s.on_accept = [keep](const PickItem& it) {
+        if(it.id >= keep->size()) return;
+        const DiagRow& r = (*keep)[it.id];
+        jump_push();
+        if(!jump_goto(r.path, r.line, r.live ? r.col : 0)) {
+            editor_set_status_message("diagnostics: cannot open {}", r.path);
+            return;
+        }
+        if(r.live) return;
+        // published position: character units -> bytes, now the file is open
+        Buffer& b = E.buf();
+        set_cursor_offset(std::min(
+            lsp_offset(b.pt, static_cast<int64_t>(r.line),
+                       static_cast<int64_t>(r.col), r.utf16),
+            b.pt.size()));
+    };
+    picker_open(std::move(s));
+    picker_add(std::move(items));
 }

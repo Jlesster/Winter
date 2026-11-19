@@ -279,7 +279,15 @@ void send_initialize(Client& c) {
                                  "modification",
                                  "documentation",
                                  "defaultLibrary"})},
-                     {"formats", Json::arr({"relative"})}})},
+                     {"formats", Json::arr({"relative"})},
+                     // We never get overlapping or multiline tokens: say so,
+                     // so servers split them instead of sending them raw.
+                     {"overlappingTokenSupport", false},
+                     {"multilineTokenSupport", false},
+                     // -32802 (ServerCancelled) is retried, see lsp_sync.cpp
+                     {"serverCancelSupport", true},
+                     // unmapped types fall through to tree-sitter
+                     {"augmentsSyntaxTokens", true}})},
                {"completion",
                 Json::obj(
                     {{"completionItem",
@@ -298,6 +306,8 @@ void send_initialize(Client& c) {
           Json::obj({{"configuration", true},
                      {"workspaceFolders", true},
                      {"applyEdit", true},
+                     {"semanticTokens",
+                      Json::obj({{"refreshSupport", true}})},
                      {"workspaceEdit",
                       Json::obj({{"documentChanges", true},
                                  {"resourceOperations",
@@ -378,17 +388,27 @@ LspId lsp_start(LspSpec spec) {
     return id;
 }
 
-void lsp_request(LspId id, std::string_view method, Json params, LspReply cb) {
+int lsp_request(LspId id, std::string_view method, Json params, LspReply cb) {
     Client* c = get(id);
     if(!c || c->state == State::Dead) {
         if(cb) cb(kNone, error_obj(-32099, "server not running"));
-        return;
+        return 0;
     }
     const int rid = c->next_req++;
     if(cb) c->pending[rid] = std::move(cb);
     Json m = make_msg(method, std::move(params));
     m.set("id", rid);
     send(*c, m);
+    return rid;
+}
+
+void lsp_cancel(LspId id, int rid) {
+    Client* c = get(id);
+    if(!c || c->state == State::Dead || rid <= 0) return;
+    // Only tell the server if we were still waiting: a reply that already
+    // arrived has nothing left to cancel.
+    if(c->pending.erase(rid) == 0) return;
+    send(*c, make_msg("$/cancelRequest", Json::obj({{"id", rid}})));
 }
 
 void lsp_notify(LspId id, std::string_view method, Json params) {

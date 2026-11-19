@@ -18,6 +18,11 @@ struct SubstView {
     std::string text;
     std::vector<LineSpan> marks;
     std::vector<Edit> edits;
+    // true: an edit replaces its source range as a unit (concealed markdown,
+    // icons), so an offset inside it lands on the start of the replacement.
+    // false: the replacement is a stand-in for the same text (substitute
+    // preview) and interior offsets map proportionally.
+    bool atomic = false;
     size_t map(size_t off) const;
 };
 

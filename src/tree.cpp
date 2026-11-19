@@ -982,6 +982,10 @@ void palette_open(const fs::path&) {
 
 bool tree_visible() { return g_shown; }
 bool tree_focused() { return focused(); }
+void tree_focus(bool on) {
+    if(on && !g_shown) return;
+    focus(on);
+}
 bool tree_visual() { return g_vis && focused(); }
 bool tree_visual_cancel() {
     if(!g_vis) return false;

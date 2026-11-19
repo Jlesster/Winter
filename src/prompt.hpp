@@ -29,6 +29,9 @@ struct PromptHooks {
         after_key;
 };
 
+// The newest line entered at a prompt (":" = the last command line), or "".
+std::string prompt_history_last(std::string_view prompt);
+
 // Reads a line at the bottom of the screen.
 std::string editor_prompt(std::string_view prompt, const PromptHooks& hooks,
                           std::string_view initial = {});

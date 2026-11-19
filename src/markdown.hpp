@@ -12,9 +12,11 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <map>
 #include <utility>
 #include <vector>
 #include "buffer.hpp"  // Style
+#include "syntax.hpp"  // Span
 
 enum class MdRole : uint8_t {
     Heading,
@@ -28,7 +30,7 @@ enum class MdRole : uint8_t {
     LinkUrl,  // the (url) part
     Quote,
     Bullet,
-    Checkbox,  // level 1 = checked
+    Checkbox,  // level: see md_box_state()
     Rule,
 };
 
@@ -39,7 +41,7 @@ enum class MdRole : uint8_t {
 struct MdSpan {
     size_t lo = 0, hi = 0;
     MdRole role = MdRole::Code;
-    uint8_t level = 0;  // Heading: 1-6. Bullet: 1 = ordered. Checkbox: 1 = done
+    uint8_t level = 0;  // Heading: 1-6. Bullet: 1 = ordered. Checkbox: md_box_state()
     bool marker = false;
     bool fill = false;
 };
@@ -69,13 +71,26 @@ struct MdDoc {
     std::vector<MdSpan> spans;
 };
 
+// Task box state for the char inside `[ ]`: 0 open, 1 done (x/X),
+// 2 cancelled (-), 3 in progress (~); -1 = not a task box.
+inline int md_box_state(char c) {
+    switch(c) {
+        case ' ': return 0;
+        case 'x':
+        case 'X': return 1;
+        case '-': return 2;
+        case '~': return 3;
+        default: return -1;
+    }
+}
+
 std::vector<MdLine> md_blocks(std::string_view src);
 MdDoc md_parse(std::string_view src);
 
 // Theme groups: md.heading, md.h1..md.h6, md.heading.bg, md.code,
 // md.code.block, md.marker, md.strong, md.emph, md.strike, md.link,
 // md.link.url, md.quote, md.bullet, md.checkbox.checked,
-// md.checkbox.unchecked, md.rule. Every default is the built-in look.
+// md.checkbox.unchecked, md.checkbox.cancelled, md.checkbox.progress, md.rule. Every default is the built-in look.
 // View-only groups: md.code.lang, md.table.border, md.table.head,
 // md.callout.<kind> (note, tip, warning, ...).
 Style md_style(MdRole role, int level = 0);
@@ -112,15 +127,44 @@ struct MdEdit {
     bool fill = false;  // repeat `text` out to the view width (rules)
 };
 
+// Pipe tables. Offsets are line-relative bytes. A cell is [cs, ce) between
+// two pipes; [ts, te) is its trimmed content; `w` is the content's display
+// width once inline markers are concealed.
+struct MdCell {
+    uint32_t cs = 0, ce = 0, ts = 0, te = 0;
+    int w = 0;
+};
+struct MdTableRow {
+    uint32_t line = 0;  // buffer line
+    bool delim = false;
+    bool trail = true;  // the row ends in a pipe
+    std::vector<MdCell> cells;
+};
+struct MdTable {
+    std::vector<MdTableRow> rows;  // consecutive lines, header first
+    std::vector<char> align;       // per column: 'l' 'c' 'r'
+    std::vector<int> nat;          // natural content width per column
+    int edge = 0;                  // outer pipes drawn (0-2)
+    // layout for one terminal width: content width per column, or empty when
+    // the columns cannot shrink enough (the table is then drawn raw)
+    mutable int lay_w = -1;
+    mutable std::vector<int> cw;
+};
+
 struct MdState {  // per buffer, owned by Buffer
     uint64_t rev = ~0ULL, theme = ~0ULL;
     size_t spans = 0;
     bool applied = false;
     bool is_md = false;
     std::string fname;  // what is_md was computed for
+    // fenced-block highlights, keyed by "lang\nbody"; rebuilt every parse
+    // so only blocks still in the buffer stay cached
+    std::map<std::string, std::vector<Span>> hl;
     // display edits of line i: edits[line_first[i] .. line_first[i + 1])
     std::vector<uint32_t> line_first;
     std::vector<MdEdit> edits;
+    std::vector<MdTable> tables;
+    std::vector<int32_t> line_tbl;  // per line: index into tables, or -1
 };
 
 struct Buffer;
@@ -139,4 +183,6 @@ void md_build_view(std::string_view src, const MdDoc& d, MdState& m,
 bool md_line_view(int row, std::string_view real, int width, SubstView& out);
 void md_set_enabled(bool on);
 bool md_enabled();
+void md_set_reveal(bool on);  // raw source on the cursor / selected lines
+bool md_reveal();
 void markdown_register_commands();

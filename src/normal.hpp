@@ -23,3 +23,7 @@ void run_operator_on(std::string_view op, const Range& r);
 void dot_after_key(int c, EditorMode before, uint64_t rev_before);
 void dot_supress();
 void dot_replay();
+// Keys fed while this is on are not remembered for `.` (dot-repeat itself and
+// injected keys use it). Returns the previous value.
+bool dot_set_replaying(bool on);
+bool dot_replaying();

@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 #include "columns.hpp"
+#include "grapheme.hpp"
 #include "syntax.hpp"
 #include "theme.hpp"
 #include "utf8.hpp"
@@ -14,6 +15,37 @@
 namespace {
 
 bool sp(char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; }
+
+// Code point classes for emphasis flanking. Bytes >= 0x80 are not "space" or
+// "alnum" to <cctype>, so `snake_café_x` or a NBSP-separated `*word*` used to
+// be judged on a UTF-8 continuation byte.
+bool uni_space(char32_t c) {
+    return c == ' ' || (c >= '\t' && c <= '\r') || c == 0xA0 || c == 0x1680 ||
+           (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 ||
+           c == 0x202F || c == 0x205F || c == 0x3000;
+}
+bool uni_punct(char32_t c) {
+    if(c < 0x80) return std::ispunct(static_cast<int>(c)) != 0;
+    return c == 0xA1 || c == 0xA7 || c == 0xAB || c == 0xB6 || c == 0xB7 ||
+           c == 0xBB || c == 0xBF || (c >= 0x2010 && c <= 0x2027) ||
+           (c >= 0x2030 && c <= 0x205E) || (c >= 0x3001 && c <= 0x3003) ||
+           (c >= 0x3008 && c <= 0x3011) || (c >= 0xFF01 && c <= 0xFF0F) ||
+           (c >= 0xFF1A && c <= 0xFF20) || (c >= 0xFF3B && c <= 0xFF40) ||
+           (c >= 0xFF5B && c <= 0xFF65);
+}
+bool uni_alnum(char32_t c) {
+    if(c < 0x80) return std::isalnum(static_cast<int>(c)) != 0;
+    return !uni_space(c) && !uni_punct(c) && gr_cp_width(c) != 0;
+}
+// the code point ending right before / starting at byte i (U+FFFD at edges)
+char32_t cp_before(std::string_view s, size_t i, size_t lo) {
+    if(i <= lo) return U' ';
+    return utf8_decode(s, utf8_prev(s, i)).cp;
+}
+char32_t cp_at(std::string_view s, size_t i, size_t hi) {
+    if(i >= hi) return U' ';
+    return utf8_decode(s, i).cp;
+}
 
 // ---- block pass ----------------------------------------------------------
 
@@ -121,9 +153,6 @@ void inline_pass(std::string_view s, size_t lo, size_t hi, int depth,
     const auto punct = [](char c) {
         return std::ispunct(static_cast<unsigned char>(c)) != 0;
     };
-    const auto alnum = [](char c) {
-        return std::isalnum(static_cast<unsigned char>(c)) != 0;
-    };
     size_t i = lo;
     while(i < hi) {
         const char c = s[i];
@@ -187,8 +216,8 @@ void inline_pass(std::string_view s, size_t lo, size_t hi, int depth,
             const size_t n = run_len(s, i, hi, c);
             const bool ok = c == '~' ? n == 2 : n <= 3;
             const bool open_ok =
-                ok && i + n < hi && !sp(s[i + n]) &&
-                !(c == '_' && i > lo && alnum(s[i - 1]));
+                ok && i + n < hi && !uni_space(cp_at(s, i + n, hi)) &&
+                !(c == '_' && i > lo && uni_alnum(cp_before(s, i, lo)));
             if(!open_ok) {
                 i += n;
                 continue;
@@ -208,8 +237,9 @@ void inline_pass(std::string_view s, size_t lo, size_t hi, int depth,
                 if(s[j] == c) {
                     const size_t m = run_len(s, j, hi, c);
                     const bool flank =
-                        j > i + n && !sp(s[j - 1]) &&
-                        !(c == '_' && j + m < hi && alnum(s[j + m]));
+                        j > i + n && !uni_space(cp_before(s, j, lo)) &&
+                        !(c == '_' && j + m < hi &&
+                          uni_alnum(cp_at(s, j + m, hi)));
                     if(m == n && flank) {
                         close = j;
                         break;
@@ -327,12 +357,14 @@ MdDoc md_parse(std::string_view src) {
                 size_t c = l.cl;
                 const std::string_view rest = src.substr(c, l.ch - c);
                 if(rest.size() >= 3 && rest[0] == '[' && rest[2] == ']' &&
-                   (rest[1] == ' ' || rest[1] == 'x' || rest[1] == 'X') &&
+                   md_box_state(rest[1]) >= 0 &&
                    (rest.size() == 3 || rest[3] == ' ')) {
+                    const int st = md_box_state(rest[1]);
                     out.push_back({c, c + 3, MdRole::Checkbox,
-                                   static_cast<uint8_t>(rest[1] != ' '),
-                                   true});
+                                   static_cast<uint8_t>(st), true});
                     c += 3;
+                    if(st == 2 && l.ch > c)  // cancelled: strike the item
+                        out.push_back({c, l.ch, MdRole::Strike});
                 }
                 inline_pass(src, c, l.ch, 0, out);
                 break;
@@ -378,9 +410,20 @@ Style md_style(MdRole r, int lv) {
                             Style{.fg = 0x9399b2, .attrs = ATTR_ITALIC});
         case MdRole::Bullet: return theme_ui("md.bullet", Style{.fg = 0xcba6f7});
         case MdRole::Checkbox:
-            return lv ? theme_ui("md.checkbox.checked", Style{.fg = 0xa6e3a1})
-                      : theme_ui("md.checkbox.unchecked",
-                                 Style{.fg = 0xf9e2af});
+            switch(lv) {
+                case 1:
+                    return theme_ui("md.checkbox.checked",
+                                    Style{.fg = 0xa6e3a1});
+                case 2:
+                    return theme_ui("md.checkbox.cancelled",
+                                    Style{.fg = 0x6c7086});
+                case 3:
+                    return theme_ui("md.checkbox.progress",
+                                    Style{.fg = 0x89b4fa});
+                default:
+                    return theme_ui("md.checkbox.unchecked",
+                                    Style{.fg = 0xf9e2af});
+            }
         case MdRole::Rule: return theme_ui("md.rule", Style{.fg = 0x585b70});
     }
     return {};
@@ -404,12 +447,12 @@ std::string fit_cells(std::string_view s, int w) {
     std::string out;
     int used = 0;
     for(size_t i = 0; i < s.size();) {
-        const Decoded d = utf8_decode(s, i);
-        const int cw = cell_width(d.cp, 0);
+        const size_t e = gr_next(s, i);  // never split a cluster
+        const int cw = cluster_width(s, i, e, 0);
         if(used + cw > w) break;
-        out.append(s.substr(i, d.len));
+        out.append(s.substr(i, e - i));
         used += cw;
-        i += d.len;
+        i = e;
     }
     return out;
 }

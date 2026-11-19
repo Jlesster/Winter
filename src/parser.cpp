@@ -3,17 +3,24 @@
 #include <unistd.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <lua.hpp>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string_view>
 #include <system_error>
 #include <vector>
+
+#include <tree_sitter/api.h>
+#include "filetype.hpp"
 #include "job.hpp"
 #include "json.hpp"
 #include "script.hpp"
@@ -26,12 +33,6 @@ constexpr ParserInfo kParsers[] = {
 std::map<std::string, const TSLanguage*, std::less<>> g_loaded;
 std::set<std::string, std::less<>> g_busy;
 std::string g_err;
-
-const ParserInfo* find(std::string_view n) {
-    for(const auto& p : kParsers)
-        if(p.name == n) return &p;
-    return nullptr;
-}
 
 std::string data_dir() {
     if(const char* x = std::getenv("XDG_DATA_HOME"); x && *x)
@@ -72,6 +73,78 @@ std::string lower(std::string s) {
     for(char& c : s)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
+}
+
+// ---- grammar table ----------------------------------------------------------
+// kParsers is the compiled-in seed. grammars.v2.tsv
+// ("name<TAB>url<TAB>subdir<TAB>rev" per line, written by parser_refresh)
+// replaces url/subdir/rev; exts always come from the seed, and seed rows the
+// registry lacks (tmux) are kept.
+constexpr std::string_view kLinguistUrl =
+    "https://raw.githubusercontent.com/github-linguist/linguist/main/lib/"
+    "linguist/languages.yml";
+constexpr std::string_view kRegistryUrl =
+    "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/main/"
+    "lua/nvim-treesitter/parsers.lua";
+constexpr std::string_view kBuiltin[] = {"c", "cpp", "java", "lua", "rust"};
+
+// Old blobs are never freed: parser_lang_for_* hand out views into them.
+std::deque<std::string> g_blobs;
+std::vector<ParserInfo> g_table;
+bool g_table_ok = false;
+bool g_refreshing = false;
+
+std::string grammars_path() { return data_dir() + "/grammars.v2.tsv"; }
+
+void load_table() {
+    g_table_ok = true;
+    g_meta_ok = false;  // Meta points into the old table
+    g_table.assign(std::begin(kParsers), std::end(kParsers));
+    std::string txt = read_file(grammars_path());
+    if(txt.empty()) return;
+    const std::string_view blob = g_blobs.emplace_back(std::move(txt));
+    std::vector<ParserInfo> reg;
+    for(size_t pos = 0; pos < blob.size();) {
+        size_t end = blob.find('\n', pos);
+        if(end == std::string_view::npos) end = blob.size();
+        const std::string_view line = blob.substr(pos, end - pos);
+        pos = end + 1;
+        std::string_view f[4];
+        size_t n = 0, s = 0;
+        while(n < 4) {
+            const size_t t = line.find('\t', s);
+            f[n++] = line.substr(s, t == std::string_view::npos ? t : t - s);
+            if(t == std::string_view::npos) break;
+            s = t + 1;
+        }
+        if(n == 4 && !f[0].empty() && !f[1].empty())
+            reg.push_back({f[0], f[1], f[2], {}, f[3]});
+    }
+    std::vector<ParserInfo> out;
+    for(ParserInfo r : reg) {
+        if(std::ranges::find(kBuiltin, r.name) != std::end(kBuiltin)) continue;
+        for(const ParserInfo& s : kParsers)
+            if(s.name == r.name) r.exts = s.exts;
+        out.push_back(r);
+    }
+    if(out.empty()) return;  // unreadable cache: keep the seed
+    for(const ParserInfo& s : kParsers)
+        if(std::ranges::none_of(
+               out, [&](const ParserInfo& o) { return o.name == s.name; }))
+            out.push_back(s);
+    std::ranges::sort(out, {}, &ParserInfo::name);
+    g_table = std::move(out);
+}
+
+const std::vector<ParserInfo>& table() {
+    if(!g_table_ok) load_table();
+    return g_table;
+}
+
+const ParserInfo* find(std::string_view n) {
+    for(const ParserInfo& p : table())
+        if(p.name == n) return &p;
+    return nullptr;
 }
 
 void load_meta() {
@@ -146,12 +219,31 @@ for l in c cpp java lua rust ecma jsx html_tags; do
 done
 
 echo "cloning $NAME"
-git clone --depth 1 -q "$URL" "$tmp/repo"
+if [ -n "$REV" ] \
+   && git init -q "$tmp/repo" \
+   && git -C "$tmp/repo" fetch --depth 1 -q "$URL" "$REV" \
+   && git -C "$tmp/repo" checkout -q FETCH_HEAD; then
+    :
+else
+    rm -rf "$tmp/repo"
+    git clone --depth 1 -q "$URL" "$tmp/repo"
+    REV=
+fi
 root="$tmp/repo"
 cd "$root/$SUB"
 if [ ! -f src/parser.c ]; then
-  echo "$NAME: repo has no src/parser.c (needs tree-sitter generate)"
-  exit 1
+    # Many grammars (tmux, latex, swift, ...) only commit grammar.js.
+    if [ -f src/grammar.json ]; then gen=src/grammar.json
+    elif [ -f grammar.js ]; then gen=
+    else echo "$NAME: no src/parser.c and no grammar to generate it from"; exit 1; fi
+    command -v tree-sitter >/dev/null 2>&1 || {
+        echo "$NAME: repo has no src/parser.c; install the tree-sitter CLI to generate it"
+        exit 1; }
+    if [ -z "$gen" ]; then command -v node >/dev/null 2>&1 || {
+        echo "$NAME: generating from grammar.js needs node"; exit 1; }; fi
+    echo "generating $NAME"
+    tree-sitter generate --abi "$ABI" $gen >"$tmp/gen.log" 2>&1 || {
+        echo "$NAME: tree-sitter generate failed: $(tail -n 1 "$tmp/gen.log")"; exit 1; }
 fi
 
 mkdir -p "$DATA/parsers" "$DATA/queries/$NAME"
@@ -182,6 +274,7 @@ mkdir -p "$DATA/parsers" "$DATA/queries/$NAME"
 "$link" -shared -o "$DATA/parsers/$NAME.so.new" $objs
 echo "installing $NAME"
 mv -f "$DATA/parsers/$NAME.so.new" "$DATA/parsers/$NAME.so"
+printf '%s\n' "$REV" > "$DATA/parsers/$NAME.rev"
 q="$root/$SUB/queries"; [ -d "$q" ] || q="$root/queries"
 if [ -f "$q/highlights.scm" ]; then cp -f "$q/highlights.scm" "$DATA/queries/$NAME/"; fi
 echo "done $NAME"
@@ -201,22 +294,156 @@ for k in indents highlights injections; do fetch_q "$NAME" "$k"; done
 
 std::string script(const ParserInfo& p) {
     std::string s = "NAME=" + sh_quote(p.name) + "\nURL=" + sh_quote(p.url) +
-                    "\nSUB=" + sh_quote(p.subdir) +
+                    "\nSUB=" + sh_quote(p.subdir) + "\nREV=" + sh_quote(p.rev) +
+                    "\nABI=" + std::to_string(TREE_SITTER_LANGUAGE_VERSION) +
                     "\nDATA=" + sh_quote(data_dir()) + "\n";
     s += kBody;
     return s;
 }
 
+std::string lua_str(lua_State* L, const char* key) {
+    lua_getfield(L, -1, key);
+    std::string s = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : "";
+    lua_pop(L, 1);
+    return s;
+}
+
+bool registry_to_tsv(const std::string& src, std::string& out,
+                     std::string& err) {
+    lua_State* L = luaL_newstate();
+    if(!L) {
+        err = "out of memory";
+        return false;
+    }
+    lua_sethook(
+        L,
+        [](lua_State* l, lua_Debug*) {
+            luaL_error(l, "parsers.lua ran too long");
+        },
+        LUA_MASKCOUNT,
+        10'000'000);
+    if(luaL_loadbuffer(L, src.data(), src.size(), "=parsers.lua") != LUA_OK ||
+       lua_pcall(L, 0, 1, 0) != LUA_OK || !lua_istable(L, -1)) {
+        const char* m =
+            lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : nullptr;
+        err = m ? m : "parsers.lua did not return a table";
+        lua_close(L);
+        return false;
+    }
+    size_t rows = 0;
+    for(lua_pushnil(L); lua_next(L, -2); lua_pop(L, 1)) {
+        if(lua_type(L, -2) != LUA_TSTRING || !lua_istable(L, -1)) continue;
+        const std::string name = lua_tostring(L, -2);
+        lua_getfield(L, -1, "tier");
+        const bool unsupported =
+            lua_isnumber(L, -1) && lua_tointeger(L, -1) == 4;
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "install_info");
+        // generate / generate_from_json rows stay: the installer builds
+        // src/parser.c itself when the repo doesn't ship one.
+        if(!unsupported && lua_istable(L, -1)) {
+            const std::string url = lua_str(L, "url");
+            if(!url.empty()) {
+                out += name + '\t' + url + '\t' + lua_str(L, "location") +
+                       '\t' + lua_str(L, "revision") + '\n';
+                ++rows;
+            }
+        }
+        lua_pop(L, 1);
+    }
+    lua_close(L);
+    if(rows < 50) {
+        err = "parsers.lua gave only " + std::to_string(rows) + " grammars";
+        return false;
+    }
+    return true;
+}
+
+bool build_grammars(std::string& err) {
+    std::string tsv;
+    if(!registry_to_tsv(read_file(data_dir() + "/parsers.lua"), tsv, err))
+        return false;
+    const std::string path = grammars_path();
+    {
+        std::ofstream o(path + ".new", std::ios::binary | std::ios::trunc);
+        o << tsv;
+        o.close();
+        if(o.fail()) {
+            err = "can't write " + path;
+            return false;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(path + ".new", path, ec);
+    if(ec) {
+        err = ec.message();
+        return false;
+    }
+    return true;
+}
+
+bool outdated(const ParserInfo& p) {
+    if(p.rev.empty() || !parser_installed(p.name)) return false;
+    std::string have =
+        read_file(data_dir() + "/parsers/" + std::string(p.name) + ".rev");
+    while(!have.empty() && (have.back() == '\n' || have.back() == '\r'))
+        have.pop_back();
+    return have != p.rev;
+}
+
+struct UpdateRun {
+    std::deque<std::string> todo;
+    int ok = 0, bad = 0;
+    UpdateEvents ev;
+};
+std::optional<UpdateRun> g_upd;
+
+void update_next() {
+    if(!g_upd) return;
+    if(g_upd->todo.empty()) {
+        const UpdateEvents ev = std::move(g_upd->ev);
+        const int ok = g_upd->ok, bad = g_upd->bad;
+        g_upd.reset();
+        if(ev.done) ev.done(ok, bad);
+        return;
+    }
+    const std::string lang = std::move(g_upd->todo.front());
+    g_upd->todo.pop_front();
+    const JobId id = parser_install(
+        lang,
+        [lang](std::string_view line) {
+            if(g_upd && g_upd->ev.progress) g_upd->ev.progress(lang, line);
+        },
+        [lang](bool ok, std::string msg) {
+            if(!g_upd) return;
+            (ok ? g_upd->ok : g_upd->bad)++;
+            if(g_upd->ev.each) g_upd->ev.each(lang, ok, msg);
+            update_next();
+        });
+    if(!id) {
+        ++g_upd->bad;
+        if(g_upd->ev.each) g_upd->ev.each(lang, false, "already running");
+        update_next();
+    }
+}
+
 }  // namespace
 
 bool parser_known(std::string_view lang) { return find(lang) != nullptr; }
+bool parser_builtin(std::string_view lang) {
+    return std::ranges::find(kBuiltin, lang) != std::end(kBuiltin);
+}
+bool parser_usable(std::string_view lang) {
+    return parser_builtin(lang) || parser_installed(lang);
+}
+std::string parser_data_dir() { return data_dir(); }
 bool parser_installed(std::string_view lang) {
     return access(so_path(lang).c_str(), R_OK) == 0;
 }
 std::string parser_error() { return g_err; }
 
 std::string_view parser_lang_for_ext(std::string_view ext) {
-    for(const auto& p : kParsers) {
+    for(const auto& p : table()) {
         std::istringstream in{std::string(p.exts)};
         for(std::string e; in >> e;)
             if(e == ext) return p.name;
@@ -261,7 +488,7 @@ std::string parser_query(std::string_view lang, std::string_view kind) {
 
 std::string parser_list() {
     std::string o;
-    for(const auto& p : kParsers) {
+    for(const auto& p : table()) {
         if(!o.empty()) o += ' ';
         o += p.name;
         if(parser_installed(p.name)) o += '*';
@@ -293,4 +520,71 @@ JobId parser_install(std::string_view lang,
                        }});
     if(id) g_busy.insert(name);
     return id;
+}
+
+const std::vector<ParserInfo>& parser_table() { return table(); }
+
+void parser_refresh(std::function<void(bool, std::string)> done) {
+    const auto finish = [done](bool ok, std::string msg) {
+        if(done) done(ok, std::move(msg));
+    };
+    if(g_refreshing) return finish(false, "already refreshing");
+    const std::string d = sh_quote(data_dir());
+    std::string cmd = "set -eu\nmkdir -p " + d + "\ncurl -fsSL --max-time 30 " +
+                      sh_quote(kRegistryUrl) + " -o " + d +
+                      "/parsers.lua.new\nmv -f " + d + "/parsers.lua.new " + d +
+                      "/parsers.lua\n"
+                      // filetype data is best effort: never fails the refresh
+                      "curl -fsSL --max-time 30 " + sh_quote(kLinguistUrl) + " -o " + d +
+                      "/languages.yml.new && mv -f " + d + "/languages.yml.new " + d +
+                      "/languages.yml || rm -f " + d + "/languages.yml.new\n";
+    g_refreshing = true;
+    const JobId id = job_start(
+        {.cmd = std::move(cmd), .on_exit = [finish](JobResult r) {
+             g_refreshing = false;
+             if(r.code != 0)
+                 return finish(false, "fetch failed: " + last_line(r.out));
+             std::string err;
+             if(!build_grammars(err)) return finish(false, err);
+             g_table_ok = false;  // reload on next use
+             std::string msg = std::to_string(table().size()) + " grammars";
+             std::string ferr;
+             if(!ft::rebuild(ferr)) msg += "; filetypes: " + ferr;
+             finish(true, std::move(msg));
+         }});
+    if(!id) {
+        g_refreshing = false;
+        finish(false, "can't start curl");
+    }
+}
+
+bool parser_update(std::string_view lang, bool force, UpdateEvents ev) {
+    if(g_upd || g_refreshing) return false;
+    g_upd.emplace();
+    g_upd->ev = std::move(ev);
+    parser_refresh([only = std::string(lang), force](bool ok, std::string msg) {
+        if(!g_upd) return;
+        if(!ok && g_upd->ev.progress)
+            g_upd->ev.progress(
+                "", "grammar list: " + msg + " (using the cached one)");
+        for(const ParserInfo& p : table()) {
+            if((!only.empty() && p.name != only) || !parser_installed(p.name))
+                continue;
+            if(force || outdated(p)) g_upd->todo.emplace_back(p.name);
+        }
+        update_next();
+    });
+    return true;
+}
+
+// Silent and asynchronous; never blocks startup. Weekly unless the file is
+// missing.
+void parser_autorefresh() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const auto t = fs::last_write_time(grammars_path(), ec);
+    if(!ec && fs::file_time_type::clock::now() - t < std::chrono::hours(24 * 7) &&
+       fs::exists(data_dir() + "/filetypes.tsv", ec))
+        return;
+    parser_refresh({});
 }

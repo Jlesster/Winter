@@ -4,19 +4,24 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "columns.hpp"
 #include "comment.hpp"
 #include "core.hpp"
 #include "editor.hpp"
 #include "fold_buf.hpp"
+#include "grapheme.hpp"
 #include "indent.hpp"
 #include "keys.hpp"
+#include "num.hpp"
 #include "options.hpp"
 #include "piece.hpp"
+#include "syntax.hpp"
 #include "utf8.hpp"
 
 namespace {
@@ -254,8 +259,8 @@ void editor_strip_autoindent() {
     const std::string lead = std::exchange(g_ai_text, {});
     if(l == SIZE_MAX || l >= B.pt.line_count()) return;
     const std::string t = B.pt.line_text(l);
-    if(t.empty() ||
-       t.find_first_not_of(" \t") != std::string::npos && t != lead)
+    if(t.empty() || t.find_first_not_of(" \t") != std::string::npos ||
+       t != lead)
         return;
     B.pt.remove(B.pt.line_start(l), t.size());
     if(static_cast<size_t>(E.cy) == l) E.cx = 0;
@@ -425,7 +430,7 @@ void editor_delete_char() {
             E.cx--;
             return;
         }
-        const int from = static_cast<int>(utf8_prev(line, E.cx));
+        const int from = static_cast<int>(gr_prev(line, E.cx));
         E.buf().pt.remove(pos - (E.cx - from), E.cx - from);
         E.cx = from;
     } else {
@@ -461,6 +466,41 @@ void editor_delete_word_back() {
     E.cx = i;
 }
 
+size_t word_fwd_stop(std::string_view line, size_t pos) {
+    const auto cls = [&](size_t k) {
+        const auto c = static_cast<unsigned char>(line[k]);
+        if(c == ' ' || c == '\t') return 0;
+        return (c >= 0x80 || std::isalnum(c) || c == '_') ? 1 : 2;
+    };
+    const size_t n = line.size();
+    size_t i = pos;
+    while(i < n && cls(i) == 0) ++i;
+    if(i == n) return n;
+    const int c = cls(i);
+    while(i < n && cls(i) == c) ++i;
+    return i;
+}
+
+void editor_delete_word_forward() {
+    const std::string line = E.buf().pt.line_text(E.cy);
+    if(E.cx >= static_cast<int>(line.size())) return editor_delete_forward();
+    const size_t to = word_fwd_stop(line, static_cast<size_t>(E.cx));
+    E.buf().pt.remove(cursor_offset(), to - static_cast<size_t>(E.cx));
+}
+
+void editor_kill_to_bol() {
+    if(E.cx == 0) return;
+    const size_t n = static_cast<size_t>(E.cx);
+    E.buf().pt.remove(cursor_offset() - n, n);
+    E.cx = 0;
+}
+
+void editor_kill_to_eol() {
+    const int len = static_cast<int>(line_len(E.cy));
+    if(E.cx >= len) return editor_delete_forward();
+    E.buf().pt.remove(cursor_offset(), static_cast<size_t>(len - E.cx));
+}
+
 void replace_reset() {
     g_replaced.clear();
     g_pending.clear();
@@ -474,7 +514,7 @@ void replace_char_at_cursor(int count, std::string_view ch) {
     size_t end = start;
     for(size_t i = 0; i < n; ++i) {
         if(end >= line.size()) return;
-        end = utf8_next(line, end);
+        end = gr_next(line, end);
     }
     std::string rep;
     for(size_t i = 0; i < n; ++i) rep += ch;
@@ -486,13 +526,106 @@ void replace_char_at_cursor(int count, std::string_view ch) {
     E.want_rx = cx_to_rx(pt.line_text(E.cy), E.cx);
 }
 
+bool bump_number_at_cursor(int64_t delta, bool int_only) {
+    PieceTable& pt = E.buf().pt;
+    const std::string line = pt.line_text(E.cy);
+    const auto ed =
+        num::bump(line,
+                  static_cast<size_t>(E.cx),
+                  delta,
+                  {.formats = opts.numformats, .int_only = int_only});
+    if(!ed) return false;
+    const size_t at = pt.line_start(E.cy) + ed->start;
+    {
+        PieceTable::Group g(pt);
+        pt.remove(at, ed->len);
+        pt.insert(at, ed->text);
+    }
+    E.cx = static_cast<int>(ed->cursor);
+    E.want_rx = cx_to_rx(pt.line_text(E.cy), E.cx);
+    return true;
+}
+
+void bump_numbers_in_range(size_t start, size_t end, bool linewise,
+                           int64_t delta, bool progressive) {
+    PieceTable& pt = E.buf().pt;
+    const size_t l0 = pt.line_of(start);
+    const size_t l1 = pt.line_of(end > start ? end - 1 : start);
+    // columns computed before any edit so they remain valid
+    const size_t first_col = linewise ? 0 : start - pt.line_start(l0);
+    const size_t last_end =
+        linewise ? static_cast<size_t>(-1) : end - pt.line_start(l1);
+    PieceTable::Group g(pt);
+    int64_t step = delta;
+    for(size_t l = l0; l <= l1; ++l) {
+        const std::string line = pt.line_text(l);
+        num::Opts o{.formats = opts.numformats};
+        if(l == l1) o.max_start = last_end;
+        const auto ed = num::bump(line, l == l0 ? first_col : 0, step, o);
+        if(!ed) continue;
+        const size_t at = pt.line_start(l) + ed->start;  // fresh line each time
+        pt.remove(at, ed->len);
+        pt.insert(at, ed->text);
+        if(progressive) step += delta;  // g<C-a>: +1/+2/+3 down the lines
+    }
+}
+
+static char swap_case_ascii(char c) {
+    if(c >= 'a' && c <= 'z') return static_cast<char>(c - 'a' + 'A');
+    if(c >= 'A' && c <= 'Z') return static_cast<char>(c - 'A' + 'a');
+    return c;
+}
+
+void toggle_case_at_cursor(int count) {
+    PieceTable& pt = E.buf().pt;
+    const std::string line = pt.line_text(E.cy);
+    const size_t start = static_cast<size_t>(E.cx);
+    if(start >= line.size()) return;
+    const size_t n = static_cast<size_t>(std::max(count, 1));
+    size_t end = start;
+    for(size_t i = 0; i < n && end < line.size(); ++i) end = gr_next(line, end);
+    std::string text = line.substr(start, end - start);
+    for(char& ch : text) ch = swap_case_ascii(ch);
+    if(text != std::string_view(line).substr(start, end - start)) {
+        const size_t at = cursor_offset();
+        PieceTable::Group g(pt);
+        pt.remove(at, end - start);
+        pt.insert(at, text);
+    }
+    E.cx = static_cast<int>(end < line.size() ? end : gr_prev(line, end));
+    E.want_rx = cx_to_rx(pt.line_text(E.cy), E.cx);
+}
+
+void toggle_case_in_range(size_t start, size_t end, bool linewise) {
+    PieceTable& pt = E.buf().pt;
+    const size_t l0 = pt.line_of(start);
+    const size_t l1 = pt.line_of(end > start ? end - 1 : start);
+    const size_t first_col = linewise ? 0 : start - pt.line_start(l0);
+    const size_t last_end =
+        linewise ? static_cast<size_t>(-1) : end - pt.line_start(l1);
+    PieceTable::Group g(pt);
+    for(size_t l = l0; l <= l1; ++l) {
+        const std::string line = pt.line_text(l);
+        const size_t a = l == l0 ? first_col : 0;
+        const size_t b =
+            l == l1 ? std::min(last_end, line.size()) : line.size();
+        if(a >= b) continue;
+        std::string text = line.substr(a, b - a);
+        for(char& ch : text) ch = swap_case_ascii(ch);
+        if(text == std::string_view(line).substr(a, b - a)) continue;
+        const size_t at = pt.line_start(l) + a;
+        pt.remove(at, b - a);
+        pt.insert(at, text);
+    }
+}
+
 bool replace_key(int c) {
     PieceTable& pt = E.buf().pt;
     if(c == BACKSPACE || c == CTRL_KEY('h')) {
         g_pending.clear();
         const std::string line = pt.line_text(E.cy);
         const size_t cx = static_cast<size_t>(E.cx);
-        const size_t prev = utf8_prev(line, cx);
+        const size_t prev = gr_prev(line, cx);
         if(g_replaced.empty()) {
             E.cx = static_cast<int>(prev);
             return true;
@@ -520,7 +653,7 @@ bool replace_key(int c) {
     const size_t cx = static_cast<size_t>(E.cx);
     std::string old;
     if(cx < line.size()) {
-        const size_t n = utf8_next(line, cx) - cx;
+        const size_t n = gr_next(line, cx) - cx;
         old = line.substr(cx, n);
         pt.remove(cursor_offset(), n);
     }
@@ -549,7 +682,7 @@ void editor_paste(std::string text) {
     if(!ins) {
         const std::string line = E.buf().pt.line_text(E.cy);
         if(E.cx < static_cast<int>(line.size()))
-            at += utf8_next(line, static_cast<size_t>(E.cx)) -
+            at += gr_next(line, static_cast<size_t>(E.cx)) -
                   static_cast<size_t>(E.cx);
     }
     E.buf().pt.insert(at, s);
@@ -565,7 +698,7 @@ void editor_paste(std::string text) {
     set_cursor_offset(pt.line_end(l1) - tail);
     const std::string line = E.buf().pt.line_text(E.cy);
     if(!ins && E.cx > 0)
-        E.cx = static_cast<int>(utf8_prev(line, static_cast<size_t>(E.cx)));
+        E.cx = static_cast<int>(gr_prev(line, static_cast<size_t>(E.cx)));
     E.want_rx = cx_to_rx(line, E.cx);
 }
 
@@ -573,7 +706,7 @@ void editor_delete_forward() {
     const std::string line = E.buf().pt.line_text(E.cy);
     const size_t pos = cursor_offset();
     if(E.cx < static_cast<int>(line.size())) {
-        const int to = static_cast<int>(utf8_next(line, E.cx));
+        const int to = static_cast<int>(gr_next(line, E.cx));
         E.buf().pt.remove(pos, static_cast<size_t>(to - E.cx));
     } else if(E.cy < E.num_rows() - 1) {
         E.buf().pt.remove(pos, 1);

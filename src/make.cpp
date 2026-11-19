@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <format>
@@ -13,7 +14,9 @@
 #include "editor.hpp"
 #include "errparse.hpp"
 #include "job.hpp"
+#include "output.hpp"
 #include "quickfix.hpp"
+#include "term_panel.hpp"
 
 // The editor side of build delegation: runs the plan from build_plan() as a
 // job, feeds its output through the error parsers into the quickfix list.
@@ -21,85 +24,138 @@
 namespace {
 
 namespace fs = std::filesystem;
-
-constexpr size_t kMaxOut = 4u << 20;     // raw output kept for :mout
-constexpr size_t kMaxCarry = 64u << 10;  // longest line we keep waiting for a \n
+using Clock = std::chrono::steady_clock;
 
 struct Run {
     JobId id = 0;
     std::unique_ptr<ErrChain> chain;
     std::vector<fs::path> bases;
     fs::path root;
-    std::string carry;  // trailing partial line
-    std::string out;
-    bool truncated = false;
+    OutId out = 0;   // the run's OutputModel
+    size_t fed = 0;  // model lines already given to the parsers
     bool nojump = false;
+    bool have_diag = false;  // a Context line has a diagnostic to join
+    char last_type = 'e';
+    int t_pass = 0, t_fail = 0, t_skip = 0;
+    std::string progress;
+    Clock::time_point status_at{};
     QfCounts shown;  // counts last reported in the status line
-    std::map<std::string, std::string> resolved;  // per run: tool path -> absolute
+    std::map<std::string, std::string>
+        resolved;  // per run: tool path -> absolute
 } g_run;
 
 unsigned g_gen = 0;  // callbacks of a superseded run compare this and bail
 std::string g_makeprg;
-std::string g_last_out;
 
-void feed_line(std::string_view l) {
-    auto hit = g_run.chain->feed(l);
-    if(!hit) return;
-    auto it = g_run.resolved.find(hit->file);
-    if(it == g_run.resolved.end())
-        it = g_run.resolved
-                 .emplace(hit->file,
-                          build_resolve_path(hit->file, g_run.bases, g_run.root))
-                 .first;
-    hit->file = it->second;
-    qf_add(std::move(*hit));
+void handle(size_t idx, ErrEvent ev) {
+    switch(ev.kind) {
+        case ErrEvent::Kind::None: return;
+        case ErrEvent::Kind::Diag: {
+            QfEntry& d = ev.diag;
+            auto it = g_run.resolved.find(d.file);
+            if(it == g_run.resolved.end())
+                it = g_run.resolved
+                         .emplace(d.file,
+                                  build_resolve_path(
+                                      d.file, g_run.bases, g_run.root))
+                         .first;
+            d.file = it->second;
+            const char type = d.type;
+            qf_add(std::move(d));
+            g_run.have_diag = true;
+            g_run.last_type = type;
+            if(qf_size() > 0) output_link(g_run.out, idx, qf_size() - 1, type);
+            return;
+        }
+        case ErrEvent::Kind::Context:
+            if(!g_run.have_diag || qf_size() == 0) return;
+            qf_context(ev.text, ev.col, ev.end_col);
+            output_link(g_run.out, idx, qf_size() - 1, g_run.last_type, false);
+            return;
+        case ErrEvent::Kind::Test:
+            g_run.have_diag = false;
+            if(ev.test.status == ErrTest::Status::Fail) {
+                ++g_run.t_fail;
+                output_mark(g_run.out, idx, 'e');
+            } else if(ev.test.status == ErrTest::Status::Skip) {
+                ++g_run.t_skip;
+                output_mark(g_run.out, idx, 'n');
+            } else {
+                ++g_run.t_pass;
+            }
+            return;
+        case ErrEvent::Kind::Progress:
+            g_run.progress = std::move(ev.text);
+            output_progress(g_run.out, g_run.progress);
+            return;
+        case ErrEvent::Kind::Summary:
+            output_summary(g_run.out, ev.text);
+            return;
+    }
+}
+
+// Parsers read the model's lines: ANSI colour and \r progress are already gone.
+void feed_ready() {
+    const size_t done = output_complete(g_run.out);
+    for(; g_run.fed < done; ++g_run.fed)
+        handle(g_run.fed, g_run.chain->feed(output_line(g_run.out, g_run.fed)));
 }
 
 void run_data(std::string_view chunk) {
-    const size_t room = kMaxOut > g_run.out.size() ? kMaxOut - g_run.out.size() : 0;
-    g_run.out.append(chunk.substr(0, room));
-    if(chunk.size() > room) g_run.truncated = true;
-
-    g_run.carry.append(chunk);
-    size_t start = 0;
-    for(size_t nl; (nl = g_run.carry.find('\n', start)) != std::string::npos;
-        start = nl + 1)
-        feed_line(std::string_view(g_run.carry).substr(start, nl - start));
-    g_run.carry.erase(0, start);
-    if(g_run.carry.size() > kMaxCarry) {  // no newline in sight: give up on it
-        feed_line(g_run.carry);
-        g_run.carry.clear();
-    }
+    output_append(g_run.out, chunk);
+    feed_ready();
 
     const QfCounts n = qf_counts();
-    if(n.errors != g_run.shown.errors || n.warnings != g_run.shown.warnings) {
+    const auto now = Clock::now();
+    const bool changed =
+        n.errors != g_run.shown.errors || n.warnings != g_run.shown.warnings;
+    if((changed || !g_run.progress.empty()) &&
+       now - g_run.status_at > std::chrono::milliseconds(80)) {
         g_run.shown = n;
-        editor_set_status_message(
-            "make: running... {} errors, {} warnings", n.errors, n.warnings);
+        g_run.status_at = now;
+        editor_set_status_message("make: {} errors, {} warnings{}{}",
+                                  n.errors,
+                                  n.warnings,
+                                  g_run.progress.empty() ? "" : "  ",
+                                  g_run.progress);
     }
 }
 
 void run_exit(int code) {
-    if(!g_run.carry.empty()) feed_line(g_run.carry);
+    output_end(g_run.out, OutState::Done, code);
+    feed_ready();  // a last line without a newline
+    while(ErrEvent ev = g_run.chain->finish())
+        handle(output_lines(g_run.out) ? output_lines(g_run.out) - 1 : 0,
+               std::move(ev));
     g_run.id = 0;
-    g_last_out = std::move(g_run.out);
-    if(g_run.truncated) g_last_out += "\n[output truncated]\n";
+    const OutId out = g_run.out;
     const bool nojump = g_run.nojump;
 
     const QfCounts n = qf_counts();
-    if(code == 0 && n.errors == 0) {
-        if(n.warnings) editor_set_status_message("make: ok ({} warnings, :cn to walk them)", n.warnings);
+    const bool failed = code != 0 || n.errors != 0;
+    if(!failed) {
+        if(n.warnings)
+            editor_set_status_message(
+                "make: ok ({} warnings, :cn to walk them)", n.warnings);
         else editor_set_status_message("make: ok");
         return;
     }
-    if(n.errors == 0) {  // failed, but nothing we could parse: show what it said
-        editor_set_status_message("make: failed (exit {})", code);
-        buffer_show_text("[make]", g_last_out);
+    output_auto(out, OutAuto::Fail);
+    if(n.errors == 0) {  // failed, but nothing we could parse
+        if(g_run.t_fail)
+            editor_set_status_message(
+                "make: {} tests failed, {} passed (exit {})",
+                g_run.t_fail,
+                g_run.t_pass,
+                code);
+        else editor_set_status_message("make: failed (exit {})", code);
         return;
     }
     if(nojump) {
         editor_set_status_message("make: {} errors, {} warnings (exit {})",
-                                  n.errors, n.warnings, code);
+                                  n.errors,
+                                  n.warnings,
+                                  code);
         return;
     }
     qf_jump_first();  // its status line carries (i/n) and the message
@@ -108,8 +164,9 @@ void run_exit(int code) {
 void cmd_make(const CmdLine& c) {
     std::error_code ec;
     const bool has_file = !E.buf().nofile && !E.buf().filename.empty();
-    const fs::path start = has_file ? fs::absolute(E.buf().filename, ec).parent_path()
-                                    : fs::current_path(ec);
+    const fs::path start =
+        has_file ? fs::absolute(E.buf().filename, ec).parent_path()
+                 : fs::current_path(ec);
 
     BuildCmd bc;
     fs::path root;
@@ -118,7 +175,7 @@ void cmd_make(const CmdLine& c) {
         root = fs::current_path(ec);
         bc = {g_makeprg + (c.args.empty() ? "" : " " + c.args),
               root,
-              {"gcc", "rustc", "go", "generic"},
+              errparser_default_chain(),
               {}};
         title = g_makeprg;
     } else if(auto plan = build_plan(start, c.args)) {
@@ -129,12 +186,16 @@ void cmd_make(const CmdLine& c) {
         std::string names;
         for(const std::string& n : build_provider_names())
             names += (names.empty() ? "" : ", ") + n;
-        editor_set_status_message(
-            "No build system found above {} (tried: {})", start.string(), names);
+        editor_set_status_message("No build system found above {} (tried: {})",
+                                  start.string(),
+                                  names);
         return;
     }
 
-    if(g_run.id) job_kill(g_run.id);
+    if(g_run.id) {
+        job_kill(g_run.id);
+        output_end(g_run.out, OutState::Killed, -1);
+    }
     const unsigned gen = ++g_gen;
     g_run = Run{};
     g_run.chain = std::make_unique<ErrChain>(bc.parsers);
@@ -144,17 +205,38 @@ void cmd_make(const CmdLine& c) {
     g_run.bases.push_back(root);
     g_run.nojump = c.bang;
     qf_begin("make: " + title);
+    g_run.out =
+        output_begin({.name = "make",
+                      .title = "make: " + title + " (" + bc.cmd + ")",
+                      .streamed = false,
+                      .kill =
+                          [gen] {
+                              if(gen == g_gen && g_run.id) {
+                                  job_kill(g_run.id);
+                                  output_end(g_run.out, OutState::Killed, -1);
+                              }
+                          },
+                      .rerun =
+                          [args = c.args, bang = c.bang] {
+                              CmdLine again;
+                              again.args = args;
+                              again.bang = bang;
+                              cmd_make(again);
+                          }});
+    output_auto(g_run.out, OutAuto::Start);
 
     const std::string full =
         "cd " + build_shell_quote(bc.cwd.string()) + " && " + bc.cmd;
     const JobId id = job_start({.cmd = full,
                                 .keep_out = false,
-                                .on_data = [gen](std::string_view d) {
-                                    if(gen == g_gen) run_data(d);
-                                },
-                                .on_exit = [gen](JobResult r) {
-                                    if(gen == g_gen) run_exit(r.code);
-                                }});
+                                .on_data =
+                                    [gen](std::string_view d) {
+                                        if(gen == g_gen) run_data(d);
+                                    },
+                                .on_exit =
+                                    [gen](JobResult r) {
+                                        if(gen == g_gen) run_exit(r.code);
+                                    }});
     if(!id) {
         editor_set_status_message("Can't run: {}", bc.cmd);
         return;
@@ -177,13 +259,15 @@ void cmd_makeprg(const CmdLine& c) {
 }
 
 void cmd_mout(const CmdLine&) {
-    if(g_last_out.empty()) editor_set_status_message("No make output yet");
-    else buffer_show_text("[make]", g_last_out);
+    if(!output_current()) editor_set_status_message("No make output yet");
+    else output_present(output_current(), OutMode::Full);
 }
 
 }  // namespace
 
 void build_register_commands() {
+    output_register_commands();
+    term_register_commands();
     command_add("make", cmd_make);
     command_add("makeprg", cmd_makeprg);
     command_add("mout", cmd_mout);

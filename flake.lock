@@ -1,0 +1,156 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1794890597,
+        "narHash": "sha256-lME2lHoDHAaSHP3/okgiVoJ0icVEvsQH8LeU3We7tcc=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "04906337b6d53e8bb0eaf0470ae9f070a4d4eb55",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "trux": "trux",
+        "ts-c": "ts-c",
+        "ts-core": "ts-core",
+        "ts-cpp": "ts-cpp",
+        "ts-java": "ts-java",
+        "ts-lua": "ts-lua",
+        "ts-rust": "ts-rust"
+      }
+    },
+    "trux": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1795050897,
+        "narHash": "sha256-Jh0NqXI/6dHApliR79jYCP648KALQ4BHVssXxkkLx5w=",
+        "owner": "Jlesster",
+        "repo": "trux",
+        "rev": "c325081ffb3cf33688eaaf2a542637d300bebe97",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Jlesster",
+        "repo": "trux",
+        "type": "github"
+      }
+    },
+    "ts-c": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1776844996,
+        "narHash": "sha256-Juuf57GQI7OAP6O03KtSzyKJAoXtGKjyYJ+sTM1A4mU=",
+        "owner": "tree-sitter",
+        "repo": "tree-sitter-c",
+        "rev": "b780e47fc780ddc8da13afa35a3f4ed5c157823d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "tree-sitter",
+        "ref": "v0.24.2",
+        "repo": "tree-sitter-c",
+        "type": "github"
+      }
+    },
+    "ts-core": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1787474899,
+        "narHash": "sha256-W+43VmpHihq651eeKoECtxCSQyTGEv9ySMdmPwDFVhM=",
+        "owner": "tree-sitter",
+        "repo": "tree-sitter",
+        "rev": "d97971e24500218865c05ed1febdee2acf41bae1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "tree-sitter",
+        "ref": "v0.26.13",
+        "repo": "tree-sitter",
+        "type": "github"
+      }
+    },
+    "ts-cpp": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1731308204,
+        "narHash": "sha256-tP5Tu747V8QMCEBYwOEmMQUm8OjojpJdlRmjcJTbe2k=",
+        "owner": "tree-sitter",
+        "repo": "tree-sitter-cpp",
+        "rev": "f41e1a044c8a84ea9fa8577fdd2eab92ec96de02",
+        "type": "github"
+      },
+      "original": {
+        "owner": "tree-sitter",
+        "ref": "v0.23.4",
+        "repo": "tree-sitter-cpp",
+        "type": "github"
+      }
+    },
+    "ts-java": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1734805297,
+        "narHash": "sha256-OvEO1BLZLjP3jt4gar18kiXderksFKO0WFXDQqGLRIY=",
+        "owner": "tree-sitter",
+        "repo": "tree-sitter-java",
+        "rev": "94703d5a6bed02b98e438d7cad1136c01a60ba2c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "tree-sitter",
+        "ref": "v0.23.5",
+        "repo": "tree-sitter-java",
+        "type": "github"
+      }
+    },
+    "ts-lua": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1772128655,
+        "narHash": "sha256-VzaaN5pj7jMAb/u1fyyH6XmLI+yJpsTlkwpLReTlFNY=",
+        "owner": "tree-sitter-grammars",
+        "repo": "tree-sitter-lua",
+        "rev": "10fe0054734eec83049514ea2e718b2a56acd0c9",
+        "type": "github"
+      },
+      "original": {
+        "owner": "tree-sitter-grammars",
+        "ref": "v0.5.0",
+        "repo": "tree-sitter-lua",
+        "type": "github"
+      }
+    },
+    "ts-rust": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1774645557,
+        "narHash": "sha256-Ls6tB6IxXDQDWwx0BJ7RgbheelC4MH8z97E7wwhkDcY=",
+        "owner": "tree-sitter",
+        "repo": "tree-sitter-rust",
+        "rev": "77a3747266f4d621d0757825e6b11edcbf991ca5",
+        "type": "github"
+      },
+      "original": {
+        "owner": "tree-sitter",
+        "ref": "v0.24.2",
+        "repo": "tree-sitter-rust",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

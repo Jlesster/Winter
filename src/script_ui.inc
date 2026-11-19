@@ -299,8 +299,9 @@ int l_sl_reset(lua_State*) {
 
 void push_buf_info(lua_State* L, size_t i) {
     const Buffer& b = *E.buffers[i];
-    lua_createtable(L, 0, 8);
+    lua_createtable(L, 0, 9);
     set_int(L, "index", static_cast<lua_Integer>(i) + 1);
+    set_int(L, "id", static_cast<lua_Integer>(b.id));  // survives other buffers closing
     set_str(L, "name", b.filename);
     set_str(L, "lang", b.syntax.lang());
     set_bool(L, "modified", b.pt.modified());
@@ -737,6 +738,11 @@ int l_picker_grep(lua_State*) {
     return 0;
 }
 
+int l_picker_diagnostics(lua_State* L) {
+    diag_picker(lua_toboolean(L, 1) != 0);
+    return 0;
+}
+
 // winter.ui.select(items, {prompt=, format=fn(item)->string}, on_choice)
 // on_choice(item, index) -- or on_choice(nil) when cancelled. nvim-style.
 int l_ui_select(lua_State* L) {
@@ -959,6 +965,82 @@ int l_lsp_rename(lua_State* L) {
     return 0;
 }
 
+// winter.lsp.request(method, params, function(result, err)) -> true | nil, why
+// textDocument is filled in when params omits it. The callback is dropped if
+// you switched buffers meanwhile (the lsp_goto rule); compare
+// winter.buf.tick() to drop replies for older text.
+int l_lsp_request(lua_State* L) {
+    const char* method = luaL_checkstring(L, 1);
+    luaL_checktype(L, 3, LUA_TFUNCTION);
+    const int t = lua_table_arg(L, 2);  // nil -> no params
+    bool failed = false;  // lua_error is raised after the scope
+    {
+        Buffer& b = E.buf();
+        const auto doc = lsp_sync_doc(b, true);
+        if(!doc) {
+            lua_pushnil(L);
+            lua_pushstring(L, "no language server for this buffer");
+            return 2;
+        }
+        Json params = Json::obj();
+        std::string err;
+        if(t && !lua_to_json(L, t, params, err)) {
+            lua_pushstring(L, err.c_str());
+            failed = true;
+        } else {
+            if(!params.is_object()) params = Json::obj();  // {} may arrive as []
+            if(!params.has("textDocument"))
+                params.set("textDocument", Json::obj({{"uri", doc->uri}}));
+            lsp_request(doc->server, method, std::move(params),
+                [fn = lua_fn(L, 3), buf = &b](const Json& result, const Json& error) {
+                    if(buf != &E.buf()) return;
+                    lua_State* L = script_state();
+                    if(!L) return;
+                    fn->push();
+                    if(error.is_null()) { lua_push_json(L, result); lua_pushnil(L); }
+                    else { lua_pushnil(L); lua_push_json(L, error); }
+                    script_call(2);
+                });
+            lua_pushboolean(L, 1);
+        }
+    }
+    if(failed) return lua_error(L);
+    return 1;
+}
+
+// winter.lsp.supports("documentSymbolProvider") -> bool
+int l_lsp_supports(lua_State* L) {
+    const char* provider = luaL_checkstring(L, 1);  // before any C++ object
+    bool ok = false;
+    {
+        const auto doc = lsp_sync_doc(E.buf());
+        if(doc) {
+            const Json& c = lsp_capabilities(doc->server)[provider];
+            ok = !c.is_null() && !(c.is_bool() && !c.as_bool());
+        }
+    }
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+// winter.lsp.from_pos(line0, character) -> line1, col1 (byte col, 1-based)
+int l_lsp_from_pos(lua_State* L) {
+    const lua_Integer line0 = luaL_checkinteger(L, 1);
+    const lua_Integer ch = luaL_checkinteger(L, 2);
+    bool utf16 = true;
+    {
+        const auto doc = lsp_sync_doc(E.buf());
+        if(doc) utf16 = doc->utf16;
+    }
+    const PieceTable& pt = E.buf().pt;
+    const lua_Integer last = static_cast<lua_Integer>(pt.line_count()) - 1;
+    const size_t off = lsp_offset(pt, std::clamp<lua_Integer>(line0, 0, last), ch, utf16);
+    const size_t l = pt.line_of(off);
+    lua_pushinteger(L, static_cast<lua_Integer>(l) + 1);
+    lua_pushinteger(L, static_cast<lua_Integer>(off - pt.line_start(l)) + 1);
+    return 2;
+}
+
 const luaL_Reg kStatusline[] = {{"setup", l_sl_setup},
                                 {"component", l_sl_component},
                                 {"remove", l_sl_remove},
@@ -997,6 +1079,7 @@ const luaL_Reg kPicker[] = {{"open", l_picker_open},
                             {"files", l_picker_files},
                             {"grep", l_picker_grep},
                             {"recent", l_picker_recent},
+                            {"diagnostics", l_picker_diagnostics},
                             {nullptr, nullptr}};
 const luaL_Reg kUiExt[] = {{"select", l_ui_select}, {nullptr, nullptr}};
 const luaL_Reg kDiag[] = {{"get", l_diag_get},
@@ -1009,4 +1092,8 @@ const luaL_Reg kOptions[] = {{"list", l_options_list},
                              {"set", l_options_set},
                              {"toggle", l_options_toggle},
                              {nullptr, nullptr}};
-const luaL_Reg kLspExt[] = {{"rename", l_lsp_rename}, {nullptr, nullptr}};
+const luaL_Reg kLspExt[] = {{"rename", l_lsp_rename},
+                            {"request", l_lsp_request},
+                            {"supports", l_lsp_supports},
+                            {"from_pos", l_lsp_from_pos},
+                            {nullptr, nullptr}};

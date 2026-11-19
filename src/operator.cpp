@@ -8,46 +8,19 @@
 #include "builtin.hpp"
 #include "edit.hpp"
 #include "editor.hpp"
+#include "events.hpp"
 #include "indent.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
 #include "options.hpp"
 #include "piece.hpp"
+#include "prompt.hpp"
+#include "reg.hpp"
 #include "registry.hpp"
-#include "shell.hpp"
+#include "search.hpp"
 #include "utf8.hpp"
 
 namespace {
-
-struct Register {
-    std::string text;
-    bool linewise = false;
-};
-Register unnamed;
-
-void clip_set(const std::string& s) {
-    shell_run(
-        "if command -v wl-copy >/dev/null 2>&1; then wl-copy >/dev/null 2>&1;"
-        " elif command -v xclip >/dev/null 2>&1;"
-        " then xclip -selection clipboard >/dev/null 2>&1; fi",
-        &s);
-}
-
-std::optional<std::string> clip_get() {
-    const ShellResult r = shell_run(
-        "if command -v wl-paste >/dev/null 2>&1; then wl-paste --no-newline "
-        "2>/dev/null;"
-        " elif command -v xclip >/dev/null 2>&1;"
-        " then xclip -o -selection clipboard 2>/dev/null; else exit 1; fi",
-        nullptr);
-    if(r.code != 0 || r.out.empty()) return std::nullopt;
-    return r.out;
-}
-
-void set_reg(std::string text, bool linewise) {
-    unnamed = {std::move(text), linewise};
-    clip_set(unnamed.text);
-}
 
 std::optional<size_t> find_open(const PieceTable& t, size_t p, char o, char c,
                                 bool self_open) {
@@ -157,7 +130,7 @@ std::string grab(const Range& r) {
 size_t cut(const Range& r) {
     if(r.start == r.end && !r.linewise)
         return r.start;  // empty: keep the register
-    set_reg(grab(r), r.linewise);
+    reg_store(RegKind::Delete, grab(r), r.linewise);
     size_t a = r.start, n = r.end - r.start;
     // last line has no '\n' after it, so take the one before it instead
     if(r.linewise && (n == 0 || E.buf().pt.at(r.end - 1) != '\n') && a > 0) {
@@ -240,15 +213,13 @@ void shift(const Range& r, int dir) {  // > and <
         motion::to_first_nonblank(E.buf().pt, E.buf().pt.line_start(l0), 0));
 }
 
-void paste(bool after, int count) {  // p and P
-    if(const auto c = clip_get(); c && *c != unnamed.text)
-        unnamed = {*c, c->back() == '\n'};
-    if(unnamed.text.empty()) return;
+void paste(bool after, int count, const RegValue& src) {  // p and P
+    if(src.text.empty()) return;
     PieceTable::Group g(E.buf().pt);
     std::string s;
-    for(int i = std::max(count, 1); i > 0; --i) s += unnamed.text;
+    for(int i = std::max(count, 1); i > 0; --i) s += src.text;
 
-    if(unnamed.linewise) {
+    if(src.linewise) {
         size_t at;
         bool lead_nl = false;
         if(!after) {
@@ -281,15 +252,15 @@ void paste(bool after, int count) {  // p and P
     }
 }
 
-void paste_indented(bool after, int count) {
+void paste_indented(bool after, int count, const RegValue& src) {
     PieceTable& pt = E.buf().pt;
     PieceTable::Group g(pt);
     const size_t first =
         after ? static_cast<size_t>(E.buf().folds.end_of(E.cy)) + 1 : E.cy;
-    paste(after, count);
-    if(unnamed.linewise) return;
+    paste(after, count, src);
+    if(src.linewise) return;
     const size_t n =
-        std::count(unnamed.text.begin(), unnamed.text.end(), '\n') *
+        std::count(src.text.begin(), src.text.end(), '\n') *
         static_cast<size_t>(std::max(count, 1));
     if(n == 0) return;
     indent::reindent_lines(
@@ -298,15 +269,16 @@ void paste_indented(bool after, int count) {
 }
 
 void paste_over(const Range& r, int count, bool swap_reg) {
-    if(const auto c = clip_get(); c && *c != unnamed.text)
-        unnamed = {*c, c->back() == '\n'};
-    const Register src = unnamed;
+    const RegValue src = reg_read();
     if(src.text.empty()) return;
     PieceTable& pt = E.buf().pt;
     PieceTable::Group g(pt);
     std::string s;
     for(int i = std::max(count, 1); i > 0; --i) s += src.text;
-    if(swap_reg) set_reg(grab(r), r.linewise);
+    if(swap_reg) {  // the replaced text is a delete: "" / "1 / "-, never the
+        RegScope none(0);  // register the paste came from ("ap)
+        reg_store(RegKind::Delete, grab(r), r.linewise);
+    }
     const size_t at = r.start;
     size_t n = r.end - r.start;
     if(r.linewise) {
@@ -515,7 +487,29 @@ void run_operator(std::string_view op, std::string_view what, int count,
     (*fn)(*r);
 }
 
+// yank_post {regname, kind, first_line, first_col, last_line, last_col}: where
+// the yank came from (1-based, end column exclusive), e.g. for highlight-on-yank
+void announce_yank(const Range& r) {
+    const PieceTable& pt = E.buf().pt;
+    const size_t a = std::min(r.start, pt.size());
+    const size_t b = std::clamp(r.end, a, pt.size());
+    const size_t l1 = pt.line_of(a), l2 = pt.line_of(b > a ? b - 1 : a);
+    const size_t col1 = a - pt.line_start(l1) + 1;
+    const size_t col2 = (b > a ? b : a) - pt.line_start(l2) + 1;
+    const char reg = reg_selected();
+    events_emit("yank_post",
+                {reg ? std::string(1, reg) : std::string(),
+                 r.linewise ? "line" : "char", std::to_string(l1 + 1),
+                 std::to_string(col1), std::to_string(l2 + 1),
+                 std::to_string(col2)});
+}
+
 void register_builtin_operators() {
+    reg_provider('%', [] { return E.buf().filename; });
+    reg_provider('.', [] { return reg_last_insert(); });
+    reg_provider(':', [] { return prompt_history_last(":"); });
+    reg_provider('/', [] { return search_last_pattern(); });
+
     bind_op(
         "op.delete",
         [](const Range& r) {
@@ -530,7 +524,8 @@ void register_builtin_operators() {
     bind_op(
         "op.yank",
         [](const Range& r) {
-            set_reg(grab(r), r.linewise);
+            reg_store(RegKind::Yank, grab(r), r.linewise);
+            announce_yank(r);
             if(!r.linewise)
                 apply_motion(Target{r.start});  // yy leaves the cursor alone
         },
@@ -545,7 +540,7 @@ void register_builtin_operators() {
                 const size_t w = line.find_first_not_of(" \t");
                 const std::string indent =
                     line.substr(0, w == std::string::npos ? line.size() : w);
-                set_reg(grab(r), true);
+                reg_store(RegKind::Delete, grab(r), true);
                 size_t b = r.end;
                 if(b > r.start && E.buf().pt.at(b - 1) == '\n')
                     --b;  // keep the '\n'
@@ -576,12 +571,12 @@ void register_builtin_operators() {
     bind_alias("edit.Y", "op.yank", "motion.line", "Y");
 
     registry().add_action("edit.paste_after", [](Ctx& c) {
-        if(opts.paste_indent) paste_indented(true, c.count);
-        else paste(true, c.count);
+        if(opts.paste_indent) paste_indented(true, c.count, reg_read());
+        else paste(true, c.count, reg_read());
     });
     registry().add_action("edit.paste_before", [](Ctx& c) {
-        if(opts.paste_indent) paste_indented(false, c.count);
-        else paste(false, c.count);
+        if(opts.paste_indent) paste_indented(false, c.count, reg_read());
+        else paste(false, c.count, reg_read());
     });
     registry().map(NORMAL, "P", "edit.paste_after");
     registry().map(NORMAL, "p", "edit.paste_before");

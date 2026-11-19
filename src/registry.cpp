@@ -68,11 +68,11 @@ bool Registry::unmap(EditorMode m, std::u32string_view keys) {
     return true;
 }
 
-Hit Registry::lookup(EditorMode m, std::u32string_view keys) const {
-    const auto km = keymaps_.find(m);
-    if(km == keymaps_.end() || keys.empty()) return {};
-    const auto& map = km->second;
+namespace {
+using KeyMap = std::map<KeySeq, std::string, std::less<>>;
 
+Hit lookup_in(const KeyMap& map, std::u32string_view keys) {
+    if(keys.empty()) return {};
     // the map is sorted, so everything starting with `keys` sits right after it
     const auto it = map.lower_bound(keys);
     const bool exact = it != map.end() && it->first == keys;
@@ -82,6 +82,75 @@ Hit Registry::lookup(EditorMode m, std::u32string_view keys) const {
     if(exact) return {Lookup::Exact, it->second, longer};
     if(longer) return {Lookup::Prefix, {}, true};
     return {};
+}
+}  // namespace
+
+Hit Registry::lookup(EditorMode m, std::u32string_view keys, uint64_t buf) const {
+    if(keys.empty()) return {};
+    Hit g;
+    if(const auto km = keymaps_.find(m); km != keymaps_.end())
+        g = lookup_in(km->second, keys);
+    if(!buf) return g;
+    const Hit l = lookup_local(buf, m, keys);
+    if(l.kind == Lookup::None) return g;
+    Hit h = l.kind == Lookup::Exact
+                ? l
+                : (g.kind == Lookup::Exact ? g : Hit{Lookup::Prefix, {}, true});
+    h.longer = l.longer || g.longer;
+    return h;
+}
+
+void Registry::map_local(uint64_t buf, EditorMode m, KeySeq keys,
+                         std::string action) {
+    if(!buf || keys.empty()) return;
+    local_[buf][m][std::move(keys)] = std::move(action);
+}
+
+bool Registry::unmap_local(uint64_t buf, EditorMode m, std::u32string_view keys) {
+    const auto b = local_.find(buf);
+    if(b == local_.end()) return false;
+    const auto km = b->second.find(m);
+    if(km == b->second.end()) return false;
+    const auto it = km->second.find(keys);
+    if(it == km->second.end()) return false;
+    km->second.erase(it);
+    if(km->second.empty()) b->second.erase(km);
+    if(b->second.empty()) local_.erase(b);
+    return true;
+}
+
+Hit Registry::lookup_local(uint64_t buf, EditorMode m,
+                           std::u32string_view keys) const {
+    const auto b = local_.find(buf);
+    if(b == local_.end()) return {};
+    const auto km = b->second.find(m);
+    return km == b->second.end() ? Hit{} : lookup_in(km->second, keys);
+}
+
+std::vector<std::string> Registry::drop_local(uint64_t buf) {
+    std::vector<std::string> actions;
+    const auto b = local_.find(buf);
+    if(b == local_.end()) return actions;
+    for(const auto& [mode, km] : b->second)
+        for(const auto& [keys, action] : km) actions.push_back(action);
+    local_.erase(b);
+    return actions;
+}
+
+std::vector<Registry::MapEntry> Registry::maps(EditorMode m) const {
+    std::vector<MapEntry> out;
+    if(const auto km = keymaps_.find(m); km != keymaps_.end())
+        for(const auto& [keys, action] : km->second)
+            out.push_back({m, keys, action});
+    return out;
+}
+
+std::vector<Registry::MapEntry> Registry::local_maps(uint64_t buf) const {
+    std::vector<MapEntry> out;
+    if(const auto b = local_.find(buf); b != local_.end())
+        for(const auto& [mode, km] : b->second)
+            for(const auto& [keys, action] : km) out.push_back({mode, keys, action});
+    return out;
 }
 
 namespace {

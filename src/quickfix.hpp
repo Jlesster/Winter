@@ -18,6 +18,10 @@ void qf_begin(std::string title);
 void qf_add(QfEntry e);  // drops an entry identical to the previous one
 void qf_set(std::string title, std::vector<QfEntry> entries);
 
+// Attaches a context line to the newest entry. A caret line (col > 0) also
+// fills the column a header lacked (javac) and the end column.
+void qf_context(std::string_view text, int col, int end_col);
+
 size_t qf_size();
 QfCounts qf_counts();
 bool qf_jump(size_t idx);  // opens the file, moves the cursor, reports in the status line

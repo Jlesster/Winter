@@ -110,6 +110,32 @@ struct Conv {
 
 }  // namespace
 
+void lua_push_json(lua_State* L, const Json& j) {
+    luaL_checkstack(L, 4, "json nested too deeply");
+    if(j.is_null()) lua_pushnil(L);
+    else if(j.is_bool()) lua_pushboolean(L, j.as_bool());
+    else if(j.is_int())
+        lua_pushinteger(L, static_cast<lua_Integer>(j.as_int()));
+    else if(j.is_number()) lua_pushnumber(L, j.as_double());
+    else if(j.is_string()) {
+        const std::string_view s = j.as_str();
+        lua_pushlstring(L, s.data(), s.size());
+    } else if(j.is_array()) {
+        lua_createtable(L, static_cast<int>(j.size()), 0);
+        lua_Integer i = 1;
+        for(const Json& v : j.items()) {
+            lua_push_json(L, v);
+            lua_rawseti(L, -2, i++);
+        }
+    } else {
+        lua_createtable(L, 0, static_cast<int>(j.size()));
+        for(const auto& [k, v] : j.members()) {
+            lua_push_json(L, v);
+            lua_setfield(L, -2, k.c_str());
+        }
+    }
+}
+
 bool lua_to_json(lua_State* L, int idx, Json& out, std::string& err) {
     const int top = lua_gettop(L);
     idx = lua_absindex(L, idx);

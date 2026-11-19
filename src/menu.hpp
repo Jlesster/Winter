@@ -30,6 +30,9 @@ struct MenuSpec {
     int max_rows = 8;
     int min_w = 20;
     int max_w = 80;
+    // Size the detail column to the widest detail (up to max_w) instead of
+    // a third of max_w, so no description is cut while the width stays minimal.
+    bool fit_detail = false;
     std::function<bool(int)> on_key;
     bool modal = false;
     bool fixed = false;

@@ -1,6 +1,7 @@
 // Buffer backend: decorates markdown buffers from md_parse().
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -8,7 +9,9 @@
 #include "command.hpp"
 #include "editor.hpp"
 #include "glyphs.hpp"
+#include "grapheme.hpp"
 #include "markdown.hpp"
+#include "normal.hpp"
 #include "syntax.hpp"
 #include "theme.hpp"
 #include "virt.hpp"
@@ -16,6 +19,7 @@
 namespace {
 
 bool g_on = true;
+bool g_reveal = false;  // raw source on the cursor line outside insert mode
 constexpr size_t kMaxBytes = size_t{1} << 20;  // bigger files are left alone
 
 // prio: fills < cursorline (1) < block roles < inline roles < markers
@@ -297,15 +301,19 @@ struct ViewBuilder {
                     const std::string_view rest = src.substr(l.cl, l.ch - l.cl);
                     const bool box =
                         rest.size() >= 3 && rest[0] == '[' && rest[2] == ']' &&
-                        (rest[1] == ' ' || rest[1] == 'x' || rest[1] == 'X') &&
+                        md_box_state(rest[1]) >= 0 &&
                         (rest.size() == 3 || rest[3] == ' ');
                     if(box) {
-                        const bool done = rest[1] != ' ';
-                        const Style cs = md_style(MdRole::Checkbox, done);
+                        const int st = md_box_state(rest[1]);
+                        const Style cs = md_style(MdRole::Checkbox, st);
+                        static constexpr std::string_view kNf[4] = {
+                            "\U000f0131", "\U000f0c52", "\U000f081b",
+                            "\U000f0856"};
+                        static constexpr std::string_view kPlain[4] = {
+                            "☐", "☑", "☒", "◩"};
                         if(l.level == 0) conceal_range(i, l.tl, l.cl);
                         add(i, l.cl, l.cl + 3,
-                            nf ? (done ? "\U000f0c52" : "\U000f0131")
-                               : (done ? "☑" : "☐"),
+                            std::string(nf ? kNf[st] : kPlain[st]),
                             Style{.fg = cs.fg});
                     } else if(l.level == 0) {
                         add(i, l.tl, l.me, std::string(kBullets[depth % 4]),
@@ -319,8 +327,11 @@ struct ViewBuilder {
 
     void conceal_range(size_t li, size_t lo, size_t hi) { add(li, lo, hi, {}); }
 
-    // pipe tables: borders only, cells keep their source width so columns
-    // stay aligned
+    std::vector<MdTable> tbls;
+
+    // pipe tables: the pipes become box glyphs here (same width, so they are
+    // width independent); cell padding and truncation need the terminal
+    // width and are decided per frame by table_edits().
     void tables() {
         const Style bord = theme_ui("md.table.border", Style{.fg = 0x585b70});
         std::vector<std::pair<size_t, size_t>> code;
@@ -335,6 +346,7 @@ struct ViewBuilder {
             return l.kind == MdBlock::Text && skip[i] != 2 &&
                    src.substr(l.tl, l.th - l.tl).find('|') != std::string_view::npos;
         };
+        const auto blank = [&](size_t k) { return src[k] == ' ' || src[k] == '\t'; };
         for(size_t i = 0; i + 1 < d.lines.size(); ++i) {
             if(!row_ok(i) || !row_ok(i + 1)) continue;
             const MdLine& dl = d.lines[i + 1];
@@ -342,34 +354,59 @@ struct ViewBuilder {
             size_t last = i + 1;
             while(last + 1 < d.lines.size() && row_ok(last + 1)) ++last;
             heads.emplace_back(d.lines[i].lo, d.lines[i].hi);
+            MdTable t;
             for(size_t r = i; r <= last; ++r) {
                 const MdLine& l = d.lines[r];
-                skip[r] = 1;
-                if(r == i + 1) {  // delimiter row -> ├──┼──┤
-                    for(size_t k = l.tl; k < l.th; ++k) {
-                        if(src[k] == '|') {
-                            add(r, k, k + 1,
-                                k == l.tl ? "├" : k + 1 == l.th ? "┤" : "┼",
-                                bord);
-                        } else if(src[k] == '-') {
-                            size_t e = k;
-                            std::string t;
-                            while(e < l.th && src[e] == '-') {
-                                t += "─";
-                                ++e;
-                            }
-                            add(r, k, e, t, bord);
-                            k = e - 1;
-                        } else if(src[k] == ':') {
-                            add(r, k, k + 1, "━", bord);
-                        }
-                    }
-                    continue;
-                }
+                MdTableRow row;
+                row.line = static_cast<uint32_t>(r);
+                row.delim = r == i + 1;
+                std::vector<size_t> P;  // unescaped pipes outside code spans
                 for(size_t k = l.tl; k < l.th; ++k)
-                    if(src[k] == '|' && !in_code(k) && (k == l.tl || src[k - 1] != '\\'))
-                        add(r, k, k + 1, "│", bord);
+                    if(src[k] == '|' && !in_code(k) &&
+                       (k == l.tl || src[k - 1] != '\\'))
+                        P.push_back(k);
+                const bool lead = !P.empty() && P.front() == l.tl;
+                row.trail = !P.empty() && P.back() + 1 == l.th &&
+                            (P.size() > 1 || !lead);
+                const auto cell = [&](size_t cs, size_t ce) {
+                    MdCell c;
+                    c.cs = static_cast<uint32_t>(cs - l.lo);
+                    c.ce = static_cast<uint32_t>(ce - l.lo);
+                    size_t ts = cs, te = ce;
+                    while(ts < te && blank(ts)) ++ts;
+                    while(te > ts && blank(te - 1)) --te;
+                    if(ts == te) ts = te = cs;  // empty: all padding
+                    c.ts = static_cast<uint32_t>(ts - l.lo);
+                    c.te = static_cast<uint32_t>(te - l.lo);
+                    row.cells.push_back(c);
+                };
+                size_t start = lead ? P[0] + 1 : l.tl;
+                for(size_t k = lead ? 1 : 0; k < P.size(); ++k) {
+                    cell(start, P[k]);
+                    start = P[k] + 1;
+                }
+                if(!row.trail) cell(start, l.th);
+                for(const size_t k : P) {
+                    const char* g = "│";
+                    if(row.delim)
+                        g = k == l.tl ? "├" : k + 1 == l.th ? "┤" : "┼";
+                    add(r, k, k + 1, g, bord);
+                }
+                t.edge = std::max(t.edge, int(lead) + int(row.trail));
+                t.rows.push_back(std::move(row));
             }
+            const size_t n = t.rows[0].cells.size();
+            t.nat.assign(n, 3);
+            t.align.assign(n, 'l');
+            const MdTableRow& dr = t.rows[1];
+            for(size_t c = 0; c < n && c < dr.cells.size(); ++c) {
+                const MdLine& l = d.lines[dr.line];
+                const std::string_view x = src.substr(
+                    l.lo + dr.cells[c].ts, dr.cells[c].te - dr.cells[c].ts);
+                const bool lc = x.starts_with(':'), rc = x.ends_with(':');
+                t.align[c] = lc && rc ? 'c' : rc ? 'r' : 'l';
+            }
+            tbls.push_back(std::move(t));
             i = last;
         }
     }
@@ -445,6 +482,52 @@ void apply(Buffer& b, const MdDoc& d, NsId ns) {
     }
 }
 
+// Syntax colours for fenced blocks. Each body is highlighted as one document
+// (multi-line tokens work) and laid over the code-block fill. Spans are
+// source-relative because the body is the exact slice of the buffer.
+void highlight_fences(std::string_view src, const MdDoc& d, MdState& m,
+                      Buffer& b, NsId ns) {
+    std::map<std::string, std::vector<Span>> next;
+    bool open = false;
+    for(size_t i = 0; i < d.lines.size(); ++i) {
+        const MdLine& f = d.lines[i];
+        if(f.kind != MdBlock::Fence) continue;
+        open = !open;
+        if(!open) continue;  // closing fence
+        size_t j = i + 1;
+        while(j < d.lines.size() && d.lines[j].kind == MdBlock::CodeLine) ++j;
+        const std::string lang = fence_info(src.substr(f.tl, f.th - f.tl));
+        if(lang.empty() || j == i + 1) continue;
+        const size_t lo = d.lines[i + 1].lo, hi = d.lines[j - 1].hi;
+        std::string key = lang + '\n';
+        key.append(src.substr(lo, hi - lo));
+        auto it = next.find(key);
+        if(it == next.end()) {
+            auto old = m.hl.find(key);
+            if(old != m.hl.end()) {
+                it = next.emplace(key, std::move(old->second)).first;
+            } else {
+                const std::string_view body = src.substr(lo, hi - lo);
+                auto sp = syntax_highlight(lang, body);
+                it = next.emplace(key, sp ? std::move(*sp)
+                                          : std::vector<Span>{}).first;
+            }
+        }
+        for(const Span& s : it->second) {
+            if(s.end <= s.start || lo + s.end > hi) continue;
+            SpanDeco sd{};
+            sd.start = lo + s.start;
+            sd.end = lo + s.end;
+            sd.ns = ns;
+            sd.prio = kPrioBlock;
+            sd.st = s.st;
+            b.decos.add_span(sd);
+            ++m.spans;
+        }
+    }
+    m.hl = std::move(next);
+}
+
 }  // namespace
 
 void md_build_view(std::string_view src, const MdDoc& d, MdState& m,
@@ -469,11 +552,158 @@ void md_build_view(std::string_view src, const MdDoc& d, MdState& m,
     }
     m.line_first.push_back(static_cast<uint32_t>(m.edits.size()));
     if(heads) *heads = std::move(vb.heads);
+
+    // tables: cell widths as drawn (inline markers concealed), then the
+    // natural column widths
+    m.tables = std::move(vb.tbls);
+    m.line_tbl.assign(d.lines.size(), -1);
+    for(size_t t = 0; t < m.tables.size(); ++t) {
+        MdTable& tb = m.tables[t];
+        for(MdTableRow& r : tb.rows) {
+            m.line_tbl[r.line] = static_cast<int32_t>(t);
+            if(r.delim) continue;
+            const MdLine& l = d.lines[r.line];
+            const std::string_view real = src.substr(l.lo, l.hi - l.lo);
+            const uint32_t a = m.line_first[r.line], z = m.line_first[r.line + 1];
+            for(size_t c = 0; c < r.cells.size(); ++c) {
+                MdCell& k = r.cells[c];
+                std::string s;
+                size_t at = k.ts;
+                for(uint32_t q = a; q < z; ++q) {
+                    const MdEdit& e = m.edits[q];
+                    if(e.lo < k.ts || e.hi > k.te) continue;
+                    s.append(real.substr(at, e.lo - at));
+                    s += e.text;
+                    at = e.hi;
+                }
+                s.append(real.substr(at, k.te - at));
+                k.w = text_width(s);
+                if(c < tb.nat.size()) tb.nat[c] = std::max(tb.nat[c], k.w);
+            }
+        }
+    }
 }
+
+namespace {
+
+// The line under the cursor (and every line a visual selection touches)
+// shows its raw source, as render-markdown does: you edit what is in the
+// file, and the cursor column is the file's column.
+bool line_revealed(int row) {
+    if(!g_reveal) return false;
+    if(row == E.cy) return true;
+    if(E.mode == VISUAL) {
+        const PieceTable& pt = E.buf().pt;
+        const size_t r = static_cast<size_t>(row);
+        const size_t ls = pt.line_start(r), le = pt.line_end(r);
+        const Range sel = visual_range();
+        return sel.end > ls && sel.start <= le;
+    }
+    return false;
+}
+
+// Every edit must start and end on a grapheme-cluster boundary of the source
+// (a marker glued to a combining mark must stay raw) and, once spliced, the
+// pieces around it must not fuse into a new cluster (a flag split by `**`).
+bool edits_on_boundaries(std::string_view real, const SubstView& v) {
+    for(const SubstView::Edit& e : v.edits) {
+        if(gr_snap(real, e.lo) != e.lo) return false;
+        if(e.hi < real.size() && gr_snap(real, e.hi) != e.hi) return false;
+        if(e.nlo < v.text.size() && gr_snap(v.text, e.nlo) != e.nlo) return false;
+        if(e.nhi < v.text.size() && gr_snap(v.text, e.nhi) != e.nhi) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+namespace {
+
+constexpr int kMinCol = 3;  // narrowest a shrunk column gets (one char + "…")
+
+// Column content widths for a terminal width: natural widths, with the widest
+// column shrunk one cell at a time until the row fits. Empty = cannot fit.
+const std::vector<int>& table_layout(const MdTable& t, int width) {
+    if(t.lay_w == width) return t.cw;
+    t.lay_w = width;
+    t.cw = t.nat;
+    const int n = static_cast<int>(t.cw.size());
+    int total = t.edge + (n - 1);
+    for(const int w : t.cw) total += w + 2;
+    while(total > width) {
+        auto it = std::ranges::max_element(t.cw);
+        if(it == t.cw.end() || *it <= kMinCol) {
+            t.cw.clear();
+            break;
+        }
+        --*it;
+        --total;
+    }
+    return t.cw;
+}
+
+std::string pad(int n) { return std::string(static_cast<size_t>(std::max(n, 0)), ' '); }
+
+// Padding, alignment and truncation of one table row at the layout's widths.
+// Cells wider than their column lose their inline concealing (raw text is cut
+// at a grapheme boundary and ends in "…"), so a row is always one screen row.
+void table_edits(const MdTable& t, size_t ri, std::string_view real,
+                 const std::vector<int>& cw, std::vector<MdEdit>& ed) {
+    static const Style bord = theme_ui("md.table.border", Style{.fg = 0x585b70});
+    const MdTableRow& r = t.rows[ri];
+    const auto put = [&](size_t lo, size_t hi, std::string text, Style st = {}) {
+        if(hi > real.size() || real.substr(lo, hi - lo) == text) return;
+        st.attrs = static_cast<uint16_t>(st.attrs | ATTR_NODIM);
+        ed.push_back({static_cast<uint32_t>(lo), static_cast<uint32_t>(hi),
+                      std::move(text), st, false});
+    };
+    for(size_t c = 0; c < r.cells.size() && c < cw.size(); ++c) {
+        const MdCell& k = r.cells[c];
+        const int w = cw[c];
+        if(r.delim) {
+            std::string dash;
+            for(int i = 0; i < w + 2; ++i) dash += "─";
+            put(k.cs, k.ce, std::move(dash), bord);
+            continue;
+        }
+        const bool last_open = c + 1 == r.cells.size() && !r.trail;
+        std::string lead, tail;
+        if(k.w > w) {  // truncate the raw text
+            int used = 0;
+            size_t at = k.ts;
+            while(at < k.te) {
+                const size_t e = gr_next(real, at);
+                const int cwid = cluster_width(real, at, e, used);
+                if(used + cwid > w - 1) break;
+                used += cwid;
+                at = e;
+            }
+            std::erase_if(ed, [&](const MdEdit& e) {
+                return e.lo >= k.ts && e.hi <= k.te;
+            });
+            lead = " ";
+            tail = "…" + (last_open ? std::string() : pad(w - 1 - used) + " ");
+            put(k.cs, k.ts, lead);
+            put(at, k.ce, tail, Style{.fg = 0x6c7086});
+            continue;
+        }
+        const int gap = w - k.w;
+        const int before = t.align[std::min(c, t.align.size() - 1)] == 'r'   ? gap
+                           : t.align[std::min(c, t.align.size() - 1)] == 'c' ? gap / 2
+                                                                             : 0;
+        lead = " " + pad(before);
+        tail = last_open ? std::string() : pad(gap - before) + " ";
+        put(k.cs, k.ts, std::move(lead));
+        put(k.te, k.ce, std::move(tail));
+    }
+}
+
+}  // namespace
 
 bool md_line_view(int row, std::string_view real, int width, SubstView& out) {
     if(!g_on || row < 0 || insertish(E.mode)) return false;
     if(real.size() > 4096) return false;
+    if(line_revealed(row)) return false;
     Buffer& b = E.buf();
     md_buffer_refresh(b);
     const MdState& m = b.md;
@@ -481,13 +711,32 @@ bool md_line_view(int row, std::string_view real, int width, SubstView& out) {
         return false;
     const uint32_t a = m.line_first[static_cast<size_t>(row)];
     const uint32_t z = m.line_first[static_cast<size_t>(row) + 1];
-    if(a == z) return false;
+    const MdEdit* eb = m.edits.data() + a;
+    size_t en = z - a;
+    std::vector<MdEdit> merged;  // table rows: stored edits + this width's
+    const size_t ur = static_cast<size_t>(row);
+    if(ur < m.line_tbl.size() && m.line_tbl[ur] >= 0) {
+        const MdTable& tb = m.tables[static_cast<size_t>(m.line_tbl[ur])];
+        const std::vector<int>& cw = table_layout(tb, width);
+        if(!cw.empty()) {
+            merged.assign(eb, eb + en);
+            table_edits(tb, ur - tb.rows[0].line, real, cw, merged);
+            // an insertion sorts before an edit that starts at the same byte
+            std::ranges::stable_sort(merged, {}, [](const MdEdit& e) {
+                return std::pair(e.lo, e.hi > e.lo);
+            });
+            eb = merged.data();
+            en = merged.size();
+        }
+    }
+    if(en == 0) return false;
     out.text.clear();
     out.marks.clear();
     out.edits.clear();
+    out.atomic = true;
     size_t copied = 0;
-    for(uint32_t k = a; k < z; ++k) {
-        const MdEdit& e = m.edits[k];
+    for(size_t k = 0; k < en; ++k) {
+        const MdEdit& e = eb[k];
         if(e.lo < copied || e.hi > real.size()) continue;  // stale
         out.text.append(real.substr(copied, e.lo - copied));
         const size_t nlo = out.text.size();
@@ -504,7 +753,7 @@ bool md_line_view(int row, std::string_view real, int width, SubstView& out) {
     }
     if(out.edits.empty()) return false;
     out.text.append(real.substr(copied));
-    return true;
+    return edits_on_boundaries(real, out);
 }
 
 void md_set_enabled(bool on) { g_on = on; }
@@ -534,12 +783,15 @@ void md_buffer_refresh(Buffer& b) {
     m.spans = 0;
     m.line_first.clear();
     m.edits.clear();
+    m.tables.clear();
+    m.line_tbl.clear();
     if(!want) return;
 
     const std::string text = b.pt.text();
     const MdDoc d = md_parse(text);
     apply(b, d, ns);
     m.spans = d.spans.size();
+    highlight_fences(text, d, m, b, ns);
     std::vector<std::pair<size_t, size_t>> heads;
     md_build_view(text, d, m, &heads);
     const Style head = theme_ui("md.table.head",
@@ -556,7 +808,28 @@ void md_buffer_refresh(Buffer& b) {
     }
 }
 
+void md_set_reveal(bool on) { g_reveal = on; }
+bool md_reveal() { return g_reveal; }
+
 void markdown_register_commands() {
+    command_add({.name = "MarkdownReveal",
+                 .desc = "Show raw markdown on the cursor line (and the "
+                         "visual selection) instead of the concealed view",
+                 .usage = "[on|off|toggle]",
+                 .nargs = Nargs::Opt,
+                 .run = [](const CmdLine& c) {
+                     const std::string a = c.argv.empty() ? "toggle" : c.argv[0];
+                     if(a == "on") g_reveal = true;
+                     else if(a == "off") g_reveal = false;
+                     else if(a == "toggle") g_reveal = !g_reveal;
+                     else {
+                         editor_set_status_message(
+                             "MarkdownReveal: on, off or toggle");
+                         return;
+                     }
+                     editor_set_status_message("markdown reveal: {}",
+                                               g_reveal ? "on" : "off");
+                 }});
     command_add({.name = "MarkdownRender",
                  .desc = "Style markdown buffers: headings, code blocks, "
                          "quotes, lists, links",

@@ -1,6 +1,7 @@
 #include "options.hpp"
 #include "editor.hpp"
 #include "fold_buf.hpp"
+#include "num.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -14,7 +15,7 @@ Options opts;
 
 namespace {
 
-enum class Kind { Int, Bool, CursorSpec, BorderStyle };
+enum class Kind { Int, Bool, CursorSpec, BorderStyle, NumFormats };
 
 struct Opt {
     const char* name;
@@ -28,7 +29,6 @@ Opt kTable[] = {
     {"tabstop", "ts", Kind::Int, &opts.tab_stop, 1, 16},
     {"shiftwidth", "sw", Kind::Int, &opts.shift_width, 1, 16},
     {"expandtab", "et", Kind::Bool, &opts.expand_tab, 0, 1},
-    {"quit_times", "", Kind::Int, &opts.quit_times, 0, 99},
     {"cursor", "", Kind::CursorSpec, nullptr, 0, 0},
     {"cursor_inverse", "", Kind::Bool, &opts.cursor_inverse, 0, 1},
     {"number", "nu", Kind::Bool, &opts.number, 0, 1},
@@ -61,6 +61,12 @@ Opt kTable[] = {
     {"indent_engine", "ie", Kind::Int, &opts.indent_engine, 0, 2},
     {"semantic_tokens", "sem", Kind::Bool, &opts.semantic_tokens, 0, 0},
     {"treewidth", "", Kind::Int, &opts.tree_width, 10, 80},
+    {"tmux_nav", "", Kind::Int, &opts.tmux_nav, 0, 1},
+    {"tmux_wrap", "", Kind::Int, &opts.tmux_wrap, 0, 1},
+    {"resize_step", "", Kind::Int, &opts.resize_step, 1, 50},
+    {"output_mode", "", Kind::Int, &opts.output_mode, 0, 2},
+    {"output_height", "", Kind::Int, &opts.output_height, 3, 50},
+    {"output_auto", "", Kind::Int, &opts.output_auto, 0, 2},
     {"treeicons", "ti", Kind::Bool, &opts.tree_icons, 0, 1},
     {"treehidden", "", Kind::Bool, &opts.tree_hidden, 0, 1},
     {"treefollow", "", Kind::Bool, &opts.tree_follow, 0, 1},
@@ -74,6 +80,7 @@ Opt kTable[] = {
     {"indentnamespace", "inam", Kind::Int, &opts.indent_namespace, 0, 2},
     {"indentcase", "icase", Kind::Int, &opts.indent_case, 0, 2},
     {"hotreload", "hr", Kind::Bool, &opts.hot_reload, 0, 1},
+    {"numformats", "nf", Kind::NumFormats, &opts.numformats, 0, 0},
 };
 
 std::optional<CursorStyle> parse_cursor(std::string_view v) {
@@ -168,6 +175,7 @@ std::string show(const Opt& o) {
                 "rounded", "straight", "double", "block"};
             return n[static_cast<int>(opts.border)];
         }
+        case Kind::NumFormats: return num::format_formats(opts.numformats);
         case Kind::Int: break;
     }
     return std::to_string(*static_cast<int*>(o.ptr));
@@ -207,6 +215,12 @@ OptResult set_option(std::string_view name, std::string_view value) {
         opts.border = *b;
         return OptResult::Ok;
     }
+    if(o->kind == Kind::NumFormats) {
+        const auto f = num::parse_formats(value);
+        if(!f) return OptResult::BadValue;
+        opts.numformats = *f;
+        return OptResult::Ok;
+    }
     int n = 0;
     const auto [end, ec] =
         std::from_chars(value.data(), value.data() + value.size(), n);
@@ -236,6 +250,7 @@ std::optional<OptInfo> option_info(std::string_view name) {
             break;
         case Kind::CursorSpec: i.type = "cursor"; break;
         case Kind::BorderStyle: i.type = "border"; break;
+        case Kind::NumFormats: i.type = "numformats"; break;
     }
     return i;
 }

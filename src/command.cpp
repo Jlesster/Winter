@@ -1,5 +1,8 @@
 #include "command.hpp"
 #include "external.hpp"
+#include "output.hpp"
+#include "render.hpp"
+#include "window_ed.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -22,7 +25,9 @@
 #include "editor.hpp"
 #include "errparse.hpp"
 #include "file.hpp"
+#include "filetype.hpp"
 #include "fuzzy.hpp"
+#include "grapheme.hpp"
 #include "job.hpp"
 #include "lsp_actions.hpp"
 #include "lsp_config.hpp"
@@ -30,6 +35,7 @@
 #include "lsp_rename.hpp"
 #include "lsp_sync.hpp"
 #include "markdown.hpp"
+#include "marks.hpp"
 #include "menu.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
@@ -80,6 +86,12 @@ std::optional<long> parse_addr(std::string_view& s, long base) {
     } else if(s.starts_with("'<") || s.starts_with("'>")) {
         if(!E.vm_valid) return std::nullopt;
         n = static_cast<long>(s[1] == '<' ? E.vm_first : E.vm_last) + 1;
+        s.remove_prefix(2);
+    } else if(s.size() >= 2 && s[0] == '\'' && mark_name_valid(s[1])) {
+        // 'a 'A '' '. : the mark's line, if it is in this buffer
+        const auto m = mark_find(s[1], E.buf().id);
+        if(!m || m->buf != E.buf().id) return std::nullopt;
+        n = static_cast<long>(m->line) + 1;
         s.remove_prefix(2);
     } else {
         return std::nullopt;
@@ -373,16 +385,17 @@ std::optional<SubstSpec> parse_subst(std::string_view args, std::string& err) {
         err = "Empty pattern";
         return std::nullopt;
     }
-    bool icase = false;
+    std::optional<bool> force_icase;  // i / I override smartcase
     for(const char f : flags) {
         if(f == 'g') sp.global = true;
-        else if(f == 'i') icase = true;
-        else if(f == 'I') icase = false;
+        else if(f == 'i') force_icase = true;
+        else if(f == 'I') force_icase = false;
         else {
             err = std::format("Unknown Flag: {}", f);
             return std::nullopt;
         }
     }
+    const bool icase = force_icase.value_or(!smartcase_sensitive(sp.pat, true));
     auto syntax = std::regex::ECMAScript;
     if(icase) syntax |= std::regex::icase;
     try {
@@ -505,11 +518,52 @@ void cmd_shell(const CmdLine& c) {
     }
     if(!c.has_range) {
         const std::string cmd = c.args;
-        const JobId id = job_start({.cmd = cmd, .on_exit = [](JobResult r) {
-                                        show_output(std::move(r.out));
-                                    }});
-        if(!id) editor_set_status_message("Can't run: {}", cmd);
-        else editor_set_status_message("$ {} ...", cmd);
+        struct Run {
+            JobId job = 0;
+            OutId out = 0;
+            bool killed = false;
+        };
+        const auto run = std::make_shared<Run>();
+        run->out =
+            output_begin({.name = "shell",
+                          .title = "$ " + cmd,
+                          .kill =
+                              [run] {
+                                  run->killed = true;
+                                  if(run->job) job_kill(run->job);
+                                  output_end(run->out, OutState::Killed, -1);
+                              },
+                          .rerun =
+                              [cmd] {
+                                  CmdLine again;
+                                  again.args = cmd;
+                                  cmd_shell(again);
+                              }});
+        run->job = job_start(
+            {.cmd = cmd,
+             .keep_out = false,
+             .on_data =
+                 [run](std::string_view d) { output_append(run->out, d); },
+             .on_exit =
+                 [run](JobResult r) {
+                     if(run->killed) return;
+                     output_end(run->out, OutState::Done, r.code);
+                     const size_t n = output_lines(run->out);
+                     if(r.code == 0 && n <= 1) {  // a one-liner: message line
+                         editor_set_status_message(
+                             "{}",
+                             n ? std::string(output_line(run->out, 0))
+                               : std::string("(No Output)"));
+                     } else {
+                         output_present(run->out,
+                                        static_cast<OutMode>(std::clamp(
+                                            opts.output_mode, 0, 2)));
+                     }
+                 }});
+        if(!run->job) {
+            output_end(run->out, OutState::Killed, -1);
+            editor_set_status_message("Can't run: {}", cmd);
+        } else editor_set_status_message("$ {} ...", cmd);
         return;
     }
     const Buffer* const target = &E.buf();
@@ -534,8 +588,9 @@ void cmd_shell(const CmdLine& c) {
 void reattach_syntax(std::string_view lang) {
     for(auto& b : E.buffers) {
         if(b->nofile) continue;
-        if(Syntax::detect(b->filename) != lang) continue;
-        if(b->syntax.attach(b->filename)) b->syntax.parse(b->pt, b->eol);
+        const std::string head = buffer_head(*b);
+        if(Syntax::detect(b->filename, head) != lang) continue;
+        if(b->syntax.attach(b->filename, head)) b->syntax.parse(b->pt, b->eol);
     }
 }
 
@@ -561,6 +616,22 @@ void cmd_copy(const CmdLine& c) {
     const long cnt = l - f + 1;
     goto_line(*dest + cnt);
     if(cnt > 2) editor_set_status_message("{} more lines", cnt);
+}
+
+void cmd_ft(const CmdLine& c) {
+    Buffer& b = E.buf();
+    if(c.args.empty()) {
+        editor_set_status_message("filetype: {}",
+                                  b.syntax.lang().empty()
+                                      ? std::string_view("none")
+                                      : b.syntax.lang());
+        return;
+    }
+    if(buffer_set_filetype(b, c.args)) return;
+    const std::string l = ft::normalize(c.args);
+    if(parser_known(l) && !parser_installed(l))
+        editor_set_status_message("No {} parser: :TSInstall {}", l, l);
+    else editor_set_status_message("Unknown filetype '{}'", c.args);
 }
 
 void cmd_tsinstall(const CmdLine& c) {
@@ -593,6 +664,40 @@ void cmd_tsinstall(const CmdLine& c) {
             editor_set_status_message("TSInstall {}: installed", lang);
         });
     if(!id) editor_set_status_message("TSInstall {}: already running", lang);
+}
+
+void cmd_tsupdate(const CmdLine& c) {
+    const std::string lang = c.args;
+    if(!lang.empty() && (!parser_known(lang) || !parser_installed(lang))) {
+        editor_set_status_message("TSUpdate: {} is not an installed grammar",
+                                  lang);
+        return;
+    }
+    editor_set_status_message("TSUpdate: refreshing grammar list...");
+    const bool started = parser_update(
+        lang,
+        c.bang,
+        {.progress =
+             [](std::string_view l, std::string_view line) {
+                 if(l.empty()) editor_set_status_message("TSUpdate: {}", line);
+                 else editor_set_status_message("TSUpdate {}: {}", l, line);
+             },
+         .each =
+             [](std::string_view l, bool ok, std::string_view) {
+                 if(ok) reattach_syntax(l);
+             },
+         .done =
+             [](int ok, int bad) {
+                 if(bad)
+                     editor_set_status_message(
+                         "TSUpdate: {} updated, {} failed", ok, bad);
+                 else if(ok)
+                     editor_set_status_message("TSUpdate: {} updated", ok);
+                 else
+                     editor_set_status_message(
+                         "TSUpdate: grammars are up to date");
+             }});
+    if(!started) editor_set_status_message("TSUpdate: already running");
 }
 
 void cmd_lsp(const CmdLine& c) {
@@ -754,7 +859,33 @@ static std::vector<CmdCand> complete_lsp(std::string_view) {
     return out;
 }
 
+static std::vector<CmdCand> complete_ts(std::string_view) {
+    std::vector<CmdCand> out;
+    out.reserve(parser_table().size());
+    for(const ParserInfo& p : parser_table())
+        out.push_back(
+            {std::string(p.name),
+             parser_installed(p.name) ? "installed" : std::string(p.exts)});
+    return out;
+}
+
+static std::vector<CmdCand> complete_ft(std::string_view lead) {
+    std::vector<CmdCand> out = complete_ts(lead);
+    for(const std::string_view n : {"c", "cpp", "java", "lua", "rust"})
+        out.push_back({std::string(n), "builtin"});
+    return out;
+}
+
+static std::vector<CmdCand> complete_ts_installed(std::string_view) {
+    std::vector<CmdCand> out;
+    for(const ParserInfo& p : parser_table())
+        if(parser_installed(p.name))
+            out.push_back({std::string(p.name), "installed"});
+    return out;
+}
+
 void register_builtin_commands() {
+    windows_register_commands();
     command_add({.name = "nohlsearch",
                  .aliases = {"noh"},
                  .desc = "Clear search highlight",
@@ -766,6 +897,11 @@ void register_builtin_commands() {
                  .bang = true,
                  .nargs = Nargs::None,
                  .run = [](const CmdLine& c) {
+                     if(win::count() >
+                        1) {  // closes the window, not the editor
+                         win_close_current(c.bang);
+                         return;
+                     }
                      if(!c.bang && quit_blocked()) return;
                      editor_quit();
                  }});
@@ -786,6 +922,10 @@ void register_builtin_commands() {
                  .nargs = Nargs::None,
                  .run = [](const CmdLine& c) {
                      editor_save();
+                     if(win::count() > 1) {
+                         win_close_current(c.bang);
+                         return;
+                     }
                      if(c.bang || !quit_blocked()) editor_quit();
                  }});
     command_add({.name = "edit",
@@ -910,13 +1050,38 @@ void register_builtin_commands() {
                  .nargs = Nargs::One,
                  .raw = true,
                  .run = cmd_shell});
+    command_add({.name = "notifications",
+                 .aliases = {"messages"},
+                 .desc = "Show the status message history",
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine&) {
+                     const std::string h = editor_status_history();
+                     buffer_show_text("[notifications]",
+                                      h.empty() ? "(no notifications)\n" : h);
+                 }});
+    command_add({.name = "ft",
+                 .desc = "Show or set the buffer's tree-sitter language",
+                 .usage = ":ft [lang]",
+                 .nargs = Nargs::Opt,
+                 .raw = true,
+                 .complete = complete_ft,
+                 .run = cmd_ft});
     command_add({.name = "TSInstall",
                  .desc = "Install a tree-sitter grammar",
                  .usage = ":TSInstall[!] [lang]",
                  .bang = true,
                  .nargs = Nargs::Opt,
                  .raw = true,
+                 .complete = complete_ts,
                  .run = cmd_tsinstall});
+    command_add({.name = "TSUpdate",
+                 .desc = "Refresh the grammar list, rebuild outdated grammars",
+                 .usage = ":TSUpdate[!] [lang]",
+                 .bang = true,
+                 .nargs = Nargs::Opt,
+                 .raw = true,
+                 .complete = complete_ts_installed,
+                 .run = cmd_tsupdate});
     command_add({.name = "lsp",
                  .desc = "Start, stop or restart LSP server",
                  .usage = ":lsp start|stop|restart [server]",
@@ -997,11 +1162,15 @@ struct Popup {
     std::vector<std::string> inserts;  // MenuItem::id indexes this
     size_t from = 0, to = 0;           // span of the line a pick replaces
     bool name_ctx = false;
-    bool forced = false;  // Tab opened it on an empty word
+    bool forced = false;         // Tab opened it on an empty word
+    bool words_mode = false;     // the open menu holds buffer words
+    std::vector<BufWord> words;  // collected on first use
+    bool have_words = false;
 } g_pop;
 
 struct PopCtx {
-    bool name = false;  // completing the command name (else an argument)
+    bool name = false;   // completing the command name (else an argument)
+    bool words = false;  // inside :s/pattern -> complete from buf words
     size_t from = 0, to = 0;
     std::string lead;  // the word before the cursor
     const CmdSpec* spec = nullptr;
@@ -1010,6 +1179,26 @@ struct PopCtx {
 void pop_reset() {
     g_pop.menu.close();
     g_pop.forced = false;
+    g_pop.words_mode = false;
+    g_pop.words.clear();
+    g_pop.have_words = false;
+}
+
+// ":s/pat/rep/": only while the cursor is still inside the pattern.
+bool pop_subst_context(const CmdLine& c, PopCtx& ctx) {
+    if(c.args.size() < 2) return false;
+    const char d = c.args[0];  // args end at the cursor
+    if(std::isalnum(static_cast<unsigned char>(d)) || d == '\\' || d == ' ')
+        return false;
+    for(size_t i = 1; i < c.args.size(); ++i) {
+        if(c.args[i] == '\\') {
+            ++i;
+            continue;
+        }
+        if(c.args[i] == d) return false;  // already past the pattern
+    }
+    ctx.words = true;
+    return true;
 }
 
 bool pop_context(const std::string& buf, size_t pos, PopCtx& ctx) {
@@ -1034,6 +1223,7 @@ bool pop_context(const std::string& buf, size_t pos, PopCtx& ctx) {
     if(c.name.empty()) return false;
     if(c.args.empty() && !head.ends_with(' ')) return false;  // ":e!"
     const CmdMatch m = command_find(c.name);
+    if(m.spec && m.spec->name == "substitute") return pop_subst_context(c, ctx);
     if(!m.spec || !m.spec->complete) return false;
     const size_t ws = head.find_last_of(' ');
     ctx.from =
@@ -1050,6 +1240,17 @@ void pop_update(const std::string& buf, size_t pos) {
     if(!pop_context(buf, pos, ctx) ||
        (ctx.name && ctx.lead.empty() && !g_pop.forced))
         return g_pop.menu.close();
+
+    if(ctx.words) {
+        if(!g_pop.have_words) {
+            g_pop.words = buffer_words();
+            g_pop.have_words = true;
+        }
+        g_pop.words_mode = true;
+        words_menu_update(g_pop.menu, g_pop.words, buf, pos, true);
+        return;
+    }
+    g_pop.words_mode = false;
 
     struct Hit {
         int score;
@@ -1103,7 +1304,7 @@ void pop_update(const std::string& buf, size_t pos) {
         return a.score != b.score ? a.score > b.score
                                   : a.item.label < b.item.label;
     });
-    if(hits.size() > 200) hits.erase(hits.begin() + 200, hits.end());
+    if(hits.size() > 2000) hits.erase(hits.begin() + 2000, hits.end());
 
     std::vector<MenuItem> items;
     g_pop.inserts.clear();
@@ -1118,17 +1319,19 @@ void pop_update(const std::string& buf, size_t pos) {
     if(!g_pop.menu.is_open())
         g_pop.menu.open({.at = OverlaySpec::At::Screen,
                          .x = 0,
-                         .y = E.term_rows + 1,
+                         .y = editor_message_row(),
                          .up = true,
                          .cover_bars = true,
                          .in_prompt = true,
                          .max_rows = 8,
-                         .min_w = 24,
-                         .max_w = 70});
+                         .min_w = 1,
+                         .max_w = 200,
+                         .fit_detail = true});
     g_pop.menu.set_items(std::move(items));
 }
 
 bool pop_accept(std::string& buf, size_t& pos) {
+    if(g_pop.words_mode) return words_menu_accept(g_pop.menu, buf, pos, true);
     const MenuItem* it = g_pop.menu.selected();
     if(!g_pop.menu.visible() || !it) return false;
     const std::string text = g_pop.inserts[it->id];
@@ -1177,7 +1380,11 @@ void popup_after_key(const std::string& buf, size_t pos, int key, bool edited) {
 void editor_command_prompt() {
     PromptHooks hooks;
     hooks.keymap_mode = COMMAND;
-    hooks.pre_key = popup_pre_key;
+    hooks.pre_key = [](int key, std::string& buf, size_t& pos) {
+        if(!popup_pre_key(key, buf, pos)) return false;
+        subst_preview_key(buf, key);
+        return true;
+    };
     hooks.after_key =
         [](const std::string& buf, size_t pos, int key, bool edited) {
             subst_preview_key(buf, key);
@@ -1205,8 +1412,20 @@ struct {
 size_t SubstView::map(size_t off) const {
     long d = 0;
     for(const Edit& e : edits) {
+        // markdown view: a zero-length edit is an insertion, and the char at
+        // its offset moves behind it
+        if(atomic && e.lo == e.hi) {
+            if(off < e.lo) break;
+            d = static_cast<long>(e.nhi) - static_cast<long>(e.hi);
+            continue;
+        }
         if(off <= e.lo) break;
-        if(off < e.hi) return e.nlo + std::min(off - e.lo, e.nhi - e.nlo);
+        if(off < e.hi) {
+            if(atomic) return e.nlo;
+            // never land inside a character / cluster of the drawn text
+            const size_t r = e.nlo + std::min(off - e.lo, e.nhi - e.nlo);
+            return r >= text.size() ? text.size() : gr_snap(text, r);
+        }
         d = static_cast<long>(e.nhi) - static_cast<long>(e.hi);
     }
     return static_cast<size_t>(static_cast<long>(off) + d);
@@ -1243,6 +1462,7 @@ bool subst_preview_line(int row, std::string_view line, SubstView& out) {
     out.text.clear();
     out.marks.clear();
     out.edits.clear();
+    out.atomic = false;
     const std::string s(line);
     size_t copied = 0;
     for(std::sregex_iterator it(s.begin(), s.end(), g_sp.re), end; it != end;

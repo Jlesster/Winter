@@ -20,7 +20,9 @@ public:
     // "literal" means (insert into the buffer, insert into a prompt, ...).
     using Emit = std::function<void(int)>;
 
-    Result feed(EditorMode mode, int key, const Emit& emit_literal);
+    // `buf`: a stable buffer id whose buffer-local maps also apply (0 = none)
+    Result feed(EditorMode mode, int key, const Emit& emit_literal,
+                uint64_t buf = 0);
     bool pending() const;
     void timeout(const Emit& emit_literal);
     void reset();
@@ -29,6 +31,7 @@ private:
     Result feed_empty(EditorMode mode, int key);
 
     EditorMode mode_ = NORMAL;
+    uint64_t buf_ = 0;
     bool have_mode_ = false;
     KeySeq keys_;
     std::string action_;

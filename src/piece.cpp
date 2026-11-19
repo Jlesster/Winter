@@ -212,6 +212,33 @@ void PieceTable::set_history_limit(size_t n) {
     if(_depth == 0) trim_history();
 }
 
+void PieceTable::set_untracked(bool on) {
+    _untracked = on;
+    if(!on || _depth != 0) return;
+    _hist.clear();
+    _head = _saved_head = 0;
+    _rev_open = false;
+}
+
+// The add buffer only ever grows, so a program that rewrites the same few
+// KB every frame would leak. With no history nothing refers to old add
+// bytes: fold the whole text into one fresh piece. Anchors are positions in
+// the text and do not move.
+void PieceTable::compact() {
+    if(!_untracked || _depth != 0) return;
+    if(_add.size() < (size_t{1} << 20) || _add.size() < 4 * size()) return;
+    std::string t = text();
+    _n.clear();
+    _free.clear();
+    _root = NIL;
+    _add = std::move(t);
+    _add_lf.clear();
+    for(size_t i = _add.find('\n'); i != std::string::npos;
+        i = _add.find('\n', i + 1))
+        _add_lf.push_back(i);
+    if(!_add.empty()) _root = make({Src::Add, 0, _add.size()});
+}
+
 PieceTable::Revision& PieceTable::open_rev() {
     if(!_rev_open) {
         if(_saved_head != npos && _saved_head > _head) _saved_head = npos;
@@ -372,12 +399,19 @@ TextEdit PieceTable::span_edit(size_t pos, size_t del,
 }
 
 std::optional<size_t> PieceTable::undo() {
+    if(locked) {
+        if(_on_refused) _on_refused();
+        return std::nullopt;
+    }
     if(!can_undo()) return std::nullopt;
     const Revision& rev = _hist[--_head];
     for(auto it = rev.edits.rbegin(); it != rev.edits.rend(); ++it) {
         const size_t del = span_len(it->inserted);
         const TextEdit te = span_edit(it->pos, del, it->removed);
         replace_span(it->pos, del, it->removed);
+        for(const auto& [id, off] : it->orphans)  // marks that were in the text
+            anchor_move(id, it->pos + off);
+        _orphans.clear();
         note_deco_replace(it->pos, del, span_len(it->removed));
         if(_on_edit) _on_edit(te, Origin::Undo);
     }
@@ -390,12 +424,17 @@ std::optional<size_t> PieceTable::undo() {
 }
 
 std::optional<size_t> PieceTable::redo() {
+    if(locked) {
+        if(_on_refused) _on_refused();
+        return std::nullopt;
+    }
     if(!can_redo()) return std::nullopt;
     const Revision& rev = _hist[_head++];
     for(const Edit& e : rev.edits) {
         const size_t del = span_len(e.removed);
         const TextEdit te = span_edit(e.pos, del, e.inserted);
         replace_span(e.pos, del, e.inserted);
+        _orphans.clear();
         note_deco_replace(e.pos, del, span_len(e.inserted));
         if(_on_edit) _on_edit(te, Origin::Redo);
     }
@@ -448,12 +487,16 @@ bool PieceTable::import_history(const SavedHistory& h) {
 
 PieceTable& PieceTable::insert(size_t pos, std::string_view text) {
     if(text.empty()) return *this;
+    if(locked) {
+        if(_on_refused) _on_refused();
+        return *this;
+    }
     pos = std::min(pos, size());
     const LineCol sp = to_linecol(pos);
     const size_t su = _lsp_u16 ? u16_col(sp) : 0;
     Group g(*this);
     const size_t add_off = raw_insert(pos, text);
-    record_insert(pos, add_off, text.size());
+    if(!_untracked) record_insert(pos, add_off, text.size());
     TextEdit te;
     te.start = te.old_end = pos;
     te.new_end = pos + text.size();
@@ -479,6 +522,10 @@ PieceTable& PieceTable::insert(size_t pos, std::string_view text) {
 PieceTable& PieceTable::remove(size_t pos, size_t n) {
     const size_t total = size();
     if(pos >= total || n == 0) return *this;
+    if(locked) {
+        if(_on_refused) _on_refused();
+        return *this;
+    }
     n = std::min(n, total - pos);
     const LineCol sp = to_linecol(pos), ep = to_linecol(pos + n);
     size_t su = 0, eu = 0;
@@ -488,7 +535,10 @@ PieceTable& PieceTable::remove(size_t pos, size_t n) {
     }
     Group g(*this);
     std::vector<Piece> removed;
+    _orphans.clear();
     raw_remove(pos, n, &removed);
+    auto orphans = std::move(_orphans);  // anchors that were inside the text
+    _orphans.clear();
 
     TextEdit te;
     te.start = te.new_end = pos;
@@ -498,25 +548,37 @@ PieceTable& PieceTable::remove(size_t pos, size_t n) {
     te.start_u16 = te.new_end_u16 = su;
     te.old_end_u16 = eu;
     log_edit(te);
+    if(_untracked) return *this;  // nothing will ever undo this
     Revision& rev = open_rev();
     if(!rev.edits.empty()) {
         Edit& e = rev.edits.back();
         if(e.inserted.empty() && !e.removed.empty()) {
-            if(pos + n == e.pos) {
+            if(pos + n == e.pos) {  // new text goes in front of the old
+                for(auto& o : e.orphans) o.second += n;
+                orphans.insert(orphans.end(), e.orphans.begin(), e.orphans.end());
+                e.orphans = std::move(orphans);
                 removed.insert(
                     removed.end(), e.removed.begin(), e.removed.end());
                 e.removed = std::move(removed);
                 e.pos = pos;
                 return *this;
             }
-            if(pos == e.pos) {
+            if(pos == e.pos) {  // new text goes after the old
+                const size_t before = span_len(e.removed);
+                std::erase_if(orphans, [&](const auto& o) {  // already collapsed
+                    for(const auto& k : e.orphans)           // by the earlier cut
+                        if(k.first == o.first) return true;
+                    return false;
+                });
+                for(auto& o : orphans) o.second += before;
+                e.orphans.insert(e.orphans.end(), orphans.begin(), orphans.end());
                 e.removed.insert(
                     e.removed.end(), removed.begin(), removed.end());
                 return *this;
             }
         }
     }
-    rev.edits.push_back({pos, std::move(removed), {}});
+    rev.edits.push_back({pos, std::move(removed), {}, std::move(orphans)});
     return *this;
 }
 
@@ -684,6 +746,9 @@ void PieceTable::anchors_insert(size_t p, size_t n) {
 void PieceTable::anchors_remove(size_t p, size_t n) {
     for(Anchor& a : _anchors) {
         if(a.pos >= p + n) a.pos -= n;
-        else if(a.pos > p) a.pos = p;
+        else {
+            if(a.pos >= p) _orphans.push_back({a.id, a.pos - p});
+            a.pos = std::min(a.pos, p);
+        }
     }
 }

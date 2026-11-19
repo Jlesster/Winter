@@ -5,6 +5,8 @@
 #include <string>
 #include <string_view>
 
+#include "grapheme.hpp"
+
 inline size_t utf8_seq_len(char lead) {
     const auto b = static_cast<unsigned char>(lead);
     return b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : b >= 0xC0 ? 2 : 1;
@@ -84,21 +86,4 @@ inline size_t utf8_prev(std::string_view s, size_t i) {
     return i - 1;
 }
 
-inline int utf8_width(char32_t c) {
-    if(c < 0x20 || (c >= 0x7F && c < 0xA0)) return 0;
-    if((c >= 0x0300 && c <= 0x036F) || (c >= 0x1AB0 && c <= 0x1AFF) ||
-       (c >= 0x1DC0 && c <= 0x1DFF) || (c >= 0x200B && c <= 0x200F) ||
-       (c >= 0x20D0 && c <= 0x20FF) || (c >= 0xFE00 && c <= 0xFE0F) ||
-       (c >= 0xFE20 && c <= 0xFE2F))
-        return 0;
-    if((c >= 0x1100 && c <= 0x115F) || (c >= 0x2E80 && c <= 0x303E) ||
-       (c >= 0x3041 && c <= 0xA4CF) || (c >= 0xAC00 && c <= 0xD7A3) ||
-       (c >= 0xF900 && c <= 0xFAFF) || (c >= 0xFE30 && c <= 0xFE6F) ||
-       (c >= 0xFF00 && c <= 0xFF60) || (c >= 0xFFE0 && c <= 0xFFE6) ||
-       (c >= 0x1F300 && c <= 0x1F64F) || (c >= 0x1F900 && c <= 0x1F9FF) ||
-       (c >= 0x1F680 && c <= 0x1F6FF) || (c >= 0x1FA70 && c <= 0x1FAFF) ||
-       (c >= 0x2600 && c <= 0x27BF && c != 0x2603) ||
-       (c >= 0x20000 && c <= 0x3FFFD))
-        return 2;
-    return 1;
-}
+inline int utf8_width(char32_t c) { return gr_cp_width(c); }

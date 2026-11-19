@@ -1,6 +1,7 @@
 #include "virt.hpp"
 #include <algorithm>
 #include <cstddef>
+#include <iterator>
 #include "piece.hpp"
 
 NsId deco_ns(std::string_view name) {
@@ -11,6 +12,41 @@ NsId deco_ns(std::string_view name) {
     return static_cast<NsId>(names.size() - 1);
 }
 
+namespace {
+// Apply edit [e.start, e.old_end) -> [e.start, e.new_end) to a strict span.
+// Text typed at either edge or inside is left uncovered; what survives of the
+// span keeps its colour. False: nothing of it is left.
+bool cut_span(SpanDeco& s, const TextEdit& e, std::vector<SpanDeco>& halves) {
+    const auto d = static_cast<std::ptrdiff_t>(e.new_end) -
+                   static_cast<std::ptrdiff_t>(e.old_end);
+    const auto moved = [&](size_t p) {
+        return static_cast<size_t>(static_cast<std::ptrdiff_t>(p) + d);
+    };
+    if(s.end <= e.start) return true;  // wholly before the edit
+    if(s.start >= e.old_end) {         // wholly after it (or typed in front)
+        s.start = moved(s.start);
+        s.end = moved(s.end);
+        return true;
+    }
+    const bool left = e.start > s.start, right = s.end > e.old_end;
+    if(left && right) {
+        SpanDeco r = s;
+        r.start = e.new_end;
+        r.end = moved(s.end);
+        halves.push_back(std::move(r));
+        s.end = e.start;
+    } else if(left) {
+        s.end = e.start;
+    } else if(right) {
+        s.start = e.new_end;
+        s.end = moved(s.end);
+    } else {
+        return false;
+    }
+    return true;
+}
+}  // namespace
+
 void DecoStore::apply(const TextEdit& e) {
     if(e.reset) {
         _eol.clear();
@@ -18,12 +54,25 @@ void DecoStore::apply(const TextEdit& e) {
         _max_len = 0;
         return;
     }
-    size_t mx = 0;
-    for(SpanDeco& s : _spans) {
-        s.start = shift_pos(s.start, e, false);
-        s.end = std::max(shift_pos(s.end, e, true), s.start);
-        mx = std::max(mx, s.end - s.start);
+    std::vector<SpanDeco> halves;  // right halves of strict spans an edit split
+    size_t w = 0;
+    for(size_t i = 0; i < _spans.size(); ++i) {
+        SpanDeco& s = _spans[i];
+        if(s.strict) {
+            if(!cut_span(s, e, halves)) continue;  // swallowed whole: drop it
+        } else {
+            s.start = shift_pos(s.start, e, false);
+            s.end = std::max(shift_pos(s.end, e, true), s.start);
+        }
+        if(w != i) _spans[w] = std::move(s);
+        ++w;
     }
+    _spans.erase(_spans.begin() + static_cast<std::ptrdiff_t>(w), _spans.end());
+    _spans.insert(_spans.end(), halves.begin(), halves.end());
+    if(!std::ranges::is_sorted(_spans, {}, &SpanDeco::start))
+        std::ranges::stable_sort(_spans, {}, &SpanDeco::start);
+    size_t mx = 0;
+    for(const SpanDeco& s : _spans) mx = std::max(mx, s.end - s.start);
     _max_len = mx;
     auto it = std::ranges::upper_bound(_eol, e.start, {}, &EolDeco::pos);
     for(; it != _eol.end(); ++it) it->pos = shift_pos(it->pos, e, false);
@@ -37,6 +86,26 @@ void DecoStore::add(EolDeco d) {
 void DecoStore::clear_ns(NsId ns) {
     std::erase_if(_eol, [&](const EolDeco& d) { return d.ns == ns; });
     std::erase_if(_spans, [&](const SpanDeco& d) { return d.ns == ns; });
+}
+
+void DecoStore::replace_ns_spans(NsId ns, std::vector<SpanDeco> spans) {
+    std::erase_if(_eol, [&](const EolDeco& d) { return d.ns == ns; });
+    std::erase_if(_spans, [&](const SpanDeco& d) { return d.ns == ns; });
+    if(spans.empty()) return;
+    if(!std::ranges::is_sorted(spans, {}, &SpanDeco::start))
+        std::ranges::stable_sort(spans, {}, &SpanDeco::start);
+    for(const SpanDeco& s : spans)
+        _max_len = std::max(_max_len, s.end > s.start ? s.end - s.start : 0);
+    std::vector<SpanDeco> out;
+    out.reserve(_spans.size() + spans.size());
+    // stable: on equal starts the old spans stay first, like add_span
+    std::ranges::merge(_spans,
+                       spans,
+                       std::back_inserter(out),
+                       {},
+                       &SpanDeco::start,
+                       &SpanDeco::start);
+    _spans = std::move(out);
 }
 
 void DecoStore::eol_on_line(size_t ls, size_t len,

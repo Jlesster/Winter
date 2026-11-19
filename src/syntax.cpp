@@ -1,4 +1,5 @@
 #include "syntax.hpp"
+#include "filetype.hpp"
 #include <tree_sitter/api.h>
 #include <algorithm>
 #include <cstddef>
@@ -29,34 +30,6 @@ const LangEntry kLangs[] = {
 #define X(n) {#n, tree_sitter_##n},
     WINTER_TS_LANGS(X)
 #undef X
-};
-
-struct ExtEntry {
-    std::string_view ext, lang;
-};
-constexpr ExtEntry kExts[] = {
-    {".lua", "lua"},
-    {".c", "c"},
-    {".h", "c"},
-    {".cpp", "cpp"},
-    {".cc", "cpp"},
-    {".cxx", "cpp"},
-    {".hpp", "cpp"},
-    {".hh", "cpp"},
-    {".java", "java"},
-    {".rs", "rust"},
-};
-
-constexpr ExtEntry kNames[] = {
-    {"Makefile", "make"},
-    {"GNUmakefile", "make"},
-    {"CMakeLists.txt", "cmake"},
-    {"meson.build", "meson"},
-    {"meson.options", "meson"},
-    {"PKGBUILD", "bash"},
-    {".bashrc", "bash"},
-    {".bash_profile", "bash"},
-    {".zshrc", "bash"},
 };
 
 struct ReadCtx {
@@ -279,23 +252,7 @@ const TSLanguage* lang_by_name(std::string_view lang) {
     return parser_load(lang);
 }
 std::string normalize_lang(std::string s) {
-    for(char& c : s)
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    static constexpr std::pair<std::string_view, std::string_view> kAlias[] = {
-        {"sh", "bash"},
-        {"shell", "bash"},
-        {"zsh", "bash"},
-        {"js", "javascript"},
-        {"ts", "typescript"},
-        {"py", "python"},
-        {"c++", "cpp"},
-        {"cs", "c_sharp"},
-        {"yml", "yaml"},
-        {"rs", "rust"},
-        {"md", "markdown"}};
-    for(const auto& [a, b] : kAlias)
-        if(s == a) return std::string(b);
-    return s;
+    return ft::normalize(std::move(s));
 }
 
 const char* ts_read(void* payload, uint32_t byte, TSPoint, uint32_t* n) {
@@ -329,21 +286,9 @@ Syntax::~Syntax() {
     ts_parser_delete(_parser);
 }
 
-std::string_view Syntax::detect(std::string_view path) {
-    const auto base = path.substr(path.rfind('/') + 1);
-    for(const auto& n : kNames)
-        if(n.ext == base) return n.lang;
-    std::string ext;
-    if(const auto dot = base.rfind('.');
-       dot != std::string_view::npos && dot != 0) {
-        ext = std::string(base.substr(dot));
-        for(char& c : ext)
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        for(const auto& e : kExts)
-            if(e.ext == ext) return e.lang;
-    }
-    if(const auto l = parser_lang_for_file(base); !l.empty()) return l;
-    return ext.empty() ? std::string_view{} : parser_lang_for_ext(ext);
+std::string_view Syntax::detect(std::string_view path,
+                                std::string_view first_line) {
+    return ft::detect(path, first_line);
 }
 
 void Syntax::detach() {
@@ -358,9 +303,9 @@ void Syntax::detach() {
     _seen_rev = ~0ULL;
 }
 
-bool Syntax::attach(std::string_view filename) {
+bool Syntax::attach(std::string_view filename, std::string_view first_line) {
     detach();
-    const std::string_view lang = detect(filename);
+    const std::string_view lang = detect(filename, first_line);
     if(lang.empty()) return false;
     return use_lang(lang);
 }
@@ -372,14 +317,14 @@ bool Syntax::attach_lang(std::string_view lang) {
     return use_lang(_name_store);
 }
 
-bool Syntax::use_lang(std::string_view lang) {
-    const TSLanguage* tl = nullptr;
+const TSLanguage* Syntax::language_by_name(std::string_view name) {
     for(const auto& l : kLangs)
-        if(l.name == lang) {
-            tl = l.fn();
-            break;
-        }
-    if(!tl) tl = parser_load(lang);
+        if(l.name == name) return l.fn();
+    return parser_load(name);
+}
+
+bool Syntax::use_lang(std::string_view lang) {
+    const TSLanguage* tl = language_by_name(lang);
     if(!tl) return false;
     if(!ts_parser_set_language(_parser, tl)) {
         _err = std::format("{}: grammar ABI not supported by this tree-sitter",
@@ -413,6 +358,7 @@ void Syntax::parse(const PieceTable& pt, bool trailing_nl) {
     }
     drop_tree();
     _tree = t;
+    ++_gen;
     _nl = trailing_nl;
     _seen_rev = pt.revision();
     free_layers();
@@ -763,6 +709,7 @@ bool Syntax::eval(const std::vector<std::vector<Pred>>& preds,
 void Syntax::drop_tree() {
     if(_tree) ts_tree_delete(_tree);
     _tree = nullptr;
+    ++_gen;
 }
 
 void Syntax::on_edit(const TextEdit& e) {
@@ -778,6 +725,7 @@ void Syntax::on_edit(const TextEdit& e) {
                          pt32(e.old_end_pt),
                          pt32(e.new_end_pt)};
     ts_tree_edit(_tree, &ie);
+    ++_gen;  // nodes taken before this edit now point at shifted data
     cache_apply_edit(e);
     _edited = true;
 }

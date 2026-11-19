@@ -144,6 +144,8 @@ void Screen::flush() {
             }
             append_utf8(out, b.chr);
             if(b.mark) append_utf8(out, b.mark);
+            if(b.tail)
+                for(const char32_t t : gr_tail_get(b.tail)) append_utf8(out, t);
             front[i] = b;
             cx = x + b.width;
             cy = y;

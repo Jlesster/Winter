@@ -63,6 +63,7 @@ const std::vector<std::string_view>& theme_ui_groups() {
         "ui.message",
         "ui.linenr",
         "ui.linenr.cursor",
+        "ui.mark",
         "ui.tilde",
         "ui.visual",
         "ui.search",

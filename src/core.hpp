@@ -1,10 +1,11 @@
 #pragma once
 
-#define WINTER_VERSION "0.1.0"
+#define WINTER_VERSION "0.1.1"
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 enum EditorMode {
     INSERT,
+    TERMINAL,
     REPLACE,
     SEARCH,
     NORMAL,

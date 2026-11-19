@@ -1,3 +1,4 @@
+#include "render.hpp"
 #include "menu.hpp"
 
 #include <algorithm>
@@ -95,10 +96,14 @@ void Menu::layout() {
         kinds_ = kinds_ || it.kind != 0;
     }
     off_ = spec_.framed ? 1 : 0;
-    const int screen_w = E.term_cols + tree_cols();
+    const int screen_w = editor_screen_cols();
     const int cap = std::max(4, std::min(spec_.max_w, screen_w) - 2 * off_);
-    dw_ = spec_.fixed ? (dw ? cap / 3 : 0) : std::min(dw, cap / 3);
     const int kind_w = kinds_ ? 2 : 0;
+    // fit_detail: the detail gets whatever room the widest label leaves
+    const int dcap = spec_.fit_detail
+        ? std::max(0, cap - (kind_w + icon_w_ + lw + 4))
+        : cap / 3;
+    dw_ = spec_.fixed ? (dw ? cap / 3 : 0) : std::min(dw, dcap);
     const int detail_w = dw_ ? 2 + dw_ : 0;
     inner_ = spec_.fixed ? cap
         : std::clamp(1 + kind_w + icon_w_ + lw + detail_w + 1,

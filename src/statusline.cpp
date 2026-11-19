@@ -10,8 +10,8 @@
 #include "glyphs.hpp"
 #include "options.hpp"
 #include "syntax.hpp"
-#include "tree.hpp"
 #include "theme.hpp"
+#include "tree.hpp"
 #include "utf8.hpp"
 #include "virt.hpp"
 
@@ -31,6 +31,7 @@ std::string_view mode_text() {
         case REPLACE: return "REPLACE";
         case FILES: return tree_visual() ? "V-FILES" : "FILES";
         case NORMAL:
+        case TERMINAL:
         case OPPEND: break;
     }
     return "NORMAL";
@@ -170,8 +171,7 @@ StatusBlock c_indent() {
     b.prio = 10;
     b.base = on_bar("ui.statusline.indent");
     b.pieces.push_back(
-        {std::format("{}:{}", opt_et() ? "sp" : "tab", opt_sw()),
-         {}});
+        {std::format("{}:{}", opt_et() ? "sp" : "tab", opt_sw()), {}});
     return b;
 }
 

@@ -1,7 +1,7 @@
 project(
   'winter',
   ['c', 'cpp'],
-  version: '0.1.0',
+  version: '0.1.1',
   default_options: [
     'cpp_std=c++23',
     'warning_level=3',
@@ -11,7 +11,7 @@ project(
 
 sub_opts = ['warning_level=0', 'werror=false']
 ts_dep = dependency('tree-sitter', default_options: sub_opts)
-lua_dep = dependency('lua5.4', method: 'pkg-config')
+lua_dep = dependency('lua5.4', method: 'pkg-config', required: false)
 if not lua_dep.found()
   lua_dep = dependency('lua', version: '>=5.4', method: 'pkg-config')
 endif
@@ -46,6 +46,9 @@ configure_file(
 
 add_project_arguments('-DWINTER_TS_LANGS(X)=' + ' '.join(lang_syms), language: 'cpp')
 
+confdir = get_option('prefix') / get_option('sysconfdir') / 'xdg' / 'winter'
+add_project_arguments('-DWINTER_CONFDIR="@0@"'.format(confdir), language: 'cpp')
+
 deps = [
   dependency('trux'),
   ts_dep,
@@ -64,6 +67,7 @@ sources = files(
   'src/comment.cpp',
   'src/complete.cpp',
   'src/diag.cpp',
+  'src/dock.cpp',
   'src/edit.cpp',
   'src/edit_bus.cpp',
   'src/editor.cpp',
@@ -72,12 +76,14 @@ sources = files(
   'src/extend.cpp',
   'src/external.cpp',
   'src/file.cpp',
+  'src/filetype.cpp',
   'src/fold.cpp',
   'src/fold_buf.cpp',
   'src/format.cpp',
   'src/format_run.cpp',
   'src/fuzzy.cpp',
   'src/glyphs.cpp',
+  'src/grapheme.cpp',
   'src/gutter.cpp',
   'src/indent.cpp',
   'src/indent_calc.cpp',
@@ -101,26 +107,42 @@ sources = files(
   'src/lua_json.cpp',
   'src/main.cpp',
   'src/make.cpp',
+  'src/mark_actions.cpp',
   'src/markdown.cpp',
   'src/markdown_buf.cpp',
+  'src/marks.cpp',
   'src/menu.cpp',
   'src/motion.cpp',
+  'src/multicursor.cpp',
   'src/normal.cpp',
+  'src/num.cpp',
   'src/operator.cpp',
   'src/options.cpp',
+  'src/output.cpp',
   'src/overlay.cpp',
   'src/parser.cpp',
   'src/picker.cpp',
   'src/piece.cpp',
   'src/preview.cpp',
   'src/prompt.cpp',
+  'src/pty.cpp',
   'src/quickfix.cpp',
+  'src/reg.cpp',
   'src/registry.cpp',
   'src/render.cpp',
   'src/replace.cpp',
   'src/script.cpp',
+  'src/script_api.cpp',
   'src/script_buf.cpp',
   'src/script_ext.cpp',
+  'src/script_fs.cpp',
+  'src/script_json.cpp',
+  'src/script_keys.cpp',
+  'src/script_mark.cpp',
+  'src/script_reg.cpp',
+  'src/script_runtime.cpp',
+  'src/script_ts.cpp',
+  'src/script_win.cpp',
   'src/search.cpp',
   'src/shell.cpp',
   'src/snippet.cpp',
@@ -128,12 +150,19 @@ sources = files(
   'src/statusline.cpp',
   'src/syntax.cpp',
   'src/syntax_indent.cpp',
+  'src/term_keys.cpp',
+  'src/term_panel.cpp',
   'src/terminal.cpp',
   'src/theme.cpp',
   'src/tree.cpp',
+  'src/ts_provider.cpp',
+  'src/tsq.cpp',
   'src/undofile.cpp',
   'src/virt.cpp',
+  'src/vt.cpp',
   'src/watch.cpp',
+  'src/window.cpp',
+  'src/window_ed.cpp',
 )
 
 incls = include_directories('.')
@@ -148,9 +177,4 @@ executable(
 
 subdir('tests')
 
-install_subdir(
-  'lua',
-  install_dir: '/etc' / 'xdg' / 'winter',
-  strip_directory: true,
-)
-
+install_subdir('lua', install_dir: confdir, strip_directory: true)

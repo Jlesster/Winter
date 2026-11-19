@@ -112,6 +112,13 @@ public:
         for(Anchor& a : _anchors)
             if(a.id == id) a.g = g;
     }
+    void anchor_move(size_t id, size_t pos) {
+        for(Anchor& a : _anchors)
+            if(a.id == id) {
+                a.pos = std::min(pos, size());
+                return;
+            }
+    }
 
     void begin_group();
     void end_group();
@@ -124,7 +131,38 @@ public:
     bool modified() const {
         return (_depth > 0 && _rev_open) || _head != _saved_head;
     }
-    void set_history_limit(size_t n);
+    void set_history_limit(size_t n);  // 0 = unlimited, not "none"
+
+    // Read-only: insert/remove/undo/redo do nothing (the refuse sink tells
+    // the user) until an Unlock is alive. The text can still change through
+    // an Unlock, which is how a nofile buffer fed by a program stays
+    // read-only for the user.
+    bool locked = false;
+    class Unlock {
+    public:
+        explicit Unlock(PieceTable& t)
+            : _t(t),
+              _was(t.locked) {
+            _t.locked = false;
+        }
+        ~Unlock() { _t.locked = _was; }
+        Unlock(const Unlock&) = delete;
+        Unlock& operator=(const Unlock&) = delete;
+
+    private:
+        PieceTable& _t;
+        bool _was;
+    };
+    void set_refuse_sink(std::function<void()> f) {
+        _on_refused = std::move(f);
+    }
+
+    // No undo history at all: edits are applied but not recorded. For
+    // buffers a program rewrites all the time. Turning it on drops what was
+    // recorded. compact() then keeps the add buffer from growing forever.
+    void set_untracked(bool on);
+    bool untracked() const { return _untracked; }
+    void compact();
 
     uint64_t revision() const { return _rev; }
     std::vector<TextEdit> drain_edits() { return std::exchange(_journal, {}); }
@@ -163,6 +201,7 @@ private:
         size_t pos{};
         std::vector<Piece> removed{};
         std::vector<Piece> inserted{};
+        std::vector<std::pair<size_t, size_t>> orphans{};  // {anchor id, offset in removed}
     };
 
     struct Revision {
@@ -219,6 +258,7 @@ private:
     void anchors_remove(size_t p, size_t n);
 
     bool _rev_open = false;
+    bool _untracked = false;
     bool _lsp_on = false;
     bool _lsp_u16 = false;
     Id _root = NIL;
@@ -240,7 +280,9 @@ private:
     std::vector<TextEdit> _journal{};
     std::vector<TextEdit> _deco_q{};
     std::vector<Anchor> _anchors{};
+    std::vector<std::pair<size_t, size_t>> _orphans{};  // filled by anchors_remove
     std::function<void()> _on_group_end;
+    std::function<void()> _on_refused;
     EditSink _on_edit;
     TextEdit span_edit(size_t pos, size_t del,
                        const std::vector<Piece>& ins) const;

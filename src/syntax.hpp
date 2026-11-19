@@ -23,8 +23,10 @@ public:
 
     std::string_view lang() const { return _name; }
 
-    static std::string_view detect(std::string_view path);
-    bool attach(std::string_view filename);
+    // first_line (optional) enables shebang detection for extensionless files.
+    static std::string_view detect(std::string_view path,
+                                   std::string_view first_line = {});
+    bool attach(std::string_view filename, std::string_view first_line = {});
     // Attach by language name ("cpp", "c++", "rs", ...) instead of a file name.
     bool attach_lang(std::string_view lang);
     // Highlights `code` as a standalone document and returns styled byte ranges
@@ -56,6 +58,13 @@ public:
     // before it. False when there is no tree.
     bool fold_ranges(std::vector<fold::Raw>& out,
                      const std::string& override_src) const;
+
+    // For winter.ts. tree_gen() changes whenever the tree is replaced, edited in
+    // place or dropped: a TSNode taken under an older value must not be used.
+    const TSTree* tree() const { return _tree; }
+    uint64_t tree_gen() const { return _gen; }
+    // A builtin or installed grammar by name; null when there is none.
+    static const TSLanguage* language_by_name(std::string_view name);
 
 private:
     using Meta = std::vector<std::pair<std::string, std::string>>;
@@ -147,6 +156,7 @@ private:
     TSQueryCursor* _qc = nullptr;
     TSParser* _parser = nullptr;
     TSTree* _tree = nullptr;
+    uint64_t _gen = 0;  // see tree_gen()
     TSQuery* _iquery = nullptr;
     std::vector<Meta> _imeta;
     std::vector<Delim> _rb;

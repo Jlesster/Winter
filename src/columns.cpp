@@ -1,6 +1,7 @@
 #include "columns.hpp"
 
 #include "core.hpp"
+#include "grapheme.hpp"
 #include "options.hpp"
 #include "utf8.hpp"
 
@@ -12,20 +13,30 @@ int cell_width(char32_t cp, int rx) {
     return utf8_width(cp);
 }
 
+int cluster_width(std::string_view line, size_t at, size_t end, int rx) {
+    const Decoded d = utf8_decode(line, at);
+    if(d.cp == '\t' || is_ctl(d.cp)) return cell_width(d.cp, rx);
+    if(end - at == d.len) return utf8_width(d.cp);  // single code point
+    return gr_width(line.substr(at, end - at));
+}
+
+// Everything below steps by grapheme cluster, the unit the terminal draws
+// and the cursor sits on: "e" + accent, a flag, a ZWJ family or a Hangul
+// syllable is one cursor stop and one run of cells.
+
 int snap_cx(std::string_view line, int cx) {
     if(cx <= 0) return 0;
     if(cx >= static_cast<int>(line.size()))
         return static_cast<int>(line.size());
-    return static_cast<int>(utf8_prev(line, utf8_next(line, cx)));
+    return static_cast<int>(gr_snap(line, static_cast<size_t>(cx)));
 }
 
 int cx_to_rx(std::string_view line, int cx) {
     int rx = 0;
-    for(int j = 0;
-        j < static_cast<int>(line.size()) && static_cast<int>(j) < cx;) {
-        const Decoded d = utf8_decode(line, j);
-        rx += cell_width(d.cp, rx);
-        j += d.len;
+    for(size_t j = 0; j < line.size() && static_cast<int>(j) < cx;) {
+        const size_t e = gr_next(line, j);
+        rx += cluster_width(line, j, e, rx);
+        j = e;
     }
     return rx;
 }
@@ -34,10 +45,10 @@ int rx_to_cx(std::string_view line, int rx) {
     int cur = 0;
     size_t i = 0;
     while(i < line.size()) {
-        const Decoded d = utf8_decode(line, i);
-        cur += cell_width(d.cp, cur);
+        const size_t e = gr_next(line, i);
+        cur += cluster_width(line, i, e, cur);
         if(cur > rx) return static_cast<int>(i);
-        i += d.len;
+        i = e;
     }
     return static_cast<int>(i);
 }
@@ -45,9 +56,9 @@ int rx_to_cx(std::string_view line, int rx) {
 int text_width(std::string_view s) {
     int w = 0;
     for(size_t i = 0; i < s.size();) {
-        const Decoded d = utf8_decode(s, i);
-        w += cell_width(d.cp, w);
-        i += d.len;
+        const size_t e = gr_next(s, i);
+        w += cluster_width(s, i, e, w);
+        i = e;
     }
     return w;
 }

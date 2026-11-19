@@ -5,6 +5,7 @@
 #include "buflist.hpp"
 #include "fold_buf.hpp"
 #include "editor.hpp"
+#include "marks.hpp"
 #include "motion.hpp"
 #include "piece.hpp"
 
@@ -63,6 +64,7 @@ bool jump_goto(const std::string& path, size_t line, size_t col) {
 }
 
 void jump_push() {
+    mark_prev(E.buf().id, cursor_offset());  // '' = where this jump started
     if(!trackable(E.buf())) return;
     const Spot s = here();
     if(g_pos < g_list.size()) {

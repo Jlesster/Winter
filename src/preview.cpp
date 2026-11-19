@@ -77,7 +77,8 @@ void FilePreview::load(const std::string& path) {
     std::string_view view = text_;
     if(!text_.empty() && text_.back() == '\n') view.remove_suffix(1);
     pt_ = PieceTable(view);
-    if(!truncated && text_.size() <= kMaxSyntax && syn_.attach(path))
+    if(!truncated && text_.size() <= kMaxSyntax && syn_.attach(path, std::string_view(text_).substr(
+                                            0, std::min<size_t>(text_.find('\n'), 256))))
         syn_.parse(pt_, eol_);
 }
 

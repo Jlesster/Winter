@@ -115,6 +115,16 @@ int main() {
     CHECK(format_keys(parse_keys("<C-CR>")) == "<C-CR>");
     CHECK(format_keys(parse_keys("<A-CR>")) == "<A-CR>");
 
+    // ---- modified arrows (insert-mode word motions)
+    CHECK((parse_keys("<C-Left>") ==
+           KeySeq{static_cast<char32_t>(static_cast<int>(ARROW_LEFT) |
+                                        static_cast<int>(MOD_CTRL))}));
+    CHECK((parse_keys("<C-Right>") ==
+           KeySeq{static_cast<char32_t>(static_cast<int>(ARROW_RIGHT) |
+                                        static_cast<int>(MOD_CTRL))}));
+    CHECK(format_keys(parse_keys("<C-Left>")) == "<C-Left>");
+    CHECK(format_keys(parse_keys("<C-Right>")) == "<C-Right>");
+
     {
         Registry r;
         r.map(INSERT, "<S-Space>a", "insert.alpha");

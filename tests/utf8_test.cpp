@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdio>
 #include <random>
+#include <string>
 #include <vector>
 
 int main() {

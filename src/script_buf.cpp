@@ -49,7 +49,7 @@ int l_cursor_set(lua_State* L) {
     int cx = snap_cx(
         text, static_cast<int>(std::clamp<lua_Integer>(col - 1, 0, size)));
     if(!insertish(E.mode) && cx >= size && size > 0)
-        cx = static_cast<int>(utf8_prev(text, static_cast<size_t>(size)));
+        cx = static_cast<int>(gr_prev(text, static_cast<size_t>(size)));
     E.cx = cx;
     update_want();
     return 0;
@@ -204,6 +204,11 @@ int l_selection(lua_State* L) {
         return 1;
     }
     script_push_range(L, visual_range());
+    return 1;
+}
+
+int l_tick(lua_State* L) {
+    lua_pushinteger(L, static_cast<lua_Integer>(pt().revision()));
     return 1;
 }
 

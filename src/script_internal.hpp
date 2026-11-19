@@ -48,3 +48,15 @@ inline bool lua_opt_bool(lua_State* L, int t, const char* key, bool dflt) {
 void script_push_range(lua_State* L, const Range& r);
 void script_open_buf();
 void script_open_ext();
+void script_open_fs();
+void script_open_api();
+void script_open_json();
+void script_open_reg();
+void script_open_mark();
+void script_open_keys();
+void script_open_win();
+void script_open_ts();
+void ts_install_provider();  // the editor-backed source for winter.ts
+void script_api_reset();  // config reload: drop buffer attachments
+void script_open_runtime();   // runtime.lua, after every native group exists
+void script_runtime_reset();  // config reload

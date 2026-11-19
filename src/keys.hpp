@@ -16,8 +16,23 @@ enum EditorKey {
     DELETE,
     HOME,
     END,
+    INS,
     CTRL_BACKSPACE,
     PASTE,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    // special action
+    DELETE_WORD,
     NONE,
 };
 
@@ -42,19 +57,28 @@ inline int key_normalize(int base, int mods) {
     return base | mods;
 }
 
-// What an *unclaimed* key should type. NONE means "not typable".
-// Modified space/Enter stay distinct in key_normalize so they can be mapped;
-// only at fallback time does S-Space become a space and modified Enter become
-// a plain Enter.
-inline int key_text(int k) {
+// The plain key an *unclaimed* key falls back to. Modifiers are dropped so an
+// unbound <A-j> behaves like j, <A-CR> like Enter, <A-Left> like Left, and
+// <A-S-j> like J. Ctrl-Space / Ctrl-@ normalize to NUL and have no plain-key
+// equivalent. NONE means "pass through as nothing".
+inline int key_passthrough(int k) {
     const int base = key_base(k);
-    const int mods = key_mods(k);
-
-    if(base >= ARROW_LEFT) return base;  // Ctrl-Left/Shift-Home still navigate
-    if(base == 0) return NONE;           // Ctrl-Space / Ctrl-@ carry no text
-    if(mods == 0) return k;              // ordinary text, control bytes, Tab...
-    if(base == '\r') return '\r';        // <S-CR>/<C-CR>/<A-CR> act like Enter
-    if((mods & ~MOD_SHIFT) == 0 && base == ' ') return ' ';
-    return NONE;  // Alt-/Ctrl-only combos type nothing
+    return base == 0 ? NONE : base;
 }
 
+// the layer under the keymaps for insert/replace. A modified key nobody bonund
+// become sthe editing action people expect from any other editor; every other
+// modified key falls back to the plain kay exactly like key_passthrough()
+inline int key_basic(int k) {
+    const int base = key_base(k);
+    switch(key_mods(k)) {
+        case MOD_CTRL:
+            if(base == DELETE) return DELETE_WORD;
+            break;
+        case MOD_ALT:
+            if(base == BACKSPACE) return CTRL_BACKSPACE;
+            if(base == 'd') return DELETE_WORD;
+            break;
+    }
+    return key_passthrough(k);
+}

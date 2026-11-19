@@ -26,6 +26,11 @@ bool events_off(int id) {
     return true;
 }
 
+bool events_has(std::string_view name) {
+    return std::any_of(g_subs.begin(), g_subs.end(),
+                       [&](const Sub& s) { return s.name == name; });
+}
+
 void events_emit(std::string_view name, const std::vector<std::string>& args) {
     const std::vector<Sub> snapshot = g_subs;
     for(const Sub& s : snapshot) {

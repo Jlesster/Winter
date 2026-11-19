@@ -22,9 +22,11 @@ void Chord::reset() {
 
 bool Chord::pending() const { return !keys_.empty() && !want_char_; }
 
-Chord::Result Chord::feed(EditorMode mode, int key, const Emit& emit) {
-    if(have_mode_ && mode != mode_) reset();
+Chord::Result Chord::feed(EditorMode mode, int key, const Emit& emit,
+                          uint64_t buf) {
+    if(have_mode_ && (mode != mode_ || buf != buf_)) reset();
     mode_ = mode;
+    buf_ = buf;
     have_mode_ = true;
 
     // Esc cancels a pending chord and then acts normally.
@@ -57,7 +59,7 @@ Chord::Result Chord::feed(EditorMode mode, int key, const Emit& emit) {
 
     KeySeq probe = keys_;
     probe += static_cast<char32_t>(key);
-    const Hit hit = registry().lookup(mode, probe);
+    const Hit hit = registry().lookup(mode, probe, buf_);
 
     if(hit.kind == Lookup::None) {
         // This key no longer continues the chord. Type the pending keys,
@@ -89,7 +91,7 @@ Chord::Result Chord::feed(EditorMode mode, int key, const Emit& emit) {
 
 Chord::Result Chord::feed_empty(EditorMode mode, int key) {
     const KeySeq probe = one(key);
-    const Hit hit = registry().lookup(mode, probe);
+    const Hit hit = registry().lookup(mode, probe, buf_);
 
     if(hit.kind == Lookup::None) return Result::Pass;
 
@@ -114,7 +116,7 @@ Chord::Result Chord::feed_empty(EditorMode mode, int key) {
 void Chord::timeout(const Emit& emit) {
     if(want_char_ || keys_.empty()) return;
 
-    const Hit hit = registry().lookup(mode_, keys_);
+    const Hit hit = registry().lookup(mode_, keys_, buf_);
     if(hit.kind == Lookup::Exact) {
         action_ = hit.action;
         keys_.clear();

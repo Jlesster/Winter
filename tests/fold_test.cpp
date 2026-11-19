@@ -1,5 +1,3 @@
-// g++ -std=c++23 -Wall -Wextra fold.cpp fold_test.cpp -o fold_test &&
-// ./fold_test
 #include <cstdio>
 #include <cstdlib>
 #include <string>

@@ -38,6 +38,9 @@ struct SpanDeco {
     int prio = 0;
     Style st;
     bool fill = false;  // also tints the empty tail of every row it touches
+    // An edit that touches it cuts the touched part out instead of stretching
+    // it: used for async data (semantic tokens) that describes the old text.
+    bool strict = false;
 };
 
 struct EolItem {
@@ -52,6 +55,9 @@ public:
     void add(EolDeco d);
     void add_span(SpanDeco d);
     void clear_ns(NsId ns);
+    // Drop every span/eol of `ns` and put `spans` in their place in one pass
+    // (add_span per span is an insert each). Spans need not be sorted.
+    void replace_ns_spans(NsId ns, std::vector<SpanDeco> spans);
     bool empty() const { return _eol.empty() && _spans.empty(); }
     void eol_on_line(size_t ls, size_t len, std::vector<EolItem>& out) const;
     void spans_on_line(size_t ls, size_t len, std::vector<LineSpan>& out) const;

@@ -2,10 +2,17 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
+#include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <ios>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -29,7 +36,8 @@ std::string read_head(const fs::path& p, size_t n = 65536) {
     return s;
 }
 
-// `name(` at the start of a line (after blanks), optionally with spaces before '('
+// `name(` at the start of a line (after blanks), optionally with spaces before
+// '('
 bool has_call(std::string_view text, std::string_view name, bool ci) {
     const auto eq = [ci](char a, char b) {
         return ci ? std::tolower(static_cast<unsigned char>(a)) ==
@@ -69,12 +77,11 @@ bool one_of(std::string_view w, std::initializer_list<std::string_view> l) {
 }
 
 // `tool args` when args starts with one of the tool's own subcommands,
-// otherwise `tool <dflt> args`; no args at all gives `tool <dflt> <empty_tail>`.
-std::string with_sub(std::string_view tool,
-                     std::string_view dflt,
+// otherwise `tool <dflt> args`; no args at all gives `tool <dflt>
+// <empty_tail>`.
+std::string with_sub(std::string_view tool, std::string_view dflt,
                      std::initializer_list<std::string_view> subs,
-                     std::string_view args,
-                     std::string_view empty_tail = {}) {
+                     std::string_view args, std::string_view empty_tail = {}) {
     args = trim(args);
     std::string out(tool);
     if(args.empty()) {
@@ -173,7 +180,8 @@ std::vector<std::string> build_provider_names() {
     return out;
 }
 
-std::optional<BuildPlan> build_plan(const fs::path& start, std::string_view args) {
+std::optional<BuildPlan> build_plan(const fs::path& start,
+                                    std::string_view args) {
     std::error_code ec;
     fs::path dir = fs::absolute(start, ec).lexically_normal();
     if(!dir.has_filename()) dir = dir.parent_path();
@@ -181,16 +189,16 @@ std::optional<BuildPlan> build_plan(const fs::path& start, std::string_view args
         const BuildProvider* best = nullptr;
         for(const BuildProvider& p : table()) {
             if(best && p.priority <= best->priority) continue;
-            if(!std::ranges::any_of(p.markers,
-                                    [&](const std::string& m) {
-                                        return path_exists(dir / m);
-                                    }))
+            if(!std::ranges::any_of(p.markers, [&](const std::string& m) {
+                   return path_exists(dir / m);
+               }))
                 continue;
             if(p.detect && !p.detect(BuildRoot{dir})) continue;
             best = &p;
         }
         if(best)
-            return BuildPlan{best, BuildRoot{dir}, best->command(BuildRoot{dir}, args)};
+            return BuildPlan{
+                best, BuildRoot{dir}, best->command(BuildRoot{dir}, args)};
         const fs::path parent = dir.parent_path();
         if(parent == dir) return std::nullopt;
         dir = parent;
@@ -203,122 +211,171 @@ void build_register_builtin() {
          .markers = {"meson.build"},
          .priority = 50,
          // subdirectory meson.build files have no project() call
-         .detect = [](const BuildRoot& r) {
-             return has_call(read_head(r.dir / "meson.build"), "project", false);
-         },
-         .command = [](const BuildRoot& r, std::string_view args) {
-             const std::string_view verb = first_word(args);
-             const bool sub = one_of(verb,
-                                     {"compile", "setup", "configure", "test",
-                                      "install", "introspect", "dist",
-                                      "reconfigure", "subprojects"});
-             const std::string tail =
-                 sub ? std::string(trim(args))
-                     : std::string("compile") +
-                           (trim(args).empty() ? "" : " ") + std::string(trim(args));
-             const fs::path bd =
-                 find_builddir(r.dir, {"build", "builddir", "_build"}, "build.ninja");
-             if(!bd.empty())
-                 return BuildCmd{"meson " + tail, bd, {"gcc"}, {r.dir}};
-             if(verb == "setup")
-                 return BuildCmd{"meson " + tail, r.dir, {"gcc"}, {r.dir / "build"}};
-             return BuildCmd{"meson setup build && meson " + tail + " -C build",
-                             r.dir,
-                             {"gcc"},
-                             {r.dir / "build"}};
-         }});
+         .detect =
+             [](const BuildRoot& r) {
+                 return has_call(
+                     read_head(r.dir / "meson.build"), "project", false);
+             },
+         .command =
+             [](const BuildRoot& r, std::string_view args) {
+                 const std::string_view verb = first_word(args);
+                 const bool sub = one_of(verb,
+                                         {"compile",
+                                          "setup",
+                                          "configure",
+                                          "test",
+                                          "install",
+                                          "introspect",
+                                          "dist",
+                                          "reconfigure",
+                                          "subprojects"});
+                 const std::string tail =
+                     sub ? std::string(trim(args))
+                         : std::string("compile") +
+                               (trim(args).empty() ? "" : " ") +
+                               std::string(trim(args));
+                 const fs::path bd = find_builddir(
+                     r.dir, {"build", "builddir", "_build"}, "build.ninja");
+                 if(!bd.empty())
+                     return BuildCmd{"meson " + tail, bd, {"gcc"}, {r.dir}};
+                 if(verb == "setup")
+                     return BuildCmd{
+                         "meson " + tail, r.dir, {"gcc"}, {r.dir / "build"}};
+                 return BuildCmd{
+                     "meson setup build && meson " + tail + " -C build",
+                     r.dir,
+                     {"gcc"},
+                     {r.dir / "build"}};
+             }});
 
     build_register(
         {.name = "cmake",
          .markers = {"CMakeLists.txt"},
          .priority = 40,
          // subdirectory CMakeLists.txt files normally have no project() call
-         .detect = [](const BuildRoot& r) {
-             return has_call(read_head(r.dir / "CMakeLists.txt"), "project", true);
-         },
-         .command = [](const BuildRoot& r, std::string_view args) {
-             const std::string tail =
-                 trim(args).empty() ? "" : " " + std::string(trim(args));
-             const fs::path bd = find_builddir(
-                 r.dir, {"build", "_build", "builddir"}, "CMakeCache.txt");
-             if(!bd.empty())
-                 return BuildCmd{"cmake --build " + build_shell_quote(bd.string()) + tail,
-                                 r.dir,
-                                 {"gcc"},
-                                 {bd}};
-             return BuildCmd{"cmake -S . -B build && cmake --build build" + tail,
-                             r.dir,
-                             {"gcc"},
-                             {r.dir / "build"}};
-         }});
+         .detect =
+             [](const BuildRoot& r) {
+                 return has_call(
+                     read_head(r.dir / "CMakeLists.txt"), "project", true);
+             },
+         .command =
+             [](const BuildRoot& r, std::string_view args) {
+                 const std::string tail =
+                     trim(args).empty() ? "" : " " + std::string(trim(args));
+                 const fs::path bd = find_builddir(
+                     r.dir, {"build", "_build", "builddir"}, "CMakeCache.txt");
+                 if(!bd.empty())
+                     return BuildCmd{"cmake --build " +
+                                         build_shell_quote(bd.string()) + tail,
+                                     r.dir,
+                                     {"gcc"},
+                                     {bd}};
+                 return BuildCmd{
+                     "cmake -S . -B build && cmake --build build" + tail,
+                     r.dir,
+                     {"gcc"},
+                     {r.dir / "build"}};
+             }});
 
-    build_register(
-        {.name = "cargo",
-         .markers = {"Cargo.toml"},
-         .priority = 30,
-         .command = [](const BuildRoot& r, std::string_view args) {
-             return BuildCmd{with_sub("cargo",
-                                      "build",
-                                      {"build", "b", "check", "c", "test", "t",
-                                       "run", "r", "clippy", "doc", "bench",
-                                       "clean", "fmt", "update", "install",
-                                       "add", "rustc", "tree"},
-                                      args),
-                             r.dir,
-                             {"rustc"},
-                             {}};
-         }});
+    build_register({.name = "cargo",
+                    .markers = {"Cargo.toml"},
+                    .priority = 30,
+                    .command = [](const BuildRoot& r, std::string_view args) {
+                        return BuildCmd{with_sub("cargo",
+                                                 "build",
+                                                 {"build",
+                                                  "b",
+                                                  "check",
+                                                  "c",
+                                                  "test",
+                                                  "t",
+                                                  "run",
+                                                  "r",
+                                                  "clippy",
+                                                  "doc",
+                                                  "bench",
+                                                  "clean",
+                                                  "fmt",
+                                                  "update",
+                                                  "install",
+                                                  "add",
+                                                  "rustc",
+                                                  "tree"},
+                                                 args),
+                                        r.dir,
+                                        {"rustc"},
+                                        {}};
+                    }});
 
-    build_register(
-        {.name = "go",
-         .markers = {"go.mod"},
-         .priority = 30,
-         .command = [](const BuildRoot& r, std::string_view args) {
-             return BuildCmd{with_sub("go",
-                                      "build",
-                                      {"build", "test", "vet", "run", "generate",
-                                       "install", "fmt", "mod", "get", "clean"},
-                                      args,
-                                      "./..."),
-                             r.dir,
-                             {"go"},
-                             {}};
-         }});
+    build_register({.name = "go",
+                    .markers = {"go.mod"},
+                    .priority = 30,
+                    .command = [](const BuildRoot& r, std::string_view args) {
+                        return BuildCmd{with_sub("go",
+                                                 "build",
+                                                 {"build",
+                                                  "test",
+                                                  "vet",
+                                                  "run",
+                                                  "generate",
+                                                  "install",
+                                                  "fmt",
+                                                  "mod",
+                                                  "get",
+                                                  "clean"},
+                                                 args,
+                                                 "./..."),
+                                        r.dir,
+                                        {"go"},
+                                        {}};
+                    }});
 
     build_register(
         {.name = "gradle",
-         .markers = {"settings.gradle", "settings.gradle.kts", "build.gradle",
+         .markers = {"settings.gradle",
+                     "settings.gradle.kts",
+                     "build.gradle",
                      "build.gradle.kts"},
          .priority = 20,
          // a build.gradle inside a multi-project build is a subproject
-         .detect = [](const BuildRoot& r) {
-             const auto has_settings = [](const fs::path& d) {
-                 return path_exists(d / "settings.gradle") ||
-                        path_exists(d / "settings.gradle.kts");
-             };
-             if(has_settings(r.dir)) return true;
-             for(fs::path p = r.dir; p.has_parent_path() && p != p.parent_path();) {
-                 p = p.parent_path();
-                 if(has_settings(p)) return false;
-             }
-             return true;
-         },
-         .command = [](const BuildRoot& r, std::string_view args) {
-             const std::string tool = path_exists(r.dir / "gradlew") ? "./gradlew" : "gradle";
-             return BuildCmd{tool + " " + (trim(args).empty() ? "build" : std::string(trim(args))),
-                             r.dir,
-                             {"gcc", "generic"},  // javac prints gcc-style lines
-                             {}};
-         }});
+         .detect =
+             [](const BuildRoot& r) {
+                 const auto has_settings = [](const fs::path& d) {
+                     return path_exists(d / "settings.gradle") ||
+                            path_exists(d / "settings.gradle.kts");
+                 };
+                 if(has_settings(r.dir)) return true;
+                 for(fs::path p = r.dir;
+                     p.has_parent_path() && p != p.parent_path();) {
+                     p = p.parent_path();
+                     if(has_settings(p)) return false;
+                 }
+                 return true;
+             },
+         .command =
+             [](const BuildRoot& r, std::string_view args) {
+                 const std::string tool =
+                     path_exists(r.dir / "gradlew") ? "./gradlew" : "gradle";
+                 return BuildCmd{
+                     tool + " " +
+                         (trim(args).empty() ? "build"
+                                             : std::string(trim(args))),
+                     r.dir,
+                     {"gcc", "generic"},  // javac prints gcc-style lines
+                     {}};
+             }});
 
-    build_register(
-        {.name = "make",
-         .markers = {"Makefile", "makefile", "GNUmakefile"},
-         .priority = 10,
-         .command = [](const BuildRoot& r, std::string_view args) {
-             return BuildCmd{"make" + (trim(args).empty() ? "" : " " + std::string(trim(args))),
-                             r.dir,
-                             {"gcc"},
-                             {}};
-         }});
+    build_register({.name = "make",
+                    .markers = {"Makefile", "makefile", "GNUmakefile"},
+                    .priority = 10,
+                    .command = [](const BuildRoot& r, std::string_view args) {
+                        return BuildCmd{
+                            "make" + (trim(args).empty()
+                                          ? ""
+                                          : " " + std::string(trim(args))),
+                            r.dir,
+                            {"gcc"},
+                            {}};
+                    }});
 }
+

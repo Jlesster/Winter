@@ -1,26 +1,34 @@
 #include "terminal.hpp"
 #include "buflist.hpp"
+#include "core.hpp"
 #include "events.hpp"
 #include "job.hpp"
 #include "loop.hpp"
 
+#include <asm-generic/ioctls.h>
 #include <errno.h>
 #include <poll.h>
+#include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/poll.h>
 #include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include <csignal>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <string_view>
 #include <trux/core.hpp>
+#include <trux/terminal/ansi.hpp>
 #include <utility>
 
 #include "keys.hpp"
 #include "options.hpp"
+#include "pty.hpp"
 
 namespace {
 termios g_orig{};
@@ -93,6 +101,7 @@ void editor_quit() {
     events_emit("quit");
     buffer_remember_cursor();
     job_kill_all();
+    pty_kill_all();
     trux::ansi::leave_alt_screen();
     write(STDOUT_FILENO, "\x1b[2J", 4);
     write(STDOUT_FILENO, "\x1b[H", 3);
@@ -169,6 +178,10 @@ int read_key(bool want_mods, int timeout_ms) {
             case 'D': return ARROW_LEFT;
             case 'H': return HOME;
             case 'F': return END;
+            case 'P': return F1;
+            case 'Q': return F2;
+            case 'R': return F3;
+            case 'S': return F4;
         }
         return NONE;
     }
@@ -216,6 +229,10 @@ int read_key(bool want_mods, int timeout_ms) {
                 case 'D': return with(ARROW_LEFT, p[1]);
                 case 'H': return with(HOME, p[1]);
                 case 'F': return with(END, p[1]);
+                case 'P': return with(F1, p[1]);
+                case 'Q': return with(F2, p[1]);
+                case 'R': return with(F3, p[1]);
+                case 'S': return with(F4, p[1]);
                 case 'Z': return with('\t', p[1], MOD_SHIFT);  // Shift-Tab
                 case 'u':  // kitty / CSI-u: 97;5u
                     return p[0] > 0 && p[0] < 128 ? with(p[0], p[1]) : NONE;
@@ -228,6 +245,18 @@ int read_key(bool want_mods, int timeout_ms) {
                         case 8: return with(END, p[1]);
                         case 5: return with(PAGE_UP, p[1]);
                         case 6: return with(PAGE_DOWN, p[1]);
+                        case 11: return with(F1, p[1]);
+                        case 12: return with(F2, p[1]);
+                        case 13: return with(F3, p[1]);
+                        case 14: return with(F4, p[1]);
+                        case 15: return with(F5, p[1]);
+                        case 17: return with(F6, p[1]);
+                        case 18: return with(F7, p[1]);
+                        case 19: return with(F8, p[1]);
+                        case 20: return with(F9, p[1]);
+                        case 21: return with(F10, p[1]);
+                        case 23: return with(F11, p[1]);
+                        case 24: return with(F12, p[1]);
                         case 27:  // modifyOtherKeys: 27;5;13~
                             return p[2] > 0 && p[2] < 128 ? with(p[2], p[1])
                                                           : NONE;

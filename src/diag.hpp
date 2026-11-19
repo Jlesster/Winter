@@ -31,3 +31,6 @@ uint32_t diag_color(int sev);
 const char* diag_name(int sev);
 std::string_view diag_first_line(const Diag& d);
 void diag_jump(int dir, int count);
+// Picker over the diagnostics of the current buffer, or (workspace) of every
+// open buffer plus whatever the servers published for files that are not open.
+void diag_picker(bool workspace);

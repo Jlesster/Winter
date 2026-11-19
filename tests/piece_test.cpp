@@ -1,5 +1,3 @@
-// Build: g++ -std=c++20 -Wall -Wextra -fsanitize=address,undefined
-//        -fno-sanitize-recover=undefined piece.cpp piece_test.cpp -o piece_test
 #include "../src/piece.hpp"
 #include <algorithm>
 #include <cstdio>

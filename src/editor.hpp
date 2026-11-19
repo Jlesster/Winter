@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <ctime>
 #include <format>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core.hpp"
@@ -18,9 +20,20 @@
 #include "syntax.hpp"
 #include "virt.hpp"
 
+// Buffers keep their id for life; E.buffers indices shift when one closes.
+inline uint64_t next_buffer_id() {
+    static uint64_t n = 0;
+    return ++n;
+}
+
+// "Buffer is read-only" on the status line; the piece table calls it when it
+// refuses an edit (PieceTable::locked).
+void buffer_refused_edit();
+
 // data
 struct Buffer {
     Buffer() { wire(); }
+    uint64_t id = next_buffer_id();  // stable handle for Lua
     // PieceTable's move-assign wipes the sinks; call after `pt =
     // PieceTable(..)`
     void wire() {
@@ -38,6 +51,7 @@ struct Buffer {
             edit_emit(make_event(pt, e, o));
         });
         pt.set_group_end_sink([] { edit_group_end(); });
+        pt.set_refuse_sink([] { buffer_refused_edit(); });
     }
     Buffer(const Buffer&) = delete;
     PieceTable pt{};
@@ -48,9 +62,12 @@ struct Buffer {
     DecoStore decos{};
     MdState md{};
     std::string filename{};
+    std::string ft{};
     std::string orig{};
     bool eol = true;
     bool nofile = false;
+    bool nowrap = false;  // never soft-wrap, whatever the global `wrap` says
+    bool ft_manual = false;
     int cx = 0;
     int cy = 0;
     int want_rx = 0;
@@ -107,10 +124,14 @@ void set_mode(EditorMode m);
 
 void editor_status_touched();
 
+void editor_status_log(std::string_view msg);
+std::string editor_status_history();
+
 template <typename... Args>
 void editor_set_status_message(std::format_string<Args...> fmt,
                                Args&&... args) {
     E.status_message = std::format(fmt, std::forward<Args>(args)...);
     E.status_message_time = time(nullptr);
+    editor_status_log(E.status_message);
     editor_status_touched();
 }

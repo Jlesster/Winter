@@ -28,17 +28,33 @@
 
 // file io
 
+std::string buffer_head(const Buffer& b) {
+    return b.pt.text(0, std::min<size_t>(b.pt.line_end(0), 256));
+}
+
 void buffer_detect_syntax(Buffer& b) {
-    if(b.nofile || b.filename.empty()) return;
-    if(b.syntax.attach(b.filename)) {
+    if(b.nofile) return;
+    const std::string head = buffer_head(b);
+    if(b.syntax.attach(b.filename, head)) {
         b.syntax.parse(b.pt, b.eol);
         EventBufScope scope(&b);
         events_emit("file_type", {b.filename, std::string(b.syntax.lang())});
         return;
     }
-    const auto l = Syntax::detect(b.filename);
+    const auto l = Syntax::detect(b.filename, head);
     if(!l.empty() && parser_known(l) && !parser_installed(l))
         editor_set_status_message("No {} parser: :TSInstall {}", l, l);
+}
+
+bool buffer_set_filetype(Buffer& b, std::string_view lang) {
+    if(!b.syntax.attach_lang(lang)) {
+        buffer_detect_syntax(b);  // attach_lang detached us: restore
+        return false;
+    }
+    b.syntax.parse(b.pt, b.eol);
+    EventBufScope scope(&b);
+    events_emit("file_type", {b.filename, std::string(b.syntax.lang())});
+    return true;
 }
 
 static void restore_cursor(Buffer& b) {
@@ -48,9 +64,9 @@ static void restore_cursor(Buffer& b) {
     const std::string text = b.pt.line_text(static_cast<size_t>(b.cy));
     const int size = static_cast<int>(text.size());
     int cx = std::clamp(col, 0, size);
-    while(cx > 0 && cx < size && utf8_is_cont(text[cx])) --cx;
+    cx = snap_cx(text, cx);
     if(cx >= size && size > 0)
-        cx = static_cast<int>(utf8_prev(text, text.size()));
+        cx = static_cast<int>(gr_prev(text, text.size()));
     b.cx = cx;
     b.want_rx = cx_to_rx(text, cx);
     b.row_offset = std::max(b.cy - E.term_rows / 2, 0);
@@ -160,19 +176,23 @@ void editor_save() {
         editor_set_status_message("{} is not a file buf", E.buf().filename);
         return;
     }
+    bool named_now = false;
     if(E.buf().filename == "") {
         E.buf().filename = editor_prompt("Save As: ", nullptr);
         if(E.buf().filename == "") {
             editor_set_status_message("Save Aborted");
-            buffer_detect_syntax(E.buf());
-            lsp_sync_attach(E.buf());
             return;
         }
         external_watch(E.buf());
+        named_now = true;
     }
     if(const int err = write_buffer(E.buf())) {
         editor_set_status_message("Can't save! IO error: {}", strerror(err));
         return;
+    }
+    if(named_now) {  // a new name is new information: detect, then LSP
+        buffer_detect_syntax(E.buf());
+        lsp_sync_attach(E.buf());
     }
     const size_t len = E.buf().pt.size() + (E.buf().eol ? 1 : 0);
     editor_set_status_message("{} bytes written to disk{}", len,

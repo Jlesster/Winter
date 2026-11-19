@@ -4,18 +4,17 @@
 #include "../src/options.hpp"
 
 static int failed = 0;
-#define CHECK(cond)                                                      \
-    do {                                                                 \
-        if(!(cond)) {                                                    \
-            std::printf("FAIL line %d: %s\n", __LINE__, #cond);          \
-            ++failed;                                                    \
-        }                                                                \
+#define CHECK(cond)                                             \
+    do {                                                        \
+        if(!(cond)) {                                           \
+            std::printf("FAIL line %d: %s\n", __LINE__, #cond); \
+            ++failed;                                           \
+        }                                                       \
     } while(0)
 
 int main() {
     // defaults match the old #defines
     CHECK(opts.tab_stop == 4 && opts.shift_width == 4 && opts.expand_tab);
-    CHECK(opts.quit_times == 3);
     CHECK(!opts.wrap_indicator && !opts.indent_leads);
 
     // ints: set, alias, range, junk
@@ -70,7 +69,7 @@ int main() {
     CHECK(apply_set_command("indent_leads") == "" && opts.indent_leads);
     CHECK(apply_set_command("noindent_leads") == "" && !opts.indent_leads);
     CHECK(apply_set_command("ts?") == "ts=2");
-    CHECK(apply_set_command("tabstop") == "tabstop=2");           // int, no value: show
+    CHECK(apply_set_command("tabstop") == "tabstop=2");  // int, no value: show
     CHECK(apply_set_command("ts=2 sw?") == "sw=3");
     CHECK(apply_set_command("bogus") == "Unknown option: bogus");
     CHECK(apply_set_command("bogus=1") == "Unknown option: bogus");

@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -7,6 +8,12 @@ struct LineSpan;
 
 void snippet_init();
 bool snippet_expand(std::string_view body);
+// Multi cursor: the primary cursor expands the snippet (snippet_expand), every
+// other one inserts it with snippet_peer, which only remembers where its tab
+// stops are. After the pass, snippet_place_peers puts those cursors on the
+// first stop; snippet_next moves them along with the primary.
+void snippet_peer(std::string_view body);
+void snippet_place_peers();
 bool snippet_active();
 void snippet_next();
 bool snippet_pre_key(int c);

@@ -1,12 +1,15 @@
 #include "comment.hpp"
 #include <algorithm>
 #include <cstddef>
-#include <flat_map>
+#include <initializer_list>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include "editor.hpp"
+#include "fold_buf.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
 #include "piece.hpp"
@@ -99,7 +102,9 @@ void comment_toggle(size_t l0, size_t l1) {
                                   lang.empty() ? "?" : std::string(lang));
         return;
     }
-    l1 = std::min(l1, static_cast<size_t>(E.num_rows() - 1));
+    const fold::State& f = b.folds;
+    l0 = static_cast<size_t>(f.head_of(static_cast<int>(l0)));
+    l1 = static_cast<size_t>(f.end_of(static_cast<int>(l1)));
     const bool block = st->line.empty();
     const std::string& open = block ? st->open : st->line;
     const std::string& close = st->close;

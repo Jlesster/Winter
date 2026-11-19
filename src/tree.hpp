@@ -19,6 +19,7 @@ struct TreeLine {
 void tree_toggle();
 bool tree_visible();
 bool tree_focused();
+void tree_focus(bool on);  // no-op while the tree is hidden
 bool tree_visual();         // a v range is active in the tree
 bool tree_visual_cancel();  // ends it; false if there was none
 void tree_layout(int total_cols);

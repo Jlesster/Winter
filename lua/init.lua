@@ -1,10 +1,10 @@
--- Winter example config
+-- Winter example config  ✦ flashy edition
 --
---   mkdir -p ~/.config/winter && cp init.example.lua ~/.config/winter/init.lua
+--   mkdir -p ~/.config/winter && cp init.lua ~/.config/winter/init.lua
 --
 -- or try it without touching your real config:
 --
---   mkdir -p /tmp/wcfg/winter && cp init.example.lua /tmp/wcfg/winter/init.lua
+--   mkdir -p /tmp/wcfg/winter && cp init.lua /tmp/wcfg/winter/init.lua
 --   XDG_CONFIG_HOME=/tmp/wcfg ./builddir/winter somefile.cpp
 --
 -- Saving any .lua file under the config dir hot-reloads it (`hotreload`), or
@@ -15,7 +15,7 @@
 -- Everything below is optional and independent: delete what you don't want.
 -- Run `:lua <expr>` inside Winter to poke at any of it live, e.g.
 --   :lua winter.statusline.layout()
---   :lua winter.options.info("tabstop")
+--   :lua winter.options.info("numformats")
 
 ---------------------------------------------------------------------------
 -- 0. Knobs
@@ -23,9 +23,10 @@
 
 local cfg = {
   nerd = true, -- nerd-font icons + powerline statusline arrows
-  theme = 'mocha', -- mocha | gruvbox | tokyonight  (see :Theme)
+  theme = 'mocha', -- mocha | gruvbox | tokyonight | rosepine | dracula  (see :Theme)
   trim_on_save = true, -- strip trailing whitespace before every write
   relnum = true, -- relative numbers, switched off while inserting
+  greet = true, -- one-line hello when the editor starts
 }
 
 local function have(bin) -- is an executable on $PATH?
@@ -33,48 +34,61 @@ local function have(bin) -- is an executable on $PATH?
 end
 
 ---------------------------------------------------------------------------
--- 1. Options   (winter.opt.<name>; same names as `:set`, `:set name?` shows)
+-- 1. Options   (winter.opt.<n>; same names as `:set`, `:set name?` shows)
 ---------------------------------------------------------------------------
 
 local o = winter.opt
 
+-- indentation
 o.tabstop = 4
 o.shiftwidth = 4
 o.expandtab = true
-o.number = true
-o.relativenumber = cfg.relnum
-o.numberwidth = 4
-o.scrolloff = 8
-o.scrolleof = false
-o.wrap = false
-o.cursorline = true
-o.matchparen = true
-o.hltrailing = true
-o.colorcolumn = 100
-o.hlsearch = true
-o.hlreference = true -- highlight other uses of the symbol (LSP)
-o.rainbow = true -- rainbow delimiters
-o.timeoutlen = 600 -- chord timeout (ms)
-o.undofile = true
-o.undolevels = 2000
-o.history = 1000
-o.remember_cursor = true
-o.quit_times = 2
 o.paste_indent = true
-o.hotreload = true -- reload this config when a .lua file changes
-
+o.indent_leads = true -- chevrons at each indent level
 -- C-family indent policy: 0 flat, 1 indent, 2 follow the block's first line
 o.indentnamespace = 2
 o.indentcase = 2
 o.indent_engine = 0 -- 0 structural + ts fallback / 1 ts only / 2 structural only
 
+-- look
+o.number = true
+o.relativenumber = cfg.relnum
+o.numberwidth = 4
+o.cursorline = true
+o.matchparen = true
+o.hltrailing = true
+o.colorcolumn = 100
+o.rainbow = true -- rainbow delimiters
+o.wrap = false
+o.wrap_indicator = true -- marker on wrapped continuation rows
 o.border = 'rounded' -- rounded | straight | double | block
 o.nerdicons = cfg.nerd
+o.cursor = 'n:block; i:bar; v:underline; r:underline-blink'
+
+-- scrolling / search
+o.scrolloff = 8
+o.scrolleof = false
+o.hlsearch = true
+o.hlreference = true -- highlight other uses of the symbol (LSP)
+
+-- feel
+o.timeoutlen = 600 -- chord timeout (ms)
+o.numformats = 'all' -- Ctrl-A/Ctrl-X kinds: bin,hex,octal,real,version,ident | all | none
+
+-- history
+o.undofile = true
+o.undolevels = 2000
+o.history = 1000
+o.remember_cursor = true
+o.hotreload = true -- reload this config when a .lua file changes
+
+-- file tree
 o.treeicons = cfg.nerd
 o.treewidth = 32
 o.treehidden = false
 o.treefollow = true
 o.treegit = true
+o.treegitnames = true
 
 -- diagnostics + semantic highlighting
 o.diagnostics = true
@@ -87,15 +101,13 @@ o.semantic_tokens = true
 o.formatonsave = false
 o.formattimeout = 1000 -- ms a formatter may block a save
 
--- cursor shape per mode: block | underline | bar, add -blink to blink
-o.cursor = 'n:block; i:bar; v:underline; r:underline-blink'
-
 ---------------------------------------------------------------------------
 -- 2. Themes   (winter.theme: ui.* groups + rainbow; syntax groups are the
 --    tree-sitter capture names, e.g. "comment", "function")
 --
--- Below: a small hand-rolled palette switcher. For a full port of the
--- catppuccin groups, drop catppuccin.lua next to this file and use
+-- A palette switcher: one table per scheme, one function that paints
+-- every ui.* group from it. For a full port of the catppuccin groups, drop
+-- catppuccin.lua next to this file and use
 --   require("catppuccin").setup({ flavour = "mocha" })
 -- instead of apply_theme().
 ---------------------------------------------------------------------------
@@ -149,18 +161,53 @@ local palettes = {
     teal = '#73daca',
     lavender = '#b4f9f8',
   },
+  rosepine = {
+    crust = '#191724',
+    mantle = '#1f1d2e',
+    surface = '#26233a',
+    text = '#e0def4',
+    sub = '#908caa',
+    overlay = '#6e6a86',
+    blue = '#9ccfd8',
+    green = '#31748f',
+    mauve = '#c4a7e7',
+    red = '#eb6f92',
+    peach = '#f6c177',
+    yellow = '#f6c177',
+    teal = '#9ccfd8',
+    lavender = '#c4a7e7',
+  },
+  dracula = {
+    crust = '#191a21',
+    mantle = '#21222c',
+    surface = '#343746',
+    text = '#f8f8f2',
+    sub = '#bfbfbf',
+    overlay = '#6272a4',
+    blue = '#8be9fd',
+    green = '#50fa7b',
+    mauve = '#bd93f9',
+    red = '#ff5555',
+    peach = '#ffb86c',
+    yellow = '#f1fa8c',
+    teal = '#8be9fd',
+    lavender = '#ff79c6',
+  },
 }
+
+local current -- the palette in use, so components can read it
 
 local function apply_theme(name)
   local p = palettes[name]
   if not p then return false end
+  current = p
   local function pill(bg) return { fg = p.crust, bg = bg, bold = true } end
 
   winter.theme.reset() -- drop every override first
   winter.theme.apply({
     -- statusline: the bar, then one group per component / mode
     ['ui.statusline'] = { fg = p.sub, bg = p.mantle },
-    ['ui.statusline.file'] = { fg = p.text, bg = p.surface },
+    ['ui.statusline.file'] = { fg = p.text, bg = p.surface, bold = true },
     ['ui.statusline.modified'] = { fg = p.peach },
     ['ui.statusline.position'] = { fg = p.text, bg = p.surface },
     ['ui.statusline.normal'] = pill(p.blue),
@@ -173,7 +220,9 @@ local function apply_theme(name)
     ['ui.statusline.files'] = pill(p.teal),
     -- our own components below get their group by name too
     ['ui.statusline.branch'] = { fg = p.green, bg = p.surface },
-    ['ui.statusline.selection'] = { fg = p.crust, bg = p.mauve, bold = true },
+    ['ui.statusline.selection'] = pill(p.mauve),
+    ['ui.statusline.clock'] = { fg = p.crust, bg = p.lavender, bold = true },
+    ['ui.statusline.ruler'] = { fg = p.text, bg = p.surface },
 
     -- pickers, menus, floats
     ['ui.picker.border'] = { fg = p.lavender },
@@ -183,20 +232,12 @@ local function apply_theme(name)
     ['ui.menu.match'] = { fg = p.peach, bold = true },
     ['ui.menu.dir'] = { fg = p.overlay },
     ['ui.menu.detail'] = { fg = p.overlay },
-    ['ui.float.border'] = { fg = p.overlay },
+    ['ui.float.border'] = { fg = p.mauve },
     ['ui.float.title'] = { fg = p.lavender, bold = true },
 
     ['comment'] = { italic = true },
   })
-  winter.theme.rainbow({
-    p.red,
-    p.peach,
-    p.yellow,
-    p.green,
-    p.teal,
-    p.blue,
-    p.mauve,
-  })
+  winter.theme.rainbow({ p.red, p.peach, p.yellow, p.green, p.teal, p.blue, p.mauve })
   return true
 end
 
@@ -227,8 +268,7 @@ end
 
 winter.statusline.component('branch', function(ctx)
   if branch == '' then return nil end
-  local icon = ctx.icons and '\u{e0a0} ' or ''
-  return icon .. branch
+  return (ctx.icons and '\u{e0a0} ' or '') .. branch
 end, { priority = 55 })
 
 -- visual selection size, only while selecting
@@ -240,24 +280,24 @@ winter.statusline.component('selection', function(ctx)
   return n > 1 and (n .. ' lines') or 'sel'
 end, { priority = 90 })
 
--- a "line/total  col" ruler instead of the built-in position block
+-- a "line/total  col" ruler with a little progress bar
+winter.statusline.component('ruler', function(ctx)
+  local frac = ctx.lines > 0 and ctx.line / ctx.lines or 0
+  local steps = math.floor(frac * 8 + 0.5)
+  local bar = string.rep('\u{2588}', steps) .. string.rep('\u{2591}', 8 - steps)
+  return string.format('%d/%d  %d  %s', ctx.line, ctx.lines, ctx.vcol, bar)
+end, { priority = 80 })
+
+-- clock; a timer (section 5) keeps it fresh
 winter.statusline.component(
-  'ruler',
-  function(ctx) return string.format('%d/%d  %d', ctx.line, ctx.lines, ctx.vcol) end,
-  { priority = 80 }
+  'clock',
+  function(ctx) return (ctx.icons and '\u{f017} ' or '') .. os.date('%H:%M') end,
+  { priority = 5 }
 )
 
 winter.statusline.setup({
   left = { 'mode', 'file', 'branch', 'selection', 'buffers' },
-  right = {
-    'diagnostics',
-    'filetype',
-    'indent',
-    'ruler',
-    'percent',
-    -- a bare function works too (it becomes an anonymous component)
-    function() return { os.date('%H:%M'), priority = 5 } end,
-  },
+  right = { 'diagnostics', 'filetype', 'indent', 'ruler', 'clock' },
   separators = cfg.nerd and 'powerline' or 'none',
 })
 
@@ -320,8 +360,20 @@ end
 winter.ev.on('ready', start)
 winter.ev.on('reload', start)
 winter.ev.on('buf_reload', refresh_branch) -- e.g. after `git checkout`
-
 winter.ev.on('buf_write_post', refresh_branch)
+
+if cfg.greet then
+  winter.ev.on(
+    'ready',
+    function()
+      winter.ui.status(
+        '\u{2744} winter '
+          .. winter.version
+          .. ' \u{2014} <space>f files, <space>g grep'
+      )
+    end
+  )
+end
 
 if cfg.trim_on_save then
   winter.ev.on('buf_write_pre', function()
@@ -370,6 +422,22 @@ end, {
   end,
 })
 
+-- cycle through every palette: handy for showing off
+winter.cmd.add('ThemeNext', function()
+  local names = {}
+  for name in pairs(palettes) do
+    names[#names + 1] = name
+  end
+  table.sort(names)
+  local at = 1
+  for i, name in ipairs(names) do
+    if palettes[name] == current then at = i end
+  end
+  local nxt = names[at % #names + 1]
+  apply_theme(nxt)
+  winter.ui.status('theme: ' .. nxt)
+end, { desc = 'Next colour scheme', nargs = '0', range = false })
+
 winter.cmd.add('Buffers', function()
   winter.ui.select(winter.buf.list(), {
     prompt = 'Buffers',
@@ -396,7 +464,7 @@ winter.cmd.add('Diag', function()
         '%4d  %-5s %s',
         d.line,
         d.severity_name,
-        d.message:gsub('\n.*', '')
+        (d.message:gsub('\n.*', ''))
       )
     end,
   }, function(d)
@@ -419,11 +487,23 @@ winter.cmd.add('Todo', function()
   end)
 end, { desc = 'List TODO/FIXME/HACK in this buffer', nargs = '0', range = false })
 
+-- project root: nearest ancestor with a marker (winter.fs.root)
+winter.cmd.add('Root', function()
+  local root = winter.fs.root(
+    { '.git', 'meson.build', 'Cargo.toml', 'go.mod' },
+    winter.buf.name()
+  )
+  winter.ui.status(root and ('root: ' .. root) or 'no project root found')
+end, { desc = 'Show the project root', nargs = '0', range = false })
+
 ---------------------------------------------------------------------------
 -- 7. Keymaps   winter.keymap.set(modes, keys, action_name | fn [, opts])
---    modes: letters from  n i r v x c s f   ("nv" = several), a word
+--    modes: letters from  n i r v x c s f t  ("nv" = several), a word
 --           ("normal"), or a table of either: { "n", "x" }
---    keys:  <C-x> <esc> <cr> <tab> <bs> <space> <lt>; plain chars otherwise
+--           (`t` = focused terminal; its maps run before the shell sees keys)
+--    keys:  <C-x> <A-x> <esc> <cr> <tab> <bs> <space> <lt>; plain chars
+--    opts:  desc = "text" (shown by keymap.list),
+--           buffer = true | id  (map in that buffer only)
 --    (no <leader>: <space> is used as one, wait `timeoutlen` for chords)
 ---------------------------------------------------------------------------
 
@@ -431,14 +511,30 @@ local map = winter.keymap.set
 local cmd = winter.cmd.run
 
 -- files / buffers / search
-map('n', '<space>f', function() winter.picker.files() end)
-map('n', '<space>g', function() winter.picker.grep() end)
-map('n', '<space>b', function() cmd('Buffers') end)
-map('n', '<space>e', 'tree.toggle')
-map('n', '<space>h', function() cmd('nohlsearch') end)
+map('n', '<space>f', function() winter.picker.files() end, { desc = 'Find files' })
+map('n', '<space>g', function() winter.picker.grep() end, { desc = 'Live grep' })
+map(
+  'n',
+  '<space>r',
+  function() winter.picker.recent() end,
+  { desc = 'Recent files' }
+)
+map('n', '<space>b', function() cmd('Buffers') end, { desc = 'Buffers' })
+map('n', '<space>e', 'tree.toggle', { desc = 'File tree' })
+map(
+  'n',
+  '<space>h',
+  function() cmd('nohlsearch') end,
+  { desc = 'Clear search highlight' }
+)
 map('n', ']b', function() winter.buf.cycle(1) end)
 map('n', '[b', function() winter.buf.cycle(-1) end)
-map('n', '<space><space>', function() winter.buf.alt() end)
+map(
+  'n',
+  '<space><space>',
+  function() winter.buf.alt() end,
+  { desc = 'Alternate buffer' }
+)
 
 -- writing / quitting
 map('n', '<space>w', function() winter.buf.save() end)
@@ -458,28 +554,86 @@ map('n', '<space>o', 'lsp.switch_source_header') -- clangd .h <-> .cpp
 map('n', 'K', 'lsp.hover')
 map('n', '<space>rn', 'lsp.rename')
 map('n', '<space>ca', 'lsp.code_action')
-map('n', '<space>cf', function() winter.format.run() end)
+map('n', '<space>cf', function() winter.format.run() end, { desc = 'Format buffer' })
 map('n', '<space>d', function() cmd('Diag') end)
+map(
+  'n',
+  '<space>D',
+  function() winter.picker.diagnostics(true) end,
+  { desc = 'Workspace diagnostics' }
+)
 map('n', ']d', function() winter.diag.jump(1) end)
 map('n', '[d', function() winter.diag.jump(-1) end)
 map('n', '<space>t', function() cmd('Todo') end)
 
+-- windows: <C-w> does the rest; these are the quick ones
+map('n', '<space>-', function() winter.win.split() end, { desc = 'Split below' })
+map(
+  'n',
+  '<space>|',
+  function() winter.win.split({ vertical = true }) end,
+  { desc = 'Split right' }
+)
+map(
+  'n',
+  '<space>z',
+  function() winter.win.maximize('height') end,
+  { desc = 'Maximize height' }
+)
+
+-- number bumping is built in: <C-a> / <C-x> (all kinds, see `numformats`),
+-- <A-a> / <A-x> bump only the digit run under the cursor, g<C-a> in visual
+-- makes a progression.
+
+-- multicursor (no default keys; every command replays on each cursor)
+map({ 'n', 'x' }, '<C-n>', 'mc.add_next', { desc = 'Cursor on next match' })
+map('n', '<C-j>', 'mc.add_down', { desc = 'Add cursor below' })
+map('n', '<C-k>', 'mc.add_up', { desc = 'Add cursor above' })
+map('n', '<space>ma', 'mc.add_all', { desc = 'Cursor on every match' })
+map('n', '<space>mx', 'mc.skip_next', { desc = 'Skip this match' })
+map('n', '<space>mu', 'mc.remove_last', { desc = 'Remove last cursor' })
+map('n', '<space>mn', 'mc.next', { desc = 'Rotate to next cursor' })
+map('n', '<space>mp', 'mc.prev', { desc = 'Rotate to previous cursor' })
+map('x', '<space>ml', 'mc.split_lines', { desc = 'Cursor per selected line' })
+map('n', '<space>mc', 'mc.clear', { desc = 'Drop extra cursors' })
+
 -- toggles
+local function toggle(key, name)
+  map(
+    'n',
+    '<space>u' .. key,
+    function() print(name .. ' = ' .. tostring(winter.options.toggle(name))) end,
+    { desc = 'Toggle ' .. name }
+  )
+end
+toggle('w', 'wrap')
+toggle('n', 'number')
+toggle('c', 'cursorline')
+toggle('i', 'indent_leads')
+toggle('r', 'rainbow')
+
+map('n', '<space>ut', function() cmd('ThemeNext') end, { desc = 'Next theme' })
+
+-- terminal: `t` maps run before the shell sees the key. Winter's own toggle
+-- chord is yours to choose; <A-t> is used here.
 map(
-  'n',
-  '<space>uw',
-  function() print('wrap = ' .. tostring(winter.options.toggle('wrap'))) end
+  { 'n', 't' },
+  '<A-t>',
+  function() winter.term.toggle({ position = 'bottom' }) end,
+  { desc = 'Toggle terminal' }
 )
 map(
   'n',
-  '<space>un',
-  function() print('number = ' .. tostring(winter.options.toggle('number'))) end
+  '<space>tf',
+  function() winter.term.toggle({ position = 'float' }) end,
+  { desc = 'Floating terminal' }
 )
-map(
-  'n',
-  '<space>uc',
-  function() print('cursorline = ' .. tostring(winter.options.toggle('cursorline'))) end
-)
+map('t', '<A-n>', function() winter.term.new() end, { desc = 'New terminal tab' })
+map('t', '<A-]>', function() winter.term.next() end)
+map('t', '<A-[>', function() winter.term.prev() end)
+for _, d in ipairs({ 'h', 'j', 'k', 'l' }) do -- leave the terminal like any window
+  map('t', '<C-w>' .. d, function() winter.win.cmd(d) end)
+end
 
 -- user-defined operator / motion / text object (see winter.ext)
 --   gS{motion}  sort the touched lines      (also: gSS, and in visual mode)
@@ -501,6 +655,14 @@ winter.ext.object('entire', function()
   return 1, 1, n, #(winter.buf.line(n) or '') + 1
 end, 'ie')
 
+-- buffer-local map: only in Lua buffers, shadows any global map there
+winter.ev.on('file_type', function()
+  map('n', '<space>x', function()
+    local name = winter.buf.name()
+    if name ~= '' then cmd('source ' .. name) end
+  end, { buffer = true, desc = 'Run this Lua file' })
+end, { pattern = 'lua' })
+
 ---------------------------------------------------------------------------
 -- 8. Language servers
 --    winter.lsp.setup(name, { cmd=, filetypes=, settings=, init_options=,
@@ -509,7 +671,7 @@ end, 'ie')
 --    it starts when a buffer of one of its filetypes opens. Tables merge, so
 --    a later call only needs the keys it changes.
 --
---    To reuse nvim-lspconfig's definitions (read from <dir>/lsp/<name>.lua):
+--    To reuse nvim-lspconfig's definitions (read from <dir>/lsp/<n>.lua):
 --      winter.lsp.setup("*", { lspconfig = "/path/to/nvim-lspconfig" })
 --      winter.lsp.setup("clangd")           -- cmd/filetypes come from there
 ---------------------------------------------------------------------------
@@ -532,6 +694,10 @@ if have('rust-analyzer') then
     filetypes = { 'rust' },
     settings = { ['rust-analyzer'] = { check = { command = 'clippy' } } },
   })
+end
+
+if have('gopls') then
+  winter.lsp.setup('gopls', { cmd = { 'gopls' }, filetypes = { 'go' } })
 end
 
 if have('lua-language-server') then
@@ -562,6 +728,7 @@ winter.format.setup({
     c = { 'clang-format' },
     rust = { 'rustfmt' },
     go = { 'goimports', 'gofmt' },
+    python = { 'black' },
     javascript = { 'prettierd', 'prettier', stop_after_first = true },
     markdown = false, -- never format
   },
@@ -594,19 +761,29 @@ winter.tree.icons({
 
 ---------------------------------------------------------------------------
 -- 11. Decorations (winter.deco): virtual text that follows the line as you
---     edit.  Here: a "⚑" marker after every TODO line, refreshed on buffer
---     enter and after each save.
+--     edit. A coloured marker after every TODO / FIXME / HACK / NOTE line,
+--     refreshed on buffer enter and after each save.
 ---------------------------------------------------------------------------
 
 local ns = winter.deco.ns('todo-marks')
 
+local tags = {
+  { 'TODO', '  \u{2691} todo', 'yellow' },
+  { 'FIXME', '  \u{f188} fixme', 'red' },
+  { 'HACK', '  \u{26a1} hack', 'peach' },
+  { 'NOTE', '  \u{270e} note', 'teal' },
+}
+
 local function mark_todos()
   winter.deco.clear(ns)
   local n = winter.buf.line_count()
-  if n > 5000 then return end -- keep text_changed cheap
+  if n > 5000 then return end -- keep it cheap
   for i, l in ipairs(winter.buf.lines(1, n)) do
-    if l:find('TODO') or l:find('FIXME') then
-      winter.deco.eol(ns, i, '  \u{2691} todo', { fg = '#f9e2af', italic = true })
+    for _, t in ipairs(tags) do
+      if l:find(t[1], 1, true) then
+        winter.deco.eol(ns, i, t[2], { fg = current[t[3]], italic = true })
+        break
+      end
     end
   end
 end

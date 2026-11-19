@@ -1,5 +1,9 @@
+#ifndef WINTER_CONFDIR
+#define WINTER_CONFDIR "/etc/xdg/winter"
+#endif
 #include "script.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -14,8 +18,10 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
+#include "buffer.hpp"
 #include "buflist.hpp"
 #include "columns.hpp"
 #include "command.hpp"
@@ -23,9 +29,9 @@
 #include "core.hpp"
 #include "diag.hpp"
 #include "editor.hpp"
-#include "fold_buf.hpp"
 #include "events.hpp"
 #include "file.hpp"
+#include "fold_buf.hpp"
 #include "glyphs.hpp"
 #include "inputbox.hpp"
 #include "job.hpp"
@@ -37,6 +43,7 @@
 #include "lsp_config.hpp"
 #include "lsp_nav.hpp"
 #include "lsp_rename.hpp"
+#include "lsp_sync.hpp"
 #include "lua_json.hpp"
 #include "motion.hpp"
 #include "normal.hpp"
@@ -141,7 +148,8 @@ int opt_index_impl(lua_State* L, bool local) {
     Buffer* target = local ? opt_target() : nullptr;
     if(local && !target) return luaL_error(L, "no buffer");
     {
-        const auto v = local ? get_option_local(*target, name) : get_option(name);
+        const auto v =
+            local ? get_option_local(*target, name) : get_option(name);
         if(v) {
             if(*v == "true") lua_pushboolean(L, 1);
             else if(*v == "false") lua_pushboolean(L, 0);
@@ -487,10 +495,14 @@ int l_fold_setup(lua_State* L) {
         std::vector<std::string> v;
         for(lua_Integer i = 1;; ++i) {
             lua_rawgeti(L, -1, i);
-            if(lua_isnil(L, -1)) { lua_pop(L, 1); break; }
+            if(lua_isnil(L, -1)) {
+                lua_pop(L, 1);
+                break;
+            }
             const std::string n = luaL_checkstring(L, -1);
             if(n != "treesitter" && n != "indent")
-                return luaL_error(L, "winter.fold.setup: unknown provider '%s'", n.c_str());
+                return luaL_error(
+                    L, "winter.fold.setup: unknown provider '%s'", n.c_str());
             v.push_back(n);
             lua_pop(L, 1);
         }
@@ -502,7 +514,10 @@ int l_fold_setup(lua_State* L) {
         unsigned m = 0;
         for(lua_Integer i = 1;; ++i) {
             lua_rawgeti(L, -1, i);
-            if(lua_isnil(L, -1)) { lua_pop(L, 1); break; }
+            if(lua_isnil(L, -1)) {
+                lua_pop(L, 1);
+                break;
+            }
             const std::string n = luaL_checkstring(L, -1);
             if(n == "search") m |= kFoldSearch;
             else if(n == "jump") m |= kFoldJump;
@@ -510,23 +525,103 @@ int l_fold_setup(lua_State* L) {
             else if(n == "insert") m |= kFoldInsert;
             else if(n == "quickfix") m |= kFoldQuickfix;
             else if(n == "lsp") m |= kFoldLsp;
-            else return luaL_error(L, "winter.fold.setup: unknown foldopen '%s'", n.c_str());
+            else
+                return luaL_error(
+                    L, "winter.fold.setup: unknown foldopen '%s'", n.c_str());
             lua_pop(L, 1);
         }
         c.open = m;
     }
     lua_pop(L, 1);
     lua_getfield(L, 1, "minlines");
-    if(lua_isnumber(L, -1)) c.minlines = std::max(1, static_cast<int>(lua_tointeger(L, -1)));
+    if(lua_isnumber(L, -1))
+        c.minlines = std::max(1, static_cast<int>(lua_tointeger(L, -1)));
     lua_pop(L, 1);
     lua_getfield(L, 1, "levelstart");
-    if(lua_isnumber(L, -1)) c.levelstart = static_cast<int>(lua_tointeger(L, -1));
+    if(lua_isnumber(L, -1))
+        c.levelstart = static_cast<int>(lua_tointeger(L, -1));
     lua_pop(L, 1);
-    for(auto& b : E.buffers) b->folds.stale = true;  // providers may have changed
+    for(auto& b : E.buffers)
+        b->folds.stale = true;  // providers may have changed
     return 0;
 }
 
 #include "script_ui.inc"
+
+struct PluginInfo {
+    std::string name, path;
+    std::string error{};  // set when plugin.lua failed to load or run
+    bool started = false;
+};
+std::vector<PluginInfo> g_plugins;  // rebuilt by every (re)load, sorted by name
+std::set<std::string> g_plugin_off;  // winter.plugin.disable() from init.lua
+
+std::vector<PluginInfo> scan_plugins(const std::string& dir) {
+    namespace fs = std::filesystem;
+    std::vector<PluginInfo> out;
+    std::error_code ec;
+    for(fs::directory_iterator it(fs::path(dir) / "plugins", ec), end;
+        !ec && it != end;
+        it.increment(ec)) {
+        const std::string n = it->path().filename().string();
+        if(n.empty() || n[0] == '.' || n[0] == '_' || !it->is_directory(ec))
+            continue;
+        out.push_back({.name = n, .path = it->path().string()});
+    }
+    std::ranges::sort(out, {}, &PluginInfo::name);
+    return out;
+}
+
+void start_plugins() {
+    namespace fs = std::filesystem;
+    for(PluginInfo& p : g_plugins) {
+        if(g_plugin_off.contains(p.name)) continue;
+        const std::string entry = p.path + "/plugin.lua";
+        std::error_code ec;
+        if(!fs::is_regular_file(entry, ec)) continue;  // library-only plugin
+        if(luaL_loadfile(g_L, entry.c_str()) != LUA_OK) {
+            p.error = lua_tostring(g_L, -1);
+            report(p.error.c_str());
+            lua_pop(g_L, 1);
+            continue;  // a broken plugin must not stop the rest
+        }
+        lua_pushlstring(g_L, p.name.data(), p.name.size());  // plugin.lua: ...
+        lua_pushlstring(g_L, p.path.data(), p.path.size());
+        if(call(2)) p.started = true;
+        else p.error = g_last_error;
+    }
+}
+
+int l_plugin_list(lua_State* L) {
+    lua_createtable(L, static_cast<int>(g_plugins.size()), 0);
+    lua_Integer i = 1;
+    for(const PluginInfo& p : g_plugins) {
+        lua_createtable(L, 0, 5);
+        lua_pushlstring(L, p.name.data(), p.name.size());
+        lua_setfield(L, -2, "name");
+        lua_pushlstring(L, p.path.data(), p.path.size());
+        lua_setfield(L, -2, "path");
+        lua_pushboolean(L, p.started);
+        lua_setfield(L, -2, "started");
+        lua_pushboolean(L, g_plugin_off.contains(p.name));
+        lua_setfield(L, -2, "disabled");
+        if(!p.error.empty()) {
+            lua_pushlstring(L, p.error.data(), p.error.size());
+            lua_setfield(L, -2, "error");
+        }
+        lua_rawseti(L, -2, i++);
+    }
+    return 1;
+}
+
+int l_plugin_disable(lua_State* L) {
+    for(int i = 1, n = lua_gettop(L); i <= n; ++i)
+        g_plugin_off.insert(luaL_checkstring(L, i));
+    return 0;
+}
+
+const luaL_Reg kPlugin[] = {
+    {"list", l_plugin_list}, {"disable", l_plugin_disable}, {nullptr, nullptr}};
 
 const luaL_Reg kBuf[] = {{"replace", l_replace}, {nullptr, nullptr}};
 const luaL_Reg kUi[] = {
@@ -588,7 +683,7 @@ bool script_init() {
     g_L = luaL_newstate();
     if(!g_L) return false;
     luaL_openlibs(g_L);
-    prepend_package_path("/etc/xdg/winter/themes");
+    prepend_package_path(WINTER_CONFDIR "/themes");
     lua_newtable(g_L);  // winter
     set_opt_table("opt", opt_index, opt_newindex);
     set_opt_table("opt_local", optl_index, optl_newindex);
@@ -601,6 +696,7 @@ bool script_init() {
     script_register("float", kFloat);
     script_register("deco", kDeco);
     script_register("lsp", kLsp);
+    script_register("plugin", kPlugin);
     script_register("jump", kJump);
     script_register("fold", kFold);
     script_register("snippet", kSnippet);
@@ -619,6 +715,16 @@ bool script_init() {
     script_register("lsp", kLspExt);
     script_open_buf();
     script_open_ext();
+    script_open_fs();
+    script_open_api();
+    script_open_json();
+    script_open_reg();
+    script_open_mark();
+    script_open_keys();
+    script_open_win();
+    script_open_ts();
+    ts_install_provider();
+    script_open_runtime();  // last: it builds on every group above
 
     lua_pushcfunction(g_L, l_print);
     lua_setglobal(g_L, "print");
@@ -751,8 +857,12 @@ bool run_init(const std::string& dir) {
     if(!fs::exists(init, ec)) return false;
 
     // rebuilt from the original each time so reloads don't stack prefixes
-    const std::string path =
-        std::format("{}/?.lua;{}/?/init.lua;{}", dir, dir, g_base_path);
+    g_plugins = scan_plugins(dir);
+    g_plugin_off.clear();
+    const std::string path = std::format(
+        "{0}/?.lua;{0}/?/init.lua;{0}/plugins/?.lua;{0}/plugins/?/init.lua;{1}",
+        dir,
+        g_base_path);
     lua_getglobal(g_L, "package");
     lua_pushstring(g_L, path.c_str());
     lua_setfield(g_L, -2, "path");
@@ -762,7 +872,9 @@ bool run_init(const std::string& dir) {
         lua_pop(g_L, 1);
         return false;
     }
-    return call(0);
+    const bool ok = call(0);
+    if(ok) start_plugins();
+    return ok;
 }
 
 // debounce: one save usually fires several inotify events
@@ -845,7 +957,8 @@ bool script_reload() {
     watch_config_tree();
     g_reloading = false;
     if(g_last_error.empty()) editor_set_status_message("Config reloaded");
-    for(const auto& b : E.buffers) {  // open buffers get their file_type handlers again
+    for(const auto& b :
+        E.buffers) {  // open buffers get their file_type handlers again
         if(b->syntax.lang().empty()) continue;
         EventBufScope scope(b.get());
         events_emit("file_type", {b->filename, std::string(b->syntax.lang())});

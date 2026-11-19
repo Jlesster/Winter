@@ -75,18 +75,18 @@ struct Input {
         switch(c) {
             case '\r': submit(); break;
             case CTRL_KEY('c'): overlay_close(id); break;
-            case ARROW_LEFT: cur = utf8_prev(text, cur); break;
-            case ARROW_RIGHT: cur = utf8_next(text, cur); break;
+            case ARROW_LEFT: cur = gr_prev(text, cur); break;
+            case ARROW_RIGHT: cur = gr_next(text, cur); break;
             case HOME:
             case CTRL_KEY('a'): cur = 0; break;
             case END:
             case CTRL_KEY('e'): cur = text.size(); break;
             case BACKSPACE:
-                if(cur) erase(utf8_prev(text, cur), cur);
+                if(cur) erase(gr_prev(text, cur), cur);
                 break;
             case DELETE:
                 if(cur < text.size()) {
-                    const size_t n = utf8_next(text, cur);
+                    const size_t n = gr_next(text, cur);
                     text.erase(cur, n - cur);
                     changed();
                 }

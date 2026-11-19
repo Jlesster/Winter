@@ -78,15 +78,40 @@ void paint_frame(const Overlay& o) {
     put(0, H - 1, bl);
     put(W - 1, H - 1, br);
 
-    if(!s.dividers.empty()) {
-        std::string_view jl = "\u251c", jr = "\u2524", bar = b.t;
-        if(kind == Border::Double) jl = "\u2560", jr = "\u2563";
-        else if(kind == Border::Block) jl = b.l, jr = b.r, bar = " ";
-        for(const int y : s.dividers) {
-            if(y < 1 || y >= H - 1) continue;
-            for(int x = 1; x < W - 1; ++x) put(x, y, bar);
-            put(0, y, jl);
-            put(W - 1, y, jr);
+    std::string_view jl = "\u251c", jr = "\u2524", bar = b.t;
+    if(kind == Border::Double) jl = "\u2560", jr = "\u2563";
+    else if(kind == Border::Block) jl = b.l, jr = b.r, bar = " ";
+    for(const int y : s.dividers) {
+        if(y < 1 || y >= H - 1) continue;
+        for(int x = 1; x < W - 1; ++x) put(x, y, bar);
+        put(0, y, jl);
+        put(W - 1, y, jr);
+    }
+
+    // focused region: recolour its side edges and the rules above and below
+    Style fst = bst;
+    bool footer_focused = false;
+    if(s.focus_span && s.focus_border != Style{}) {
+        fst = s.focus_border;
+        const auto [fa, fb] = *s.focus_span;
+        const auto putf = [&](int x, int y, std::string_view g) {
+            overlay_put(o.id, x, y, g, fst);
+        };
+        for(int y = std::max(fa, 1); y < std::min(fb, H - 1); ++y)
+            putf(0, y, b.l), putf(W - 1, y, b.r);
+        for(const int y : {fa - 1, fb}) {
+            if(y < 0 || y >= H) continue;
+            if(y == 0) {
+                for(int x = 1; x < W - 1; ++x) putf(x, 0, b.t);
+                putf(0, 0, b.lt), putf(W - 1, 0, b.tr);
+            } else if(y == H - 1) {
+                for(int x = 1; x < W - 1; ++x) putf(x, y, b.b);
+                putf(0, y, bl), putf(W - 1, y, br);
+                footer_focused = true;
+            } else if(std::ranges::find(s.dividers, y) != s.dividers.end()) {
+                for(int x = 1; x < W - 1; ++x) putf(x, y, bar);
+                putf(0, y, jl), putf(W - 1, y, jr);
+            }
         }
     }
 
@@ -98,7 +123,8 @@ void paint_frame(const Overlay& o) {
     }
     if(!s.footer.empty() && W > 6) {
         const std::string f = " " + clip_cells(s.footer, W - 6) + " ";
-        overlay_put(o.id, W - 2 - text_width(f), H - 1, f, bst);
+        overlay_put(o.id, W - 2 - text_width(f), H - 1, f,
+                    footer_focused ? fst : bst);
     }
 }
 
@@ -136,6 +162,19 @@ OverlayId overlay_open(OverlaySpec spec) {
     return g_ov.back().id;
 }
 
+void overlay_edit(OverlayId id, const std::function<void(OverlaySpec&)>& fn) {
+    Overlay* o = find(id);
+    if(!o || !fn) return;
+    const int w = o->spec.w, h = o->spec.h;
+    fn(o->spec);
+    OverlaySpec& s = o->spec;
+    s.w = std::max(s.w, 1);
+    s.h = std::max(s.h, 1);
+    if(s.modal) s.dismiss_on_move = false;  // same rule as overlay_open
+    if(s.w != w || s.h != h)
+        o->cells.assign(static_cast<size_t>(s.w) * s.h, Cell{});
+}
+
 void overlay_close(OverlayId id) {
     const auto it = std::ranges::find(g_ov, id, &Overlay::id);
     if(it == g_ov.end()) return;
@@ -168,7 +207,7 @@ void overlay_set_cursor(OverlayId id, int x, int y) {
     if(Overlay* o = find(id)) o->spec.cursor_x = x, o->spec.cursor_y = y;
 }
 
-bool overlay_cursor(const Viewport& v, int& sx, int& sy) {
+bool overlay_cursor(const Viewport& v, int& sx, int& sy, bool* block) {
     for(const OverlayId id : top_down()) {
         const Overlay* o = find(id);
         if(!o || !o->spec.visible || o->spec.cursor_x < 0 ||
@@ -178,6 +217,7 @@ bool overlay_cursor(const Viewport& v, int& sx, int& sy) {
         if(o->spec.cursor_x >= r.w || o->spec.cursor_y >= r.h) continue;
         sx = r.x + o->spec.cursor_x;
         sy = r.y + o->spec.cursor_y;
+        if(block) *block = o->spec.cursor_block;
         return true;
     }
     return false;

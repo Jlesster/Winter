@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <climits>
+#include <iterator>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "columns.hpp"
@@ -11,6 +13,9 @@
 #include "input.hpp"
 #include "keys.hpp"
 #include "motion.hpp"
+#include "multicursor.hpp"
+#include "normal.hpp"
+#include "reg.hpp"
 #include "registry.hpp"
 #include "utf8.hpp"
 
@@ -33,7 +38,7 @@ void editor_move_cursor(int key) {
         case 'h':
         case ARROW_LEFT:
             if(E.cx > 0) {
-                E.cx = static_cast<int>(utf8_prev(line, E.cx));
+                E.cx = static_cast<int>(gr_prev(line, E.cx));
             } else if(!insertish(E.mode) && E.cy > 0) {
                 E.cy--;
                 line = E.buf().pt.line_text(E.cy);
@@ -43,7 +48,7 @@ void editor_move_cursor(int key) {
         case 'l':
         case ARROW_RIGHT:
             if(E.cx < static_cast<int>(line.size())) {
-                E.cx = static_cast<int>(utf8_next(line, E.cx));
+                E.cx = static_cast<int>(gr_next(line, E.cx));
             } else if(!insertish(E.mode) && E.cy < last) {
                 E.cy++;
                 E.cx = 0;
@@ -63,8 +68,9 @@ void move_vertical(int dir, int count) {
     const PieceTable& pt = E.buf().pt;
     const size_t from = static_cast<size_t>(E.cy);
     const int n = std::max(count, 1);
-    const int target = static_cast<int>(dir > 0 ? motion::lines_down(pt, from, n)
-                                                : motion::lines_up(pt, from, n));
+    const int target =
+        static_cast<int>(dir > 0 ? motion::lines_down(pt, from, n)
+                                 : motion::lines_up(pt, from, n));
     if(target == E.cy) return;
     E.cy = target;
     const std::string line = E.buf().pt.line_text(E.cy);
@@ -72,7 +78,7 @@ void move_vertical(int dir, int count) {
     int cx = E.want_rx == INT_MAX ? size : rx_to_cx(line, E.want_rx);
     if(E.mode == NORMAL && cx >= size &&
        size > 0)  // normal mode: stop on the last char
-        cx = static_cast<int>(utf8_prev(line, size));
+        cx = static_cast<int>(gr_prev(line, size));
     E.cx = cx;
 }
 
@@ -94,10 +100,14 @@ struct NormalState {
     bool shown = false;      // pending input is on the status line
     std::string op;
     int op_count = 0;
+    char reg = 0;           // "x typed: the register for this command
+    bool want_reg = false;  // " typed, its register name is next
 
     void reset() {
         count = 0;
         op_count = 0;
+        reg = 0;
+        want_reg = false;
         op.clear();
         keys.clear();
         want_char = false;
@@ -119,7 +129,8 @@ struct DotState {
 DotState D;
 
 bool normal_pending() {
-    return N.count || !N.keys.empty() || N.want_char || !N.op.empty();
+    return N.count || !N.keys.empty() || N.want_char || !N.op.empty() ||
+           N.reg || N.want_reg;
 }
 
 // FILES has its own keymap. Only <space>... chords (leader maps) fall through
@@ -134,21 +145,70 @@ Hit lookup_keys(std::u32string_view keys) {
     }
     const EditorMode m =
         E.mode == VISUAL ? VISUAL : (N.op.empty() ? NORMAL : OPPEND);
-    return registry().lookup(m, keys);
+    return registry().lookup(m, keys, E.buf().id);  // this buffer's own maps too
 }
 
 void show_pending() {
-    editor_set_status_message("{}{}",
+    const std::string reg =
+        N.reg ? std::string{'"', N.reg} : (N.want_reg ? "\"" : "");
+    editor_set_status_message("{}{}{}",
+                              reg,
                               N.count ? std::to_string(N.count) : std::string(),
                               format_keys(N.keys));
     N.shown = true;
 }
 
+// Actions that change the text, for a read-only buffer. The piece table
+// refuses the edit itself; this stops them earlier, before a register is
+// filled, a cursor moved or an operator left pending.
+bool changes_text(std::string_view a) {
+    if(a.starts_with("edit.")) return true;
+    if(a.starts_with("op.")) return a != "op.yank";
+    if(a.starts_with("visual.")) {
+        static constexpr std::string_view kEdits[] = {"visual.change",
+                                                      "visual.change_s",
+                                                      "visual.comment",
+                                                      "visual.decrement",
+                                                      "visual.decrement_int",
+                                                      "visual.dedent",
+                                                      "visual.delete",
+                                                      "visual.delete_x",
+                                                      "visual.dup",
+                                                      "visual.increment",
+                                                      "visual.increment_int",
+                                                      "visual.indent",
+                                                      "visual.paste",
+                                                      "visual.paste_keep",
+                                                      "visual.surround",
+                                                      "visual.toggle_case"};
+        return std::ranges::find(kEdits, a) != std::end(kEdits);
+    }
+    return a == "mode.replace";
+}
+
 void dispatch(const std::string& action, Ctx ctx) {
+    if(E.buf().pt.locked && changes_text(action)) {
+        N.reset();
+        buffer_refused_edit();
+        return;
+    }
+    // N is reset before anything runs, so the register typed with "x travels
+    // in RegScope; an operator that starts here (the d of "adw) gets it back
+    // for its second half.
+    const char reg = N.reg;
     if(N.op.empty()) {
         N.reset();
-        if(!registry().run_action(action, ctx))
-            editor_set_status_message("No such action: {}", action);
+        {
+            RegScope scope(reg);
+            const auto run = [&] {
+                Ctx c = ctx;
+                if(!registry().run_action(action, c))
+                    editor_set_status_message("No such action: {}", action);
+            };
+            if(mc_action_multi(action)) mc_each(run);
+            else run();
+        }
+        if(!N.op.empty()) N.reg = reg;
         return;
     }
     const std::string op = N.op;
@@ -156,12 +216,19 @@ void dispatch(const std::string& action, Ctx ctx) {
                           ? std::max(N.op_count, 1) * std::max(ctx.count, 1)
                           : 0;
     N.reset();
-    run_operator(op, action, count, ctx.arg);
+    RegScope scope(reg);
+    mc_each([&] { run_operator(op, action, count, ctx.arg); });
 }
 
 }  // namespace
 
 void dot_supress() { D.skip = true; }
+bool dot_replaying() { return D.replaying; }
+bool dot_set_replaying(bool on) {
+    const bool was = D.replaying;
+    D.replaying = on;
+    return was;
+}
 
 void dot_after_key(int c, EditorMode before, uint64_t rev_before) {
     if(D.replaying) return;
@@ -231,7 +298,7 @@ bool normal_input_pending() { return normal_pending(); }
 // would feeding `c` continue or finish a mapping? (editor_handle_key asks this
 // before letting a modified key through)
 bool normal_accepts(int c) {
-    if(N.want_char) return false;
+    if(N.want_char || N.want_reg) return false;
     KeySeq probe = N.keys;
     probe += static_cast<char32_t>(c);
     return lookup_keys(probe).kind != Lookup::None;
@@ -251,6 +318,16 @@ void normal_begin_operator(std::string_view name, int count) {
 }
 
 void normal_feed(int c) {
+    if(N.want_reg) {  // the register name after "
+        N.want_reg = false;
+        if(c < 0x100 && reg_name_ok(static_cast<char>(c))) {
+            N.reg = static_cast<char>(c);
+            show_pending();
+        } else {
+            N.reset();
+        }
+        return;
+    }
     if(N.want_char) {  // the argument of f / t / r ...: plain bytes only
         if(c == '\x1b' || c >= 0x100) {
             N.reset();
@@ -277,6 +354,16 @@ void normal_feed(int c) {
     // that can be mapped
     if(c == '\x1b' && (N.count || !N.keys.empty() || !N.op.empty())) {
         N.reset();
+        return;
+    }
+
+    // "x picks a register for the next command ("ayy, 3"_dd, "+p). Unless the
+    // user mapped a key starting with ", which then wins.
+    if(c == '"' && N.keys.empty() && N.op.empty() && !N.reg &&
+       (E.mode == NORMAL || E.mode == VISUAL) &&
+       lookup_keys(std::u32string_view(U"\"")).kind == Lookup::None) {
+        N.want_reg = true;
+        show_pending();
         return;
     }
 

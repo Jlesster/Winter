@@ -15,6 +15,7 @@
 
 #include "diag.hpp"
 #include "editor.hpp"
+#include "events.hpp"
 #include "file.hpp"
 #include "loop.hpp"
 #include "lsp_client.hpp"
@@ -29,6 +30,10 @@
 
 namespace {
 constexpr int kDebounceMs = 150;
+
+// Every publishDiagnostics, kept per (server, file) so the workspace picker
+// can list files that are not open. An empty publish erases the entry.
+std::map<std::pair<LspId, std::string>, std::vector<PublishedDiag>> g_published;
 
 struct SemTok {
     size_t start, end, type;
@@ -46,6 +51,10 @@ struct SemStats {
     std::string result_id;
     std::vector<int64_t> data;
     int deltas = 0, resyncs = 0;
+    int retries = 0;  // back-off steps since the last good response
+    int rid = 0;      // the request in flight (0: none)
+    int cancelled = 0, refreshes = 0;
+    TimerId retry_timer = 0;
 };
 
 struct Doc {
@@ -56,6 +65,7 @@ struct Doc {
     bool utf16 = true;
     int sync = 0;
     bool full_only = false;
+    bool masked = false;  // the server holds a masked copy (lsp_sync_mask)
     TimerId timer = 0;
     SemStats sem;
 };
@@ -161,9 +171,10 @@ struct Legend {
     mutable std::unordered_map<uint64_t, std::optional<Style>> combo;
 };
 
+std::map<LspId, Legend> g_legends;
+
 const Legend* legend_for(LspId id) {
-    static std::map<LspId, Legend> cache;
-    Legend& lg = cache[id];
+    Legend& lg = g_legends[id];
     if(!lg.built || lg.rev != theme_rev()) {
         lg = Legend{};
         lg.built = true;
@@ -211,6 +222,26 @@ struct LineCur {
     }
 };
 
+// What a modifier does with no theme override: the syntax group to patch in
+// (nullopt: nothing). `defaultLibrary` picks the .builtin capture of the
+// token's own kind; `readonly` makes a variable/property read as a constant.
+std::optional<Style> mod_default(std::string_view type, std::string_view mod) {
+    if(mod == "defaultLibrary") {
+        if(type == "function" || type == "method")
+            return syntax_theme("function.builtin");
+        if(type == "variable" || type == "property")
+            return syntax_theme("variable.builtin");
+        if(type == "type" || type == "class" || type == "struct" ||
+           type == "enum" || type == "interface" || type == "typeAlias" ||
+           type == "union" || type == "trait" || type == "concept")
+            return syntax_theme("type.builtin");
+        return std::nullopt;
+    }
+    if(mod == "readonly" && (type == "variable" || type == "property"))
+        return syntax_theme("constant");
+    return std::nullopt;
+}
+
 std::optional<Style> token_style_mods(const Legend& lg, size_t ty,
                                       uint64_t bits) {
     const uint64_t key = (uint64_t(ty) << 32) | (bits & 0xFFFFFFFF);
@@ -222,6 +253,10 @@ std::optional<Style> token_style_mods(const Legend& lg, size_t ty,
         if(lg.mods[i] == "deprecated") {
             if(!out) out = Style{};
             out->attrs = static_cast<uint16_t>(out->attrs | ATTR_STRIKE);
+        }
+        if(const auto m = mod_default(lg.names[ty], lg.mods[i])) {
+            if(!out) out = Style{};
+            style_patch(*out, *m);
         }
         for(const std::string& g :
             {"lsp." + lg.names[ty] + "." + lg.mods[i], "lsp.mod." + lg.mods[i]})
@@ -276,10 +311,12 @@ void apply_tokens(Doc& d, const Legend& lg, const std::vector<int64_t>& v) {
     SemStats& st = d.sem;
     b.sync_anchors();  // flush pending deco shifts BEFORE adding new spans
     const NsId ns = deco_ns("lsp.semantic");
-    b.decos.clear_ns(ns);
     st.raw = st.applied = st.unmapped = 0;
     st.counts.assign(lg.style.size(), 0);
     st.toks.clear();
+    st.toks.reserve(v.size() / 5);
+    std::vector<SpanDeco> spans;  // swapped in for the old ones in one pass
+    spans.reserve(v.size() / 5);
 
     LineCur cur{b.pt, d.utf16};
     size_t line = 0, col = 0;
@@ -311,19 +348,59 @@ void apply_tokens(Doc& d, const Legend& lg, const std::vector<int64_t>& v) {
         Style sty = *base;
         if(g_sem_debug)
             sty.attrs = static_cast<uint16_t>(sty.attrs | ATTR_UNDERLINE);
-        b.decos.add_span({s, e, ns, kPrioSemantic, sty});
+        spans.push_back({s, e, ns, kPrioSemantic, sty, false, /*strict=*/true});
         ++st.applied;
+    }
+    b.decos.replace_ns_spans(ns, std::move(spans));
+}
+
+void request_tokens(Doc& d);
+
+// The server had nothing for us yet (null result while it indexes) or gave up
+// (ContentModified / ServerCancelled). The text didn't change, so no edit will
+// ever re-ask: do it ourselves, backing off 200ms .. 6.4s, six tries at most.
+void retry_tokens(Buffer* b) {
+    Doc* d = find(*b);
+    if(!d || d->sem.retries >= 6) return;
+    if(d->sem.retry_timer) loop_cancel(d->sem.retry_timer);
+    const int ms = 200 << d->sem.retries++;
+    d->sem.retry_timer = loop_after(ms, [b] {
+        if(Doc* d = find(*b)) {
+            d->sem.retry_timer = 0;
+            request_tokens(*d);
+        }
+    });
+}
+
+// Stop waiting for the request in flight (if any) and any scheduled retry.
+void cancel_tokens(Doc& d) {
+    SemStats& st = d.sem;
+    if(st.retry_timer) {
+        loop_cancel(st.retry_timer);
+        st.retry_timer = 0;
+    }
+    if(st.rid) {
+        lsp_cancel(d.server, st.rid);
+        st.rid = 0;
+        ++st.cancelled;
     }
 }
 
 void request_tokens(Doc& d) {
     Buffer* b = d.buf;
     if(!opts.semantic_tokens) {
+        cancel_tokens(d);
         b->decos.clear_ns(deco_ns("lsp.semantic"));
         return;
     }
     const Legend* leg = legend_for(d.server);
     if(!leg) return;
+    if(d.masked) return;
+    // One request in flight per document: a new one supersedes the old. That
+    // keeps two deltas from ever being asked against the same previousResultId
+    // (the second reply would then not match our chain and force a resync) and
+    // spares the server work whose answer we would only throw away as stale.
+    cancel_tokens(d);
     const int ver = d.version;
     d.sem.req_ver = ver;
     ++d.sem.sent;
@@ -332,7 +409,7 @@ void request_tokens(Doc& d) {
     Json params = Json::obj({{"textDocument", Json::obj({{"uri", d.uri}})}});
     if(use_delta) params.set("previousResultId", base_id);
     const auto t0 = std::chrono::steady_clock::now();
-    lsp_request(
+    const int rid = lsp_request(
         d.server,
         use_delta ? "textDocument/semanticTokens/full/delta"
                   : "textDocument/semanticTokens/full",
@@ -342,9 +419,11 @@ void request_tokens(Doc& d) {
             Doc* d = find(*b);  // the buffer may have been closed
             if(!d) return;
             SemStats& st = d->sem;
+            st.rid = 0;  // answered (a cancelled request never gets here)
             // stale: text moved on since we asked; the next flush re-asks.
             // The chain below still advances so the next delta has a base.
-            const bool stale = d->version != ver || b->pt.lsp_dirty();
+            const bool stale =
+                d->masked || d->version != ver || b->pt.lsp_dirty();
             const auto drop_chain = [&] {
                 st.result_id.clear();
                 st.data.clear();
@@ -357,11 +436,15 @@ void request_tokens(Doc& d) {
                 }
                 ++st.err;
                 st.last_err = std::string(error["message"].as_str("?"));
+                if(const auto c = error["code"].as_int(0);
+                   c == -32801 || c == -32802)
+                    retry_tokens(b);
                 return;
             }
             if(!result.is_object()) {
                 drop_chain();
                 ++(stale ? st.stale : st.empty);
+                if(!stale) retry_tokens(b);
                 return;
             }
             std::vector<int64_t> nd;
@@ -391,10 +474,31 @@ void request_tokens(Doc& d) {
                         std::chrono::steady_clock::now() - t0)
                         .count();
             st.got_ver = ver;
+            st.retries = 0;
             ++st.ok;
             if(const Legend* lg = legend_for(d->server))
                 apply_tokens(*d, *lg, st.data);
         });
+    // 0 when the server was not running: the callback already ran
+    if(Doc* cur = find(*b); cur && rid) cur->sem.rid = rid;
+}
+
+// workspace/semanticTokens/refresh: the server's idea of the tokens changed
+// (it finished indexing, its config moved). Whatever we hold is void, deltas
+// included. Answered at once; the re-ask is one loop turn later so a handler
+// that touches g_docs is not run from inside the reader.
+Json on_sem_refresh(LspId id, const Json&) {
+    loop_after(0, [id] {
+        for(Doc& d : g_docs) {
+            if(d.server != id) continue;
+            d.sem.result_id.clear();
+            d.sem.data.clear();
+            d.sem.retries = 0;
+            ++d.sem.refreshes;
+            request_tokens(d);
+        }
+    });
+    return Json();
 }
 
 constexpr int kRefDelayMs = 120;  // idle time before asking the server
@@ -529,6 +633,22 @@ void flush(Doc& d) {
         loop_cancel(d.timer);
         d.timer = 0;
     }
+    if(d.masked) {
+        // The server has a masked copy: put the real text back in full. Any
+        // pending edit is already part of it.
+        d.masked = false;
+        d.buf->pt.take_lsp_edit();
+        lsp_notify(
+            d.server,
+            "textDocument/didChange",
+            Json::obj(
+                {{"textDocument",
+                  Json::obj({{"uri", d.uri}, {"version", ++d.version}})},
+                 {"contentChanges",
+                  Json::arr({Json::obj({{"text", full_text(*d.buf)}})})}}));
+        request_tokens(d);
+        return;
+    }
     auto e = d.buf->pt.take_lsp_edit();
     if(!e) return;
     Json change;
@@ -553,6 +673,20 @@ std::string abs_path(const Buffer& b) {
         .string();
 }
 
+// lsp_attach / lsp_detach {server}, one loop turn later: a handler may open
+// buffers or start servers, which would invalidate what the caller is
+// iterating.
+void announce_lsp(const char* event, uint64_t buf_id, std::string server) {
+    loop_after(0, [event, buf_id, server = std::move(server)] {
+        for(const auto& b : E.buffers)
+            if(b->id == buf_id) {
+                EventBufScope scope(b.get());
+                events_emit(event, {server});
+                return;
+            }
+    });
+}
+
 void open_doc(Server& s, Buffer& b, std::string_view lang) {
     const std::string path = abs_path(b);
     const std::string text = full_text(b);
@@ -570,6 +704,7 @@ void open_doc(Server& s, Buffer& b, std::string_view lang) {
     if(d.sync) b.pt.lsp_track(true, d.utf16);
     g_docs.push_back(std::move(d));
     request_tokens(g_docs.back());
+    announce_lsp("lsp_attach", b.id, s.name);
 }
 
 void on_ready(LspId id) {
@@ -585,15 +720,24 @@ void on_exit(LspId id, std::string_view why) {
     s->dead = true;
     s->why = why.substr(0, why.find('\n'));
     s->waiting.clear();
+    std::erase_if(g_published,
+                  [id](const auto& kv) { return kv.first.first == id; });
+    const std::string server_name = s->name;
+    g_legends.erase(id);  // ids are never reused; don't let the cache grow
+    std::vector<uint64_t> detached;  // announced below, after g_docs is stable
     for(Doc& d : g_docs)
         if(d.server == id) {
+            detached.push_back(d.buf->id);
             if(d.timer) loop_cancel(d.timer);
+            if(d.sem.retry_timer) loop_cancel(d.sem.retry_timer);
             d.buf->diags.clear();
             d.buf->decos.clear_ns(deco_ns("lsp.semantic"));
             d.buf->decos.clear_ns(deco_ns("lsp.refs"));
             d.buf->pt.lsp_track(false);
         }
     std::erase_if(g_docs, [&](const Doc& d) { return d.server == id; });
+    for(const uint64_t buf : detached)
+        announce_lsp("lsp_detach", buf, server_name);
     if(s->restart) {
         editor_set_status_message("lsp {}: restarting", s->name);
         std::erase_if(g_servers, [id](const Server& x) { return x.id == id; });
@@ -606,8 +750,28 @@ void on_exit(LspId id, std::string_view why) {
         "lsp {} exited: {}", s->name, why.substr(0, why.find('\n')));
 }
 
+void store_published(LspId id, const std::string& path, const Json& list) {
+    std::vector<PublishedDiag> v;
+    if(list.is_array())
+        for(const Json& j : list.items()) {
+            const Json& s = j["range"]["start"];
+            v.push_back({path,
+                         static_cast<int>(s["line"].as_int()),
+                         static_cast<int>(s["character"].as_int()),
+                         lsp_encoding(id) != "utf-8",
+                         static_cast<int>(
+                             std::clamp<int64_t>(j["severity"].as_int(1), 1, 4)),
+                         std::string(j["message"].as_str()),
+                         std::string(j["source"].as_str())});
+        }
+    const auto key = std::make_pair(id, path);
+    if(v.empty()) g_published.erase(key);
+    else g_published[key] = std::move(v);
+}
+
 void on_diagnostics(LspId id, const Json& p) {
     const std::string path = lsp_path(p["uri"].as_str());
+    store_published(id, path, p["diagnostics"]);
     for(Doc& d : g_docs) {
         if(d.server != id || d.path != path) continue;
         if(d.buf->pt.lsp_dirty()) return;
@@ -663,6 +827,7 @@ Server* ensure_server(const std::string& name, const Json& cfg) {
     if(!hooked) {
         hooked = true;
         lsp_on("textDocument/publishDiagnostics", on_diagnostics);
+        lsp_on_request("workspace/semanticTokens/refresh", on_sem_refresh);
     }
     const LspId id = lsp_start(std::move(spec));
     if(!id) {
@@ -756,7 +921,7 @@ std::string lsp_sync_server_report() {
 void lsp_sync_tick() {
     ref_tick();
     for(Doc& d : g_docs)
-        if(!d.timer && d.buf->pt.lsp_dirty())
+        if(!d.timer && (d.masked || d.buf->pt.lsp_dirty()))
             d.timer = loop_after(kDebounceMs, [b = d.buf] {
                 if(Doc* d = find(*b)) {
                     d->timer = 0;
@@ -773,7 +938,10 @@ void lsp_sync_detach(Buffer& b) {
     for(Server& s : g_servers) std::erase(s.waiting, &b);
     Doc* d = find(b);
     if(!d) return;
+    const Server* owner = by_id(d->server);
+    const std::string server = owner ? owner->name : std::string();
     if(d->timer) loop_cancel(d->timer);
+    cancel_tokens(*d);
     b.pt.lsp_track(false);
     lsp_notify(d->server,
                "textDocument/didClose",
@@ -786,6 +954,8 @@ void lsp_sync_detach(Buffer& b) {
         g_ref = RefState{};
     }
     std::erase_if(g_docs, [&](const Doc& x) { return x.buf == &b; });
+    EventBufScope scope(&b);  // last thing we do: a handler may touch anything
+    events_emit("lsp_detach", {server});
 }
 
 std::optional<int> lsp_sync_version(Buffer& b) {
@@ -812,6 +982,41 @@ std::optional<LspDoc> lsp_sync_doc(Buffer& b, bool flush_pending) {
     if(flush_pending) flush(*d);
     const Server* sv = by_id(d->server);
     return LspDoc{d->server, d->uri, d->utf16, sv ? sv->name : std::string{}};
+}
+
+std::optional<LspDoc> lsp_sync_mask(
+    Buffer& b, const std::vector<std::pair<size_t, size_t>>& ranges) {
+    Doc* d = find(b);
+    if(!d || !lsp_ready(d->server)) return std::nullopt;
+    flush(*d);  // real edits first; this also lifts an earlier mask
+    if(!ranges.empty() && d->sync) {
+        std::string text = full_text(b);
+        size_t prev_end = 0;
+        bool ok = true;
+        for(const auto& [a, z] : ranges)
+            if(a < prev_end || z <= a || z > b.pt.size()) ok = false;
+            else prev_end = z;
+        if(ok) {
+            for(auto it = ranges.rbegin(); it != ranges.rend(); ++it)
+                text.erase(it->first, it->second - it->first);
+            lsp_notify(
+                d->server,
+                "textDocument/didChange",
+                Json::obj(
+                    {{"textDocument",
+                      Json::obj({{"uri", d->uri}, {"version", ++d->version}})},
+                     {"contentChanges",
+                      Json::arr({Json::obj({{"text", text}})})}}));
+            d->masked = true;
+        }
+    }
+    const Server* sv = by_id(d->server);
+    return LspDoc{d->server, d->uri, d->utf16, sv ? sv->name : std::string{}};
+}
+
+bool lsp_sync_masked(Buffer& b) {
+    const Doc* d = find(b);
+    return d && d->masked;
 }
 
 bool lsp_sync_semantic_debug(Buffer& b) {
@@ -864,6 +1069,10 @@ std::string lsp_sync_semantic_report(Buffer& b) {
                      st.req_ver,
                      st.got_ver,
                      st.ms);
+    o += std::format("superseded/refresh    : {} cancelled in flight, "
+                     "{} server refreshes\n",
+                     st.cancelled,
+                     st.refreshes);
     o += std::format("delta                 : {} ({} applied, {} resyncs)\n",
                      lg && lg->delta ? "supported" : "not offered by server",
                      st.deltas,
@@ -920,6 +1129,13 @@ std::string lsp_sync_semantic_report(Buffer& b) {
                                  lg->style[i] ? "painted" : "tree-sitter");
     }
     return o;
+}
+
+std::vector<PublishedDiag> lsp_sync_published() {
+    std::vector<PublishedDiag> out;
+    for(const auto& kv : g_published)
+        out.insert(out.end(), kv.second.begin(), kv.second.end());
+    return out;
 }
 
 void lsp_sync_semantic_refresh() {

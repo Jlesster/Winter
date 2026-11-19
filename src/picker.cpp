@@ -1,3 +1,5 @@
+#include "window_ed.hpp"
+#include "render.hpp"
 #include "picker.hpp"
 
 #include <unistd.h>
@@ -14,6 +16,7 @@
 #include "buflist.hpp"
 #include "command.hpp"
 #include "core.hpp"
+#include "diag.hpp"
 #include "jumplist.hpp"
 #include "fold_buf.hpp"
 #include "editor.hpp"
@@ -409,7 +412,7 @@ void picker_open(PickerSpec spec) {
     P.query.clear();
     P.last_query.clear();
 
-    const int screen_w = E.term_cols + tree_cols();
+    const int screen_w = editor_screen_cols();
     const bool with_pv = P.spec.preview && screen_w >= 110;
     // With a preview the list takes the left ~45%, the preview the rest.
     const int total = with_pv ? std::clamp(screen_w - 8, 100, 200)
@@ -417,7 +420,7 @@ void picker_open(PickerSpec spec) {
         const int w = with_pv ? std::max(44, total * 9 / 20) : total;
         const int x = std::max(0, (screen_w - total) / 2);
         // 3 input rows + 14 list rows, minus the one border row they share
-        const int y = std::max(0, (E.term_rows - 16) / 3);
+        const int y = std::max(0, (win_area_rows() - 16) / 3);
 
         if(with_pv) {
             const unsigned serial = P.serial;
@@ -591,6 +594,11 @@ void picker_register_commands() {
                  .desc = "Live grep (rg)",
                  .nargs = Nargs::None,
                  .run = [](const CmdLine&) { picker_grep(); }});
+    command_add({.name = "Diagnostics",
+                 .desc = "Diagnostics picker (! = whole workspace)",
+                 .bang = true,
+                 .nargs = Nargs::None,
+                 .run = [](const CmdLine& c) { diag_picker(c.bang); }});
     command_add({.name = "Recent",
                  .desc = "Recently opened files",
                  .nargs = Nargs::None,

@@ -26,8 +26,12 @@ struct LspSpec {
 LspId lsp_start(LspSpec spec);
 void lsp_stop(LspId id);
 
-void lsp_request(LspId id, std::string_view method, Json params,
-                 LspReply cb = {});
+// Returns the request id (0 if nothing was sent: the server is not running,
+// in which case cb has already been called with an error).
+int lsp_request(LspId id, std::string_view method, Json params,
+                LspReply cb = {});
+// Forget the reply to request `rid` and tell the server ($/cancelRequest).
+void lsp_cancel(LspId id, int rid);
 void lsp_notify(LspId id, std::string_view method, Json params = {});
 
 void lsp_on(std::string_view method, LspNotify fn);
