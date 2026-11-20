@@ -1,3 +1,4 @@
+#include "doc.hpp"
 #include "command.hpp"
 #include "external.hpp"
 #include "output.hpp"
@@ -585,14 +586,7 @@ void cmd_shell(const CmdLine& c) {
     else editor_set_status_message("Filtering through {} ...", cmd);
 }
 
-void reattach_syntax(std::string_view lang) {
-    for(auto& b : E.buffers) {
-        if(b->nofile) continue;
-        const std::string head = buffer_head(*b);
-        if(Syntax::detect(b->filename, head) != lang) continue;
-        if(b->syntax.attach(b->filename, head)) b->syntax.parse(b->pt, b->eol);
-    }
-}
+void reattach_syntax(std::string_view lang) { buffer_reattach_syntax(lang); }
 
 void cmd_copy(const CmdLine& c) {
     auto& pt = E.buf().pt;
@@ -621,10 +615,11 @@ void cmd_copy(const CmdLine& c) {
 void cmd_ft(const CmdLine& c) {
     Buffer& b = E.buf();
     if(c.args.empty()) {
-        editor_set_status_message("filetype: {}",
+        editor_set_status_message("filetype: {}  (detected: {})",
                                   b.syntax.lang().empty()
                                       ? std::string_view("none")
-                                      : b.syntax.lang());
+                                      : b.syntax.lang(),
+                                  ft::explain(b.filename, buffer_head(b)));
         return;
     }
     if(buffer_set_filetype(b, c.args)) return;
@@ -1099,6 +1094,7 @@ void register_builtin_commands() {
     lsp_rename_register();
     completion_register_commands();
     markdown_register_commands();
+    doc_register_commands();
 }
 
 void editor_command_palette(std::string_view cmd) {

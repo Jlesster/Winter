@@ -54,6 +54,8 @@ Opt kTable[] = {
     {"hlsearch", "hls", Kind::Bool, &opts.hlsearch, 0, 1},
     {"paste_indent", "pi", Kind::Bool, &opts.paste_indent, 0, 1},
     {"nerdicons", "ni", Kind::Bool, &opts.nerdicons, 0, 1},
+    {"doc_breaks", "dbr", Kind::Bool, &opts.doc_breaks, 0, 1},
+    {"doc_table_width", "dtw", Kind::Int, &opts.doc_table_width, 0, 500},
     {"border", "bs", Kind::BorderStyle, &opts.border, 0, 0},
     {"wrap", "", Kind::Bool, &opts.wrap, 0, 0},
     {"wrap_indicator", "wrapind", Kind::Bool, &opts.wrap_indicator, 0, 1},
@@ -61,6 +63,7 @@ Opt kTable[] = {
     {"indent_engine", "ie", Kind::Int, &opts.indent_engine, 0, 2},
     {"semantic_tokens", "sem", Kind::Bool, &opts.semantic_tokens, 0, 0},
     {"treewidth", "", Kind::Int, &opts.tree_width, 10, 80},
+    {"ts_autoinstall", "", Kind::Int, &opts.ts_autoinstall, 0, 1},
     {"tmux_nav", "", Kind::Int, &opts.tmux_nav, 0, 1},
     {"tmux_wrap", "", Kind::Int, &opts.tmux_wrap, 0, 1},
     {"resize_step", "", Kind::Int, &opts.resize_step, 1, 50},
@@ -80,6 +83,7 @@ Opt kTable[] = {
     {"indentnamespace", "inam", Kind::Int, &opts.indent_namespace, 0, 2},
     {"indentcase", "icase", Kind::Int, &opts.indent_case, 0, 2},
     {"hotreload", "hr", Kind::Bool, &opts.hot_reload, 0, 1},
+    {"save_html", "", Kind::Bool, &opts.save_html, 0, 1},
     {"numformats", "nf", Kind::NumFormats, &opts.numformats, 0, 0},
 };
 

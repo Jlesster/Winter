@@ -67,6 +67,7 @@ struct Buffer {
     bool eol = true;
     bool nofile = false;
     bool nowrap = false;  // never soft-wrap, whatever the global `wrap` says
+    bool popup = false;   // a K-hover pane: no gutter, drawn inside the popup
     bool ft_manual = false;
     int cx = 0;
     int cy = 0;

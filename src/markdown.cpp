@@ -1,3 +1,4 @@
+#include "virt.hpp"
 #include "markdown.hpp"
 #include <algorithm>
 #include <cctype>
@@ -457,46 +458,201 @@ std::string fit_cells(std::string_view s, int w) {
     return out;
 }
 
-// Wraps one paragraph; `inline code` becomes Code segments, "\_" loses its "\".
-void wrap_para(std::vector<MdRow>& out, std::string_view para, MdTone base,
-               int w, size_t max) {
-    struct Tok {
-        std::string text;
-        MdTone tone;
-        bool gap;  // a space came before it
-    };
-    std::vector<Tok> toks;
+// One word of a paragraph with the inline state it was written in.
+struct InlineTok {
+    std::string text;
+    MdTone tone;
+    bool gap;  // a space came before it
+    std::string url;
+    std::optional<Style> style;  // strong / emphasis
+};
+
+struct InlineState {
+    bool code = false, strong = false, emph = false;
+    std::string url;  // inside [text](url)
+};
+
+bool md_space(char c) { return c == ' ' || c == '\t' || c == '\n'; }
+bool md_edge(char c) {  // where emphasis may start or end
+    return md_space(c) || std::ispunct(static_cast<unsigned char>(c));
+}
+
+bool md_has_scheme(std::string_view w) {
+    return w.starts_with("http://") || w.starts_with("https://");
+}
+
+// The link target out of "(...)": up to the first space (a title may follow),
+// without <>.
+std::string md_link_target(std::string_view raw) {
+    while(!raw.empty() && md_space(raw.front())) raw.remove_prefix(1);
+    const size_t sp = raw.find_first_of(" \t");
+    if(sp != std::string_view::npos) raw = raw.substr(0, sp);
+    if(raw.size() >= 2 && raw.front() == '<' && raw.back() == '>')
+        raw = raw.substr(1, raw.size() - 2);
+    return std::string(raw);
+}
+
+// Index of the ']' matching the '[' at `i`, or npos.
+size_t md_close_bracket(std::string_view p, size_t i) {
+    int depth = 0;
+    for(size_t j = i; j < p.size(); ++j) {
+        if(p[j] == '\\') ++j;
+        else if(p[j] == '[') ++depth;
+        else if(p[j] == ']' && --depth == 0) return j;
+    }
+    return std::string_view::npos;
+}
+
+// Index of the ')' matching the '(' at `i`, or npos.
+size_t md_close_paren(std::string_view p, size_t i) {
+    int depth = 0;
+    for(size_t j = i; j < p.size(); ++j) {
+        if(p[j] == '\\') ++j;
+        else if(p[j] == '(') ++depth;
+        else if(p[j] == ')' && --depth == 0) return j;
+    }
+    return std::string_view::npos;
+}
+
+// Is there a closer for the marker `m` (1 or 2 chars) opened before `from`?
+bool md_has_closer(std::string_view p, size_t from, std::string_view m) {
+    for(size_t j = from; j + m.size() <= p.size(); ++j) {
+        if(p[j] == '\\') {
+            ++j;
+            continue;
+        }
+        if(p[j] == '`') {  // a code span hides markers; skip it
+            const size_t e = p.find('`', j + 1);
+            if(e == std::string_view::npos) return false;
+            j = e;
+            continue;
+        }
+        if(p.substr(j, m.size()) != m) continue;
+        if(j == from || md_space(p[j - 1])) continue;  // can't close here
+        if(m.size() == 1 && j + 2 <= p.size() && p[j + 1] == p[j]) {
+            ++j;  // part of a "**"
+            continue;
+        }
+        if(m[0] == '_' && j + m.size() < p.size() &&
+           !md_edge(p[j + m.size()]))
+            continue;  // snake_case
+        return true;
+    }
+    return false;
+}
+
+// Splits one paragraph into words with their inline state: `code`, **strong**,
+// *emphasis*, [text](url), <url>, bare http(s):// words, and "\_" escapes.
+void inline_scan(std::string_view p, MdTone base, InlineState st, bool& gap,
+                 std::vector<InlineTok>& toks) {
     std::string word;
-    bool code = false, gap = false;
     const auto flush = [&] {
         if(word.empty()) return;
-        toks.push_back({std::move(word), code ? MdTone::Code : base, gap});
+        InlineTok t{std::move(word), base, gap, st.url, std::nullopt};
         word.clear();
         gap = false;
+        if(st.code) {
+            t.tone = MdTone::Code;
+        } else {
+            if(t.url.empty()) {  // a bare URL, or <url>
+                std::string_view w = t.text;
+                if(w.size() > 2 && w.front() == '<' && w.back() == '>')
+                    w = w.substr(1, w.size() - 2);
+                if(md_has_scheme(w)) {
+                    while(!w.empty() &&
+                          std::string_view(".,;:!?)\"'").find(w.back()) !=
+                              std::string_view::npos)
+                        w.remove_suffix(1);
+                    t.url = std::string(w);
+                }
+            }
+            if(!t.url.empty()) t.tone = MdTone::Link;
+            Style sty{};
+            if(st.strong) style_patch(sty, md_style(MdRole::Strong));
+            if(st.emph) style_patch(sty, md_style(MdRole::Emph));
+            if(!(sty == Style{})) t.style = sty;
+        }
+        toks.push_back(std::move(t));
     };
-    for(size_t i = 0; i < para.size(); ++i) {
-        const char c = para[i];
+    for(size_t i = 0; i < p.size(); ++i) {
+        const char c = p[i];
         if(c == '`') {
             flush();
-            code = !code;
-        } else if(c == ' ') {
+            st.code = !st.code;
+            continue;
+        }
+        if(st.code) {
+            if(c == ' ') {
+                flush();
+                gap = true;
+            } else {
+                word += c;
+            }
+            continue;
+        }
+        if(c == ' ') {
             flush();
             gap = true;
-        } else if(c == '\\' && i + 1 < para.size() &&
-                  std::ispunct(static_cast<unsigned char>(para[i + 1]))) {
-            word += para[++i];
+        } else if(c == '\\' && i + 1 < p.size() &&
+                  std::ispunct(static_cast<unsigned char>(p[i + 1]))) {
+            word += p[++i];
+        } else if(c == '[' && st.url.empty()) {
+            const size_t rb = md_close_bracket(p, i);
+            std::string target;
+            size_t rp = std::string_view::npos;
+            if(rb != std::string_view::npos && rb + 1 < p.size() &&
+               p[rb + 1] == '(') {
+                rp = md_close_paren(p, rb + 1);
+                if(rp != std::string_view::npos)
+                    target = md_link_target(p.substr(rb + 2, rp - rb - 2));
+            }
+            if(target.empty()) {
+                word += c;  // not a link: a literal bracket
+                continue;
+            }
+            flush();
+            InlineState ls = st;
+            ls.url = std::move(target);
+            inline_scan(p.substr(i + 1, rb - i - 1), base, ls, gap, toks);
+            i = rp;
+        } else if(c == '*' || c == '_') {
+            const bool two = i + 1 < p.size() && p[i + 1] == c;
+            const size_t at = i + (two ? 2 : 1);
+            const bool open_ok =
+                (c == '*' || i == 0 || md_edge(p[i - 1])) && at < p.size() &&
+                !md_space(p[at]);
+            const bool close_ok = i > 0 && !md_space(p[i - 1]) &&
+                                  (c == '*' || at >= p.size() || md_edge(p[at]));
+            bool& flag = two ? st.strong : st.emph;
+            const std::string_view m = p.substr(i, two ? 2 : 1);
+            if(flag ? close_ok : open_ok && md_has_closer(p, at, m)) {
+                flush();
+                flag = !flag;
+                if(two) ++i;
+            } else {
+                word += c;
+            }
         } else {
             word += c;
         }
     }
     flush();
+}
+
+// Wraps one paragraph into rows; see inline_scan for what is understood.
+void wrap_para(std::vector<MdRow>& out, std::string_view para, MdTone base,
+               int w, size_t max) {
+    std::vector<InlineTok> toks;
+    bool gap = false;
+    inline_scan(para, base, InlineState{}, gap, toks);
 
     MdRow cur;
     const auto emit = [&] {
         out.push_back(std::move(cur));
         cur = MdRow{};
     };
-    for(Tok& t : toks) {
+    const std::string* last_url = nullptr;
+    for(InlineTok& t : toks) {
         if(out.size() >= max) return;
         std::string tx = fit_cells(t.text, w);
         const int tw = text_width(tx);
@@ -506,9 +662,15 @@ void wrap_para(std::vector<MdRow>& out, std::string_view para, MdTone base,
             gapw = 0;
             if(out.size() >= max) return;
         }
-        if(gapw) cur.segs.push_back({" ", MdTone::Text});
-        cur.segs.push_back({std::move(tx), t.tone});
+        // the space inside one link is part of it, so the underline runs on
+        const bool same_link =
+            !t.url.empty() && last_url && *last_url == t.url;
+        if(gapw)
+            cur.segs.push_back({" ", same_link ? MdTone::Link : MdTone::Text,
+                                std::nullopt, same_link ? t.url : ""});
+        cur.segs.push_back({std::move(tx), t.tone, t.style, t.url});
         cur.width += gapw + tw;
+        last_url = &t.url;
     }
     if(cur.width > 0 && out.size() < max) emit();
 }

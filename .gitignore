@@ -1,8 +1,9 @@
 .cache/
 builddir/
 subprojects/tree-*/
+subprojects/.wraplock
 notes.md
 test.c
 test
-winter_src.tar.gz
+compile_commands.json
 .gitignore

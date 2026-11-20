@@ -409,7 +409,7 @@ void picker_open(PickerSpec spec) {
     P.cand.clear();
     P.cand_all = true;
     P.seen = 0;
-    P.query.clear();
+    P.query = P.spec.query;
     P.last_query.clear();
 
     const int screen_w = editor_screen_cols();
@@ -461,6 +461,7 @@ void picker_open(PickerSpec spec) {
           (title.back() == '>' || title.back() == ' ' || title.back() == ':'))
         title.pop_back();
     P.input = input_open({.prompt = opts.nerdicons ? "\uf002 " : "> ",
+        .initial = P.query,
         .w = w,
             .at = OverlaySpec::At::Screen,
             .x = x,

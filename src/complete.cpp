@@ -1,12 +1,17 @@
 #include "complete.hpp"
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <filesystem>
 #include <functional>
 #include <iterator>
+#include <memory>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,18 +22,21 @@
 #include "core.hpp"
 #include "diag.hpp"
 #include "editor.hpp"
+#include "jumplist.hpp"
 #include "keys.hpp"
 #include "loop.hpp"
 #include "markdown.hpp"
 #include "lsp_client.hpp"
 #include "lsp_sync.hpp"
 #include "multicursor.hpp"
+#include "normal.hpp"
 #include "overlay.hpp"
 #include "piece.hpp"
 #include "snippet.hpp"
 #include "syntax.hpp"
 #include "theme.hpp"
 #include "utf8.hpp"
+#include "window_ed.hpp"
 
 namespace {
 constexpr int kDelayMs = 40;
@@ -927,13 +935,13 @@ bool completion_active() { return S.id != 0; }
 namespace {
 
 // The K hover popup. The rows between rule rows are panes (signature, docs,
-// ...), each with its own height and scroll. K a second time focuses the
-// popup: it turns modal and on_key drives it, vim-window style.
+// ...). Every pane is a real window over its own read-only buffer (drawn by
+// render.cpp inside the popup's frame), so once K focuses the popup, ordinary
+// normal mode drives it: motions, counts, search, visual mode, yank. Only a
+// few keys are the popup's own (see hover_key).
 struct HoverPane {
     size_t first = 0, n = 0;  // rows of HoverWin::lines
     int h = 0;                // visible rows
-    int top = 0, cur = 0;     // scroll offset and cursor row, pane-relative
-    int want = 0;             // wanted cursor column (cells); INT_MAX = line end
 };
 
 struct HoverWin {
@@ -941,11 +949,15 @@ struct HoverWin {
     OverlayId id = 0;
     std::vector<MdRow> lines;
     std::vector<HoverPane> panes;
+    std::vector<Buffer*> bufs;  // live in E.buffers while the popup is open
+    std::vector<win::Win> wins;  // one per pane; never resized after build
+    // styled cell runs, [pane][line]; render.cpp lays them over the drawn text
+    std::vector<std::vector<std::vector<HoverSeg>>> segs;
+    Rect orect{};                // where the frame was drawn last
     size_t focus = 0, prev = 0;
     bool focused = false;
     bool cw = false;  // <C-w> pending
-    bool g = false;   // first g of gg pending
-    Style base, code, head, bul, quo, ring;
+    Style base, ring;
 };
 
 HoverWin g_hw;
@@ -958,25 +970,6 @@ int hover_pane_y(const HoverWin& w, size_t i) {
     int y = 1;
     for(size_t j = 0; j < i; ++j) y += w.panes[j].h + 1;  // +1: the rule
     return y;
-}
-
-int hover_row_width(const HoverWin& w, const HoverPane& p) {
-    int n = 0;
-    for(const MdSeg& s : w.lines[p.first + p.cur].segs) n += text_width(s.text);
-    return n;
-}
-
-// Cursor column on the current row: the wanted column, clamped to the text.
-int hover_col(const HoverWin& w, const HoverPane& p) {
-    return std::clamp(p.want, 0, std::max(0, hover_row_width(w, p) - 1));
-}
-
-void hover_pane_scroll(HoverPane& p) {
-    const int n = static_cast<int>(p.n);
-    p.cur = std::clamp(p.cur, 0, n - 1);
-    if(p.cur < p.top) p.top = p.cur;
-    if(p.cur >= p.top + p.h) p.top = p.cur - p.h + 1;
-    p.top = std::clamp(p.top, 0, std::max(0, n - p.h));
 }
 
 // Splits at the rules and gives each pane a height. The signature pane gets
@@ -1006,7 +999,84 @@ void hover_split(HoverWin& w) {
     }
 }
 
-// Pushes footer, focus ring and hardware cursor to the overlay.
+// One read-only buffer and window per pane. The rows are already wrapped, so
+// a row is a line. Styling is kept beside the buffer, as cell runs, and
+// render.cpp lays it over the text once the pane is drawn: the buffer's own
+// decoration store is not involved, so nothing can wipe it.
+void hover_build(HoverWin& w, const Style& code, const Style& head,
+                 const Style& bul, const Style& quo, const Style& link) {
+    w.wins.assign(w.panes.size(), win::Win{});
+    w.segs.assign(w.panes.size(), {});
+    for(size_t i = 0; i < w.panes.size(); ++i) {
+        const HoverPane& p = w.panes[i];
+        auto b = std::make_unique<Buffer>();
+        b->filename = "[hover]";
+        b->nofile = b->nowrap = b->popup = true;
+        std::string text;
+        for(size_t r = 0; r < p.n; ++r) {
+            if(r) text += '\n';
+            std::vector<HoverSeg> line;
+            int col = 0;
+            for(const MdSeg& s : w.lines[p.first + r].segs) {
+                Style st = s.tone == MdTone::Code      ? code
+                           : s.tone == MdTone::Heading ? head
+                           : s.tone == MdTone::Bullet  ? bul
+                           : s.tone == MdTone::Quote   ? quo
+                           : s.tone == MdTone::Link    ? link
+                                                       : w.base;
+                if(s.style) style_patch(st, *s.style);
+                const int cw = text_width(s.text);
+                line.push_back({col, col + cw, st, s.url});
+                col += cw;
+                text += s.text;
+            }
+            w.segs[i].push_back(std::move(line));
+        }
+        b->orig = std::move(text);
+        b->eol = true;
+        b->pt = PieceTable(std::string_view(b->orig));
+        b->wire();
+        b->pt.locked = true;
+        w.wins[i].buf = b.get();
+        w.bufs.push_back(b.get());
+        E.buffers.push_back(std::move(b));
+    }
+}
+
+// Closing: hand the editor's view registers back to the window that owned
+// them before the pane buffers leave E.buffers (E.cur indexes into it).
+void hover_teardown() {
+    HoverWin& w = g_hw;
+    if(w.focused) {
+        set_mode(EditorMode::NORMAL);
+        normal_reset();
+        win::Win* m = win::focus();
+        win_enter_view(m);
+        win_apply_rect(m);
+    }
+    for(Buffer* b : w.bufs)
+        std::erase_if(E.buffers,
+                      [b](const std::unique_ptr<Buffer>& p) {
+                          return p.get() == b;
+                      });
+    w = HoverWin{};
+}
+
+// Moves focus to another pane: the editor's registers go back into the
+// pane's window and the new one's come in.
+void hover_go(size_t i) {
+    HoverWin& w = g_hw;
+    if(i >= w.panes.size() || i == w.focus) return;
+    set_mode(EditorMode::NORMAL);  // leave visual mode on the old buffer
+    normal_reset();
+    win_leave_view(&w.wins[w.focus]);
+    w.prev = w.focus;
+    w.focus = i;
+    win_enter_view(&w.wins[i]);
+    win_apply_rect(&w.wins[i]);
+}
+
+// Footer and focus ring follow the focused pane.
 void hover_sync() {
     HoverWin& w = g_hw;
     if(!w.id || w.panes.empty()) return;
@@ -1014,11 +1084,11 @@ void hover_sync() {
     std::string foot;
     if(w.focused) {
         if(fp.n > static_cast<size_t>(fp.h))
-            foot = std::format("{}%", (fp.top + fp.h) * 100 /
+            foot = std::format("{}%", (E.cy + 1) * 100 /
                                           static_cast<int>(fp.n));
     } else {
         for(const HoverPane& p : w.panes)
-            if(p.n > static_cast<size_t>(p.h)) foot = "\u2026";  // cut short
+            if(p.n > static_cast<size_t>(p.h)) foot = "\u2026";  // more inside
     }
     const int y = hover_pane_y(w, w.focus);
     const bool focused = w.focused;
@@ -1029,100 +1099,197 @@ void hover_sync() {
         if(focused) s.focus_span = std::pair{y, y + h}, s.focus_border = ring;
         else s.focus_span.reset();
     });
-    if(focused)
-        overlay_set_cursor(w.id, 2 + hover_col(w, fp), y + fp.cur - fp.top);
 }
 
 void hover_focus() {
     HoverWin& w = g_hw;
-    if(!w.id || w.panes.empty()) return;
+    if(!w.id || w.focused || w.panes.empty() || w.orect.w <= 0) return;
+    windows_ensure();
+    set_mode(EditorMode::NORMAL);
+    normal_reset();
+    win_leave_view(win::focus());  // park the editor's own view
     w.focused = true;
     w.focus = w.prev = 0;
-    w.cw = w.g = false;
-    overlay_edit(w.id, [](OverlaySpec& s) {
-        s.modal = true;
-        s.cursor_block = true;
+    w.cw = false;
+    win_enter_view(&w.wins[0]);
+    win_apply_rect(&w.wins[0]);
+    const Rect r = w.orect;
+    overlay_edit(w.id, [&](OverlaySpec& s) {
+        // pinned: the frame must not follow the cursor, which is now the
+        // pane's
+        s.at = OverlaySpec::At::Screen;
+        s.x = r.x;
+        s.y = r.y;
         s.dismiss_on_move = false;
-        s.pass.clear();  // nothing leaks through, ':' included
+        s.esc_closes = false;  // Esc belongs to visual mode and pending keys
+        s.cursor_x = s.cursor_y = -1;
     });
     hover_sync();
 }
 
-// Every key a focused popup gets is consumed, hits and misses alike, so a
-// no-op (<C-w>j on the last pane) never falls through to the editor.
+extern "C" char** environ;
+
+// Hands a web link to the desktop's default handler, detached and without a
+// shell parsing the URL (it travels as $1). Only web and mail links.
+bool open_url(const std::string& url) {
+    const bool ok = url.starts_with("http://") || url.starts_with("https://") ||
+                    url.starts_with("mailto:");
+    if(!ok) return false;
+    const char* argv[] = {"sh", "-c", "xdg-open \"$1\" >/dev/null 2>&1 &",
+                          "sh", url.c_str(), nullptr};
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
+    pid_t pid = 0;
+    const int rc = posix_spawnp(&pid, "sh", nullptr, &attr,
+                                const_cast<char* const*>(argv), environ);
+    posix_spawnattr_destroy(&attr);
+    if(rc != 0) return false;
+    int st = 0;  // the shell backgrounds xdg-open and exits at once
+    while(waitpid(pid, &st, 0) == -1 && errno == EINTR) {}
+    return true;
+}
+
+// A file:// link opens as a buffer. The popup closes first: while it has focus
+// the "current" view is its own, so the file would land in there. Any #fragment
+// (#L12 and the like) is dropped; only the file is opened.
+bool open_file_link(const std::string& url) {
+    std::string_view u = url;
+    if(const size_t h = u.find('#'); h != std::string_view::npos)
+        u = u.substr(0, h);
+    const std::string path = lsp_path(u);
+    std::error_code ec;
+    if(path.empty() || !std::filesystem::is_regular_file(path, ec)) return false;
+    const std::filesystem::path rel =
+        std::filesystem::path(path).lexically_relative(
+            std::filesystem::current_path(ec));
+    const bool inside = !rel.empty() && *rel.begin() != "..";
+    if(g_hw.id) overlay_close(g_hw.id);
+    jump_push();
+    buffer_open(inside ? rel.string() : path);
+    return true;
+}
+
+// The link under the cursor, else the first one on its row (the cursor may sit
+// on the space between two words of it).
+std::string hover_link_at_cursor() {
+    const HoverWin& w = g_hw;
+    if(w.focus >= w.segs.size() || E.cy < 0 ||
+       static_cast<size_t>(E.cy) >= w.segs[w.focus].size())
+        return {};
+    const int col = cx_to_rx(E.buf().pt.line_text(static_cast<size_t>(E.cy)),
+                             E.cx);
+    const HoverSeg* first = nullptr;
+    for(const HoverSeg& s : w.segs[w.focus][static_cast<size_t>(E.cy)]) {
+        if(s.url.empty()) continue;
+        if(col >= s.c0 && col < s.c1) return s.url;
+        if(!first) first = &s;
+    }
+    return first ? first->url : std::string{};
+}
+
+// Keys the popup keeps for itself; everything else is normal mode. Every <C-w>
+// key is consumed, hits and misses alike, so a no-op (<C-w>j on the last pane)
+// never falls through to the editor.
 bool hover_key(int c) {
     HoverWin& w = g_hw;
     if(!w.id || !w.focused || w.panes.empty()) return false;
     const size_t np = w.panes.size();
+    const bool nv = E.mode == EditorMode::NORMAL || E.mode == EditorMode::VISUAL;
 
     if(w.cw) {
         w.cw = false;  // always cleared, hit or miss
-        w.g = false;
         switch(c) {
             case 'j':
-                if(w.focus + 1 < np) w.prev = w.focus, ++w.focus;
+                if(w.focus + 1 < np) hover_go(w.focus + 1);
                 break;
             case 'k':
-                if(w.focus > 0) w.prev = w.focus, --w.focus;
+                if(w.focus > 0) hover_go(w.focus - 1);
                 break;
-            case 'w': w.prev = w.focus, w.focus = (w.focus + 1) % np; break;
-            case 'W':
-                w.prev = w.focus, w.focus = (w.focus + np - 1) % np;
-                break;
-            case 'p': std::swap(w.focus, w.prev); break;
+            case 'w': hover_go((w.focus + 1) % np); break;
+            case 'W': hover_go((w.focus + np - 1) % np); break;
+            case 'p': hover_go(w.prev); break;
             case 'c':
-            case 'q': overlay_close(w.id); return true;
+            case 'q': overlay_close(w.id); break;
             default: break;  // h/l and anything else: no-op
         }
-        hover_sync();
         return true;
     }
-
-    HoverPane& p = w.panes[w.focus];
-    const bool was_g = std::exchange(w.g, false);
-    const int page = std::max(1, p.h), half = std::max(1, p.h / 2);
-    int scroll = 0;  // cursor and view move together
-    switch(c) {
-        case 'q':
-        case '\x1b': overlay_close(w.id); return true;
-        case CTRL_KEY('w'): w.cw = true; return true;
-        case 'j':
-        case ARROW_DOWN: ++p.cur; break;
-        case 'k':
-        case ARROW_UP: --p.cur; break;
-        case CTRL_KEY('d'): scroll = half; break;
-        case CTRL_KEY('u'): scroll = -half; break;
-        case CTRL_KEY('f'):
-        case PAGE_DOWN: scroll = page; break;
-        case CTRL_KEY('b'):
-        case PAGE_UP: scroll = -page; break;
-        case 'h':
-        case ARROW_LEFT: p.want = std::max(0, hover_col(w, p) - 1); break;
-        case 'l':
-        case ARROW_RIGHT: p.want = hover_col(w, p) + 1; break;  // clamped
-        case '0':
-        case HOME: p.want = 0; break;
-        case '$':
-        case END: p.want = INT_MAX; break;
-        case 'G': p.cur = static_cast<int>(p.n) - 1; break;
-        case 'g':
-            if(was_g) p.cur = 0;
-            else w.g = true;
-            break;
-        default: break;
+    if(nv && c == ':') return true;  // no command line over a popup
+    if(nv && !normal_input_pending()) {
+        if(c == CTRL_KEY('w')) return w.cw = true;
+        if(E.mode == EditorMode::NORMAL) {
+            if(c == 'q' || c == '\x1b') {
+                overlay_close(w.id);
+                return true;
+            }
+            if(c == 'K') {  // K on a link opens it
+                const std::string url = hover_link_at_cursor();
+                if(url.empty())
+                    editor_set_status_message("no link on this line");
+                else if(url.starts_with("file://")) {
+                    if(!open_file_link(url))
+                        editor_set_status_message("can't open {}", url);
+                } else if(open_url(url))
+                    editor_set_status_message("opening {}", url);
+                else editor_set_status_message("can't open {}", url);
+                return true;
+            }
+        }
     }
-    p.cur += scroll;
-    p.top += scroll;
-    hover_pane_scroll(p);
-    hover_sync();
-    return true;
+    return false;  // normal mode
 }
 
 }  // namespace
 
+const std::vector<HoverSeg>* hover_line_segs(const win::Win* p, int line) {
+    const HoverWin& w = g_hw;
+    if(!w.id || p < w.wins.data() || p >= w.wins.data() + w.wins.size())
+        return nullptr;
+    const auto& lines = w.segs[static_cast<size_t>(p - w.wins.data())];
+    if(line < 0 || static_cast<size_t>(line) >= lines.size()) return nullptr;
+    return &lines[static_cast<size_t>(line)];
+}
+
+win::Win* hover_live() {
+    return g_hw.id && g_hw.focused ? &g_hw.wins[g_hw.focus] : nullptr;
+}
+
+void hover_dismiss() {
+    if(g_hw.id) overlay_close(g_hw.id);
+}
+
+void hover_tick() {
+    if(!g_hw.id) return;
+    // the pane text is read-only: insert and replace would only refuse keys
+    if(g_hw.focused && (E.mode == EditorMode::INSERT ||
+                        E.mode == EditorMode::REPLACE)) {
+        set_mode(EditorMode::NORMAL);
+    }
+    hover_sync();
+}
+
+std::vector<win::Win*> hover_layout(const Viewport& vp) {
+    HoverWin& w = g_hw;
+    std::vector<win::Win*> out;
+    Rect r{};
+    if(!w.id || !overlay_rect(w.id, vp, r)) return out;
+    w.orect = r;
+    for(size_t i = 0; i < w.panes.size(); ++i) {
+        const int y = r.y + hover_pane_y(w, i);
+        const int h = std::min(w.panes[i].h, vp.text_rows - y);
+        if(h <= 0) continue;
+        w.wins[i].rect = {r.x + 2, y, std::max(r.w - 4, 1), h + 1};  // +status
+        out.push_back(&w.wins[i]);
+    }
+    return out;
+}
+
 void hover_show() {
     if(g_hw.id && !g_hw.focused) {  // K on an open popup: take focus
-        hover_focus();
+        // after this key is done: the focus swaps the editor's view, which
+        // the key loop's bookkeeping must not see half-way
+        loop_post([] { hover_focus(); });
         return;
     }
     Buffer& b = E.buf();
@@ -1175,6 +1342,9 @@ void hover_show() {
             style_patch(head,
                         theme_ui("ui.hover.heading",
                                  md_style(MdRole::Heading)));
+            Style link = base;
+            style_patch(link,
+                        theme_ui("ui.hover.link", md_style(MdRole::Link)));
             Style ring = theme_ui("ui.hover.focus", Style{.fg = 0x89b4fa});
             ring.bg = base.bg;
 
@@ -1183,9 +1353,9 @@ void hover_show() {
             w = HoverWin{};
             w.gen = ++g_hw_gen;
             w.lines = std::move(lines);
-            w.base = base, w.code = code, w.head = head, w.bul = bul;
-            w.quo = quo, w.ring = ring;
+            w.base = base, w.ring = ring;
             hover_split(w);
+            hover_build(w, code, head, bul, quo, link);
 
             // a rule sits on the row after each pane but the last
             std::vector<int> dividers;
@@ -1200,35 +1370,16 @@ void hover_show() {
             o.h = hover_pane_y(w, w.panes.size());  // panes, rules, frame
             o.z = 50;
             o.framed = true;
+            o.show_in_prompt = true;  // stays under a / search prompt
             o.border_style = pop_border(base);
             o.dividers = std::move(dividers);
             o.on_key = hover_key;
             o.on_close = [gen = w.gen] {
-                if(g_hw.gen == gen) g_hw = HoverWin{};
+                if(g_hw.gen == gen) hover_teardown();
             };
-            o.on_paint = [](OverlayId id) {
-                const HoverWin& w = g_hw;
-                if(w.id != id) return;
-                overlay_clear(id, w.base);
-                for(size_t pi = 0; pi < w.panes.size(); ++pi) {
-                    const HoverPane& p = w.panes[pi];
-                    const int y0 = hover_pane_y(w, pi);
-                    for(int r = 0; r < p.h; ++r) {
-                        const size_t li = p.first + p.top + r;
-                        if(li >= p.first + p.n) break;
-                        int x = 2;
-                        for(const MdSeg& s : w.lines[li].segs) {
-                            Style st = s.tone == MdTone::Code      ? w.code
-                                       : s.tone == MdTone::Heading ? w.head
-                                       : s.tone == MdTone::Bullet  ? w.bul
-                                       : s.tone == MdTone::Quote   ? w.quo
-                                                                   : w.base;
-                            if(s.style) style_patch(st, *s.style);
-                            x = overlay_put(id, x, y0 + r, s.text, st);
-                        }
-                    }
-                }
-            };
+            // the frame and background; render.cpp draws the pane windows on
+            // top
+            o.on_paint = [](OverlayId id) { overlay_clear(id, g_hw.base); };
             w.id = overlay_open(std::move(o));
             hover_sync();
         });

@@ -3,14 +3,14 @@
 #include <format>
 #include <memory>
 #include <vector>
+#include "buflist.hpp"
 #include "command.hpp"
 #include "diag.hpp"
 #include "editor.hpp"
 #include "json.hpp"
 #include "lsp_apply.hpp"
-#include "buflist.hpp"
-#include "lsp_nav.hpp"
 #include "lsp_client.hpp"
+#include "lsp_nav.hpp"
 #include "lsp_sync.hpp"
 #include "picker.hpp"
 #include "piece.hpp"
@@ -23,13 +23,17 @@ bool supported(const Json& v) {
 }
 
 Json pos_json(const PieceTable& pt, size_t off, bool utf16) {
-    return Json::obj(
-        {{"line", pt.line_of(off)}, {"character", lsp_col(pt, off, utf16)}});
+    return Json::obj({
+        {"line", pt.line_of(off)},
+        {"character", lsp_col(pt, off, utf16)}
+    });
 }
 
 Json range_json(const PieceTable& pt, size_t s, size_t e, bool utf16) {
-    return Json::obj(
-        {{"start", pos_json(pt, s, utf16)}, {"end", pos_json(pt, e, utf16)}});
+    return Json::obj({
+        {"start", pos_json(pt, s, utf16)},
+        {"end",   pos_json(pt, e, utf16)}
+    });
 }
 
 void request_range(const PieceTable& pt, size_t& s, size_t& e) {
@@ -58,7 +62,9 @@ bool stale(const ActionCtx& c) {
 }
 
 void execute(LspId server, const Json& command) {
-    Json p = Json::obj({{"command", std::string(command["command"].as_str())}});
+    Json p = Json::obj({
+        {"command", std::string(command["command"].as_str())}
+    });
     if(command["arguments"].is_array())
         p.set("arguments", command["arguments"]);
     lsp_request(
@@ -101,18 +107,18 @@ void run(const ActionCtx& c, const Json& action) {
         finish(c, action);
         return;
     }
-    lsp_request(
-        c.server,
-        "codeAction/resolve",
-        action,
-        [c](const Json& r, const Json& err) {
-            if(stale(c)) return;
-            if(!err.is_null() || !r.is_object()) {
-                editor_set_status_message("code action: resolve failed");
-                return;
-            }
-            finish(c, r);
-        });
+    lsp_request(c.server,
+                "codeAction/resolve",
+                action,
+                [c](const Json& r, const Json& err) {
+                    if(stale(c)) return;
+                    if(!err.is_null() || !r.is_object()) {
+                        editor_set_status_message(
+                            "code action: resolve failed");
+                        return;
+                    }
+                    finish(c, r);
+                });
 }
 
 void show_menu(const ActionCtx& c, const Json& result) {
@@ -179,10 +185,11 @@ void lsp_code_action() {
         diags.push(std::move(j));
     }
 
-    Json params = Json::obj(
-        {{"textDocument", Json::obj({{"uri", doc->uri}})},
-         {"range", range_json(pt, s, e, doc->utf16)},
-         {"context", Json::obj({{"diagnostics", std::move(diags)}})}});
+    Json params = Json::obj({
+        {"textDocument", Json::obj({{"uri", doc->uri}})},
+        {"range", range_json(pt, s, e, doc->utf16)},
+        {"context", Json::obj({{"diagnostics", std::move(diags)}})}
+    });
 
     const ActionCtx c{&b, pt.revision(), doc->server};
     lsp_request(
@@ -204,7 +211,9 @@ void lsp_code_action() {
 void lsp_actions_register() {
     lsp_on_request("workspace/applyEdit", [](LspId id, const Json& p) {
         const ApplyResult r = lsp_apply_workspace_edit(id, p["edit"]);
-        Json out = Json::obj({{"applied", r.ok}});
+        Json out = Json::obj({
+            {"applied", r.ok}
+        });
         if(!r.ok) out.set("failureReason", r.error);
         else
             editor_set_status_message(
@@ -212,26 +221,34 @@ void lsp_actions_register() {
         return out;
     });
     lsp_on("window/showMessage", [](LspId, const Json& p) {
-        editor_set_status_message("lsp: {}", std::string(p["message"].as_str()));
+        editor_set_status_message("lsp: {}",
+                                  std::string(p["message"].as_str()));
     });
     lsp_on("window/logMessage", [](LspId, const Json&) {});
 
     lsp_on_request("window/showDocument", [](LspId id, const Json& p) {
-        if(p["external"].as_bool()) return Json::obj({{"success", false}});
+        if(p["external"].as_bool())
+            return Json::obj({
+                {"success", false}
+            });
         const std::string path = lsp_path(p["uri"].as_str());
         const bool focus = p.has("takeFocus") ? p["takeFocus"].as_bool() : true;
-        if(!focus) return Json::obj({{"success", buffer_get(path) != nullptr}});
+        if(!focus)
+            return Json::obj({
+                {"success", buffer_get(path) != nullptr}
+            });
         const Json& st = p["selection"]["start"];
         lsp_show_location(path,
                           static_cast<size_t>(st["line"].as_int()),
                           static_cast<size_t>(st["character"].as_int()),
                           lsp_encoding(id) != "utf-8");
-        return Json::obj({{"success", true}});
+        return Json::obj({
+            {"success", true}
+        });
     });
 
     lsp_on_request_async(
-        "window/showMessageRequest",
-        [](LspId, const Json& p, LspRespond done) {
+        "window/showMessageRequest", [](LspId, const Json& p, LspRespond done) {
             const Json& acts = p["actions"];
             if(!acts.is_array() || acts.items().empty()) {
                 done(Json());
@@ -241,9 +258,8 @@ void lsp_actions_register() {
             auto answered = std::make_shared<bool>(false);
             std::vector<PickItem> rows;
             for(const Json& a : acts.items()) {
-                rows.push_back(
-                    {.text = std::string(a["title"].as_str()),
-                        .id = titles->size()});
+                rows.push_back({.text = std::string(a["title"].as_str()),
+                                .id = titles->size()});
                 titles->push_back(rows.back().text);
             }
             PickerSpec s;
@@ -251,7 +267,9 @@ void lsp_actions_register() {
             s.fuzzy = false;
             s.on_accept = [=](const PickItem& it) {
                 *answered = true;
-                done(Json::obj({{"title", (*titles)[it.id]}}));
+                done(Json::obj({
+                    {"title", (*titles)[it.id]}
+                }));
             };
             s.on_close = [=] {
                 if(!*answered) done(Json());

@@ -1,3 +1,4 @@
+#include "complete.hpp"
 #include "buflist.hpp"
 #include <charconv>
 #include <cstddef>
@@ -98,6 +99,7 @@ void buffer_entered(Buffer& b) {
 }
 
 void buffer_switch(size_t idx) {
+    hover_dismiss();  // its pane buffers live in E.buffers
     switch_to(idx);
     prune_scratch();
 }

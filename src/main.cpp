@@ -1,5 +1,7 @@
+#include <string_view>
 #include <vector>
 #include "buflist.hpp"
+#include "doc_core.hpp"
 #include "builtin.hpp"
 #include "editor.hpp"
 #include "events.hpp"
@@ -35,6 +37,9 @@ void init_editor() {
 }
 
 int main(int argc, const char* argv[]) {
+    // headless helpers for :DocInstall / :DocUpdate (the job runs this binary)
+    if(argc > 1 && std::string_view(argv[1]).starts_with("--doc-"))
+        return doc::cli_main(argc, argv);
     enable_raw_mode();
     tmux_announce(true);
     std::atexit([] { tmux_announce(false); });

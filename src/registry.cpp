@@ -2,9 +2,18 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <iterator>
+#include <map>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+#include "core.hpp"
 #include "keys.hpp"
+#include "motion.hpp"
 
 Registry& registry() {
     static Registry r;
@@ -85,7 +94,9 @@ Hit lookup_in(const KeyMap& map, std::u32string_view keys) {
 }
 }  // namespace
 
-Hit Registry::lookup(EditorMode m, std::u32string_view keys, uint64_t buf) const {
+Hit Registry::lookup(EditorMode m,
+                     std::u32string_view keys,
+                     uint64_t buf) const {
     if(keys.empty()) return {};
     Hit g;
     if(const auto km = keymaps_.find(m); km != keymaps_.end())
@@ -100,13 +111,17 @@ Hit Registry::lookup(EditorMode m, std::u32string_view keys, uint64_t buf) const
     return h;
 }
 
-void Registry::map_local(uint64_t buf, EditorMode m, KeySeq keys,
+void Registry::map_local(uint64_t buf,
+                         EditorMode m,
+                         KeySeq keys,
                          std::string action) {
     if(!buf || keys.empty()) return;
     local_[buf][m][std::move(keys)] = std::move(action);
 }
 
-bool Registry::unmap_local(uint64_t buf, EditorMode m, std::u32string_view keys) {
+bool Registry::unmap_local(uint64_t buf,
+                           EditorMode m,
+                           std::u32string_view keys) {
     const auto b = local_.find(buf);
     if(b == local_.end()) return false;
     const auto km = b->second.find(m);
@@ -119,7 +134,8 @@ bool Registry::unmap_local(uint64_t buf, EditorMode m, std::u32string_view keys)
     return true;
 }
 
-Hit Registry::lookup_local(uint64_t buf, EditorMode m,
+Hit Registry::lookup_local(uint64_t buf,
+                           EditorMode m,
                            std::u32string_view keys) const {
     const auto b = local_.find(buf);
     if(b == local_.end()) return {};
@@ -149,7 +165,8 @@ std::vector<Registry::MapEntry> Registry::local_maps(uint64_t buf) const {
     std::vector<MapEntry> out;
     if(const auto b = local_.find(buf); b != local_.end())
         for(const auto& [mode, km] : b->second)
-            for(const auto& [keys, action] : km) out.push_back({mode, keys, action});
+            for(const auto& [keys, action] : km)
+                out.push_back({mode, keys, action});
     return out;
 }
 
@@ -160,16 +177,25 @@ struct NamedKey {
 };
 // canonical names first: format_keys() prints the first match
 constexpr NamedKey kNamed[] = {
-    {"Esc", 27},          {"CR", '\r'},
-    {"Tab", '\t'},        {"BS", BACKSPACE},
-    {"Space", ' '},       {"lt", '<'},
-    {"Up", ARROW_UP},     {"Down", ARROW_DOWN},
-    {"Left", ARROW_LEFT}, {"Right", ARROW_RIGHT},
-    {"Home", HOME},       {"End", END},
-    {"PageUp", PAGE_UP},  {"PageDown", PAGE_DOWN},
-    {"Del", DELETE},      {"C-BS", CTRL_BACKSPACE},
-    {"Enter", '\r'},      {"Return", '\r'},
-    {"Delete", DELETE},
+    {"Esc",      27            },
+    {"CR",       '\r'          },
+    {"Tab",      '\t'          },
+    {"BS",       BACKSPACE     },
+    {"Space",    ' '           },
+    {"lt",       '<'           },
+    {"Up",       ARROW_UP      },
+    {"Down",     ARROW_DOWN    },
+    {"Left",     ARROW_LEFT    },
+    {"Right",    ARROW_RIGHT   },
+    {"Home",     HOME          },
+    {"End",      END           },
+    {"PageUp",   PAGE_UP       },
+    {"PageDown", PAGE_DOWN     },
+    {"Del",      DELETE        },
+    {"C-BS",     CTRL_BACKSPACE},
+    {"Enter",    '\r'          },
+    {"Return",   '\r'          },
+    {"Delete",   DELETE        },
 };
 
 bool iequals(std::string_view a, std::string_view b) {

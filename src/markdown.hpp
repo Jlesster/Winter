@@ -98,12 +98,13 @@ Style md_fill_style(MdRole role, int level = 0);  // bg of a `fill` span
 
 // ---- float backend -------------------------------------------------------
 
-enum class MdTone : uint8_t { Text, Code, Heading, Bullet, Quote };
+enum class MdTone : uint8_t { Text, Code, Heading, Bullet, Quote, Link };
 
 struct MdSeg {
     std::string text;
     MdTone tone;
     std::optional<Style> style;  // syntax colour, patched over the tone's look
+    std::string url;             // a link's target; empty = not a link
 };
 
 struct MdRow {

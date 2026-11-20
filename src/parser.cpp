@@ -209,6 +209,17 @@ export GIT_TERMINAL_PROMPT=0
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+# Fail with the tool's name up front: on NixOS none of these is guaranteed to
+# be in PATH, and "cc: not found" halfway through a build is easy to miss.
+need() {
+    command -v "$1" >/dev/null 2>&1 || {
+        echo "$NAME: '$1' not found in PATH (NixOS: nix-shell -p $2; Arch: pacman -S $3)"
+        exit 1; }
+}
+need git git git
+need curl curl curl
+need "${CC:-cc}" gcc gcc
+
 D="${XDG_DATA_HOME:-$HOME/.local/share}/winter/queries"
 N=https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/main/runtime/queries
 for l in c cpp java lua rust ecma jsx html_tags; do
@@ -237,10 +248,10 @@ if [ ! -f src/parser.c ]; then
     elif [ -f grammar.js ]; then gen=
     else echo "$NAME: no src/parser.c and no grammar to generate it from"; exit 1; fi
     command -v tree-sitter >/dev/null 2>&1 || {
-        echo "$NAME: repo has no src/parser.c; install the tree-sitter CLI to generate it"
+        echo "$NAME: repo has no src/parser.c; install the tree-sitter CLI to generate it (NixOS: nix-shell -p tree-sitter nodejs; Arch: pacman -S tree-sitter-cli nodejs)"
         exit 1; }
     if [ -z "$gen" ]; then command -v node >/dev/null 2>&1 || {
-        echo "$NAME: generating from grammar.js needs node"; exit 1; }; fi
+        echo "$NAME: generating from grammar.js needs node (NixOS: nix-shell -p nodejs; Arch: pacman -S nodejs)"; exit 1; }; fi
     echo "generating $NAME"
     tree-sitter generate --abi "$ABI" $gen >"$tmp/gen.log" 2>&1 || {
         echo "$NAME: tree-sitter generate failed: $(tail -n 1 "$tmp/gen.log")"; exit 1; }

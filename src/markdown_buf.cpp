@@ -1,6 +1,7 @@
 // Buffer backend: decorates markdown buffers from md_parse().
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <map>
 #include <string>
 #include <string_view>
@@ -183,6 +184,60 @@ struct ViewBuilder {
         if(hi > lo) add(line_at(lo), lo, hi, {});
     }
 
+    // The converter's anchor tag: a trailing " {#id}" on a heading or term
+    // line ("# std::vector {#firstHeading}", "**T** {#T}"). find_anchor and
+    // link jumps need it in the file, a reader does not need to see it.
+    void conceal_anchor(size_t li, size_t lo, size_t hi) {
+        const std::string_view t = src.substr(lo, hi - lo);
+        if(t.size() < 5 || t.back() != '}') return;
+        const size_t at = t.rfind(" {#");
+        if(at == std::string_view::npos) return;
+        const std::string_view id = t.substr(at + 3, t.size() - at - 4);
+        if(id.empty() || id.find_first_of(" {}") != std::string_view::npos) return;
+        add(li, lo + at, hi, {});
+    }
+
+    // "(since C++17)", "(until C++11)", "(removed in C++20)" ... end index of
+    // the group starting at s[i] == '(', or 0.
+    static size_t version_end(std::string_view s, size_t i) {
+        static constexpr std::string_view kLead[] = {
+            "(since ", "(until ", "(removed in ", "(deprecated in ",
+            "(constexpr since "};
+        bool ok = false;
+        for(const std::string_view k : kLead)
+            if(s.compare(i, k.size(), k) == 0) ok = true;
+        if(!ok) return 0;
+        const size_t close = s.find(')', i);
+        if(close == std::string_view::npos || close - i > 48) return 0;
+        if(s.substr(i, close - i).find_first_of("[]`") != std::string_view::npos)
+            return 0;
+        return close + 1;
+    }
+
+    // Version tags read as annotations, not prose: restyle them in place.
+    void versions() {
+        const Style st = theme_ui("md.version", Style{.fg = 0x6c7086, .attrs = ATTR_ITALIC});
+        std::vector<std::pair<size_t, size_t>> code;  // inline `code` content
+        for(const MdSpan& sp : d.spans)
+            if(sp.role == MdRole::Code && !sp.marker) code.emplace_back(sp.lo, sp.hi);
+        for(size_t i = 0; i < d.lines.size(); ++i) {
+            const MdLine& l = d.lines[i];
+            if(skip[i]) continue;
+            if(l.kind != MdBlock::Text && l.kind != MdBlock::Bullet &&
+               l.kind != MdBlock::Quote)
+                continue;
+            for(size_t p = src.find('(', l.cl); p < l.ch && p != std::string_view::npos;
+                p = src.find('(', p + 1)) {
+                const size_t e = version_end(src.substr(0, l.ch), p);
+                if(!e) continue;
+                const auto it = std::ranges::upper_bound(code, p, {}, &std::pair<size_t, size_t>::first);
+                if(it != code.begin() && p < std::prev(it)->second) continue;
+                add(i, p, e, std::string(src.substr(p, e - p)), st);
+                p = e - 1;
+            }
+        }
+    }
+
     static const CalloutDef* find_callout(std::string_view kind) {
         std::string low(kind);
         for(char& c : low)
@@ -229,8 +284,11 @@ struct ViewBuilder {
             switch(l.kind) {
                 case MdBlock::Blank:
                 case MdBlock::CodeLine: break;
-                case MdBlock::Text: break;
+                case MdBlock::Text:
+                    if(src.compare(l.tl, 2, "**") == 0) conceal_anchor(i, l.tl, l.th);
+                    break;
                 case MdBlock::Heading: {
+                    conceal_anchor(i, l.cl, l.ch);
                     if(!nf || l.level < 1 || l.level > 6) break;
                     const Style hs = md_style(MdRole::Heading, l.level);
                     add(i, l.tl, l.cl, std::string(kHeadIcons[l.level - 1]),
@@ -537,6 +595,7 @@ void md_build_view(std::string_view src, const MdDoc& d, MdState& m,
     vb.blocks();
     vb.tables();
     vb.inlines();
+    vb.versions();
     m.line_first.clear();
     m.edits.clear();
     m.line_first.reserve(vb.per.size() + 1);

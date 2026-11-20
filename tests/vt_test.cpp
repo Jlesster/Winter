@@ -45,30 +45,30 @@ static std::string dump(const Vt& v) {
     return s;
 }
 
-#define CHECK(cond)                                                     \
-    do {                                                                \
-        ++g_run;                                                        \
-        if(!(cond)) {                                                   \
-            ++g_fail;                                                   \
-            std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-        }                                                               \
+#define CHECK(cond)                                                            \
+    do {                                                                       \
+        ++g_run;                                                               \
+        if(!(cond)) {                                                          \
+            ++g_fail;                                                          \
+            std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);        \
+        }                                                                      \
     } while(0)
 
-#define CHECK_EQ(a, b)                                                  \
-    do {                                                                \
-        ++g_run;                                                        \
-        const auto _a = (a);                                            \
-        const auto _b = (b);                                            \
-        if(!(_a == _b)) {                                               \
-            ++g_fail;                                                   \
-            std::printf(                                                \
-                "FAIL %s:%d  %s\n  got:      [%s]\n  expected: [%s]\n", \
-                __FILE__,                                               \
-                __LINE__,                                               \
-                #a,                                                     \
-                std::string(_a).c_str(),                                \
-                std::string(_b).c_str());                               \
-        }                                                               \
+#define CHECK_EQ(a, b)                                                         \
+    do {                                                                       \
+        ++g_run;                                                               \
+        const auto _a = (a);                                                   \
+        const auto _b = (b);                                                   \
+        if(!(_a == _b)) {                                                      \
+            ++g_fail;                                                          \
+            std::printf(                                                       \
+                "FAIL %s:%d  %s\n  got:      [%s]\n  expected: [%s]\n",        \
+                __FILE__,                                                      \
+                __LINE__,                                                      \
+                #a,                                                            \
+                std::string(_a).c_str(),                                       \
+                std::string(_b).c_str());                                      \
+        }                                                                      \
     } while(0)
 
 static void test_basic() {
@@ -111,9 +111,8 @@ static void test_cursor_erase() {
 
 static void test_sgr() {
     Vt v(2, 20);
-    v.feed(
-        "\x1b[1;31mA\x1b[0mB\x1b[38;5;196mC\x1b[38;2;1;2;3mD\x1b[48:2::9:8:"
-        "7mE\x1b[4:3mF\x1b[mG");
+    v.feed("\x1b[1;31mA\x1b[0mB\x1b[38;5;196mC\x1b[38;2;1;2;3mD\x1b[48:2::9:8:"
+           "7mE\x1b[4:3mF\x1b[mG");
     CHECK(v.cell(0, 0).st.attrs & ATTR_BOLD);
     CHECK(v.cell(0, 0).st.fg == 0xf38ba8);
     CHECK(v.cell(0, 1).st == Style{});
@@ -166,9 +165,8 @@ static void test_chars() {
 
 static void test_utf8_wide() {
     Vt v(2, 6);
-    v.feed(
-        "a\xE4\xB8\xAD"
-        "b");  // a 中 b
+    v.feed("a\xE4\xB8\xAD"
+           "b");  // a 中 b
     CHECK(v.cell(0, 1).w == 2 && v.cell(0, 2).w == 0);
     CHECK(v.cursor().x == 4);
     CHECK_EQ(dump(v),
@@ -211,10 +209,9 @@ static void test_charset() {
     v.feed("\x1b(0lqk\x1b(Bq");
     CHECK_EQ(dump(v), "\xE2\x94\x8C\xE2\x94\x80\xE2\x94\x90q\n");
     Vt s(1, 8);
-    s.feed(
-        "\x1b)0\x0e"
-        "q\x0f"
-        "q");  // G1 = graphics, SO, q, SI, q
+    s.feed("\x1b)0\x0e"
+           "q\x0f"
+           "q");  // G1 = graphics, SO, q, SI, q
     CHECK_EQ(dump(s), "\xE2\x94\x80q\n");
 }
 
@@ -244,11 +241,10 @@ static void test_osc_replies_modes() {
     CHECK(v.take_bell());
     // unknown sequences are swallowed, not printed
     Vt u(1, 20);
-    u.feed(
-        "a\x1bP1$rq\x1b\\"
-        "b\x1b_apc\x1b\\"
-        "c\x1b[?99;99;y"
-        "d");
+    u.feed("a\x1bP1$rq\x1b\\"
+           "b\x1b_apc\x1b\\"
+           "c\x1b[?99;99;y"
+           "d");
     CHECK_EQ(dump(u), "abcd\n");
 }
 

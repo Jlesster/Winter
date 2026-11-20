@@ -65,12 +65,14 @@ std::vector<TreeLine> g_lines;
 size_t g_sel = 0, g_top = 0;
 bool g_shown = false, g_hidden = false;
 int g_cols = 0;
+bool g_wide = false;  // `e`: widen the pane to fit the longest visible row
 bool g_vis = false;  // v range: g_anchor .. g_sel
 fs::path g_anchor;
 
 bool focused() { return E.mode == FILES; }
 void focus(bool on) {
     g_vis = false;
+    if(!on) g_wide = false;
     if(on) set_mode(FILES);
     else if(E.mode == FILES) set_mode(NORMAL);
 }
@@ -885,6 +887,7 @@ const Action kActions[] = {
     {0, "o Enter", "Open file / toggle dir", nullptr},
     {0, ". Bksp", "Root into dir / up a level", nullptr},
     {0, "H R", "Toggle hidden / refresh", nullptr},
+    {0, "e", "Widen pane to longest name / revert", nullptr},
 };
 constexpr size_t kNActions = std::size(kActions);
 
@@ -1001,10 +1004,36 @@ void tree_goto(long row) {
         std::clamp<long>(row, 0, static_cast<long>(g_rows.size()) - 1));
 }
 
+namespace {
+
+// display width of a row as tree_view draws it: guide + icon + name (+ '/')
+int row_width(const Row& r) {
+    const Node& n = *r.n;
+    std::string_view icon =
+        n.dir ? (n.open ? icons().dir_open : icons().dir) : file_icon(n.name);
+    if(opts.nerdicons)
+        while(!icon.empty() && icon.back() == ' ') icon.remove_suffix(1);
+    int w = text_width(r.guide) + text_width(icon) + (opts.nerdicons ? 1 : 0) +
+            text_width(n.name);
+    if(n.dir && &n != g_root.get()) ++w;  // trailing '/'
+    return w;
+}
+
+}  // namespace
+
 void tree_layout(int total_cols) {
-    g_cols = (g_shown && total_cols >= 50)
-                 ? std::min(opts.tree_width, total_cols / 3) + 1
-                 : 0;
+    if(!g_shown || total_cols < 50) {
+        g_cols = 0;
+        return;
+    }
+    int w = std::min(opts.tree_width, total_cols / 3);
+    if(g_wide) {
+        int longest = 0;
+        for(const Row& r : g_rows) longest = std::max(longest, row_width(r));
+        // longest + 1, but never swallow the whole screen
+        w = std::clamp(longest + 1, w, total_cols - 10);
+    }
+    g_cols = w + 1;  // + separator
 }
 
 int tree_cols() { return g_cols; }
@@ -1095,6 +1124,7 @@ bool tree_key(int c) {
         case ARROW_LEFT:
             if(n) collapse_or_parent(n);
             break;
+        case 'e': g_wide = !g_wide; break;
         case 'H':
             g_hidden = !g_hidden;
             refresh();

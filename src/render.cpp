@@ -1,12 +1,13 @@
 #include "render.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
+#include <format>
 #include <functional>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -15,23 +16,29 @@
 #include "buflist.hpp"
 #include "columns.hpp"
 #include "command.hpp"
+#include "complete.hpp"
 #include "diag.hpp"
 #include "dock.hpp"
 #include "editor.hpp"
 #include "events.hpp"
 #include "fold_buf.hpp"
-#include "glyphs.hpp"
 #include "gutter.hpp"
 #include "lsp_sync.hpp"
 #include "marks.hpp"
 #include "multicursor.hpp"
 #include "normal.hpp"
 #include "options.hpp"
-#include "output.hpp"
 #include "overlay.hpp"
 #include "prompt.hpp"
 #include "search.hpp"
 #include "snippet.hpp"
+#include "src/core.hpp"
+#include "src/fold.hpp"
+#include "src/grapheme.hpp"
+#include "src/markdown.hpp"
+#include "src/piece.hpp"
+#include "src/registry.hpp"
+#include "src/window.hpp"
 #include "statusline.hpp"
 #include "terminal.hpp"
 #include "theme.hpp"
@@ -119,7 +126,10 @@ Style style_at(const std::vector<Span>& spans, size_t pos) {
     return pos < s.end ? s.st : Style{};
 }
 
-void put_eols(int y, std::string_view line, int g, std::vector<EolItem>& items,
+void put_eols(int y,
+              std::string_view line,
+              int g,
+              std::vector<EolItem>& items,
               int col_off) {
     std::ranges::stable_sort(items, std::greater<>{}, &EolItem::prio);
     const int end_x =
@@ -134,7 +144,7 @@ void put_eols(int y, std::string_view line, int g, std::vector<EolItem>& items,
 // Display-only indent leads: one chevron at the start of every indent level.
 // Purely a screen-cell paint; the buffer is never touched.
 void put_indent_leads(int y, std::string_view line, int x0, int s0, int cols) {
-    if(!opts.indent_leads) return;
+    if(!opts.indent_leads || E.buf().popup) return;  // not in hover panes
     int ind = 0;
     bool blank = true;
     for(const char ch : line) {
@@ -160,9 +170,15 @@ void put_indent_leads(int y, std::string_view line, int x0, int s0, int cols) {
     }
 }
 
-void put_line(int y, std::string_view line, int col_off, int cols, int x0,
-              const std::vector<Span>& spans = {}, size_t sel_lo = 0,
-              size_t sel_hi = 0, const std::vector<LineSpan>& runs = {}) {
+void put_line(int y,
+              std::string_view line,
+              int col_off,
+              int cols,
+              int x0,
+              const std::vector<Span>& spans = {},
+              size_t sel_lo = 0,
+              size_t sel_hi = 0,
+              const std::vector<LineSpan>& runs = {}) {
     x0 += g_px;
     const Style ctl = theme_ui("ui.ctrl", Style{.attrs = ATTR_REVERSE});
     const Style vis = theme_ui("ui.visual", Style{.attrs = ATTR_REVERSE});
@@ -214,6 +230,7 @@ void put_line(int y, std::string_view line, int col_off, int cols, int x0,
 
 // output
 int gutter() {
+    if(E.buf().popup) return 0;  // hover panes are bare text
     return std::min(gutter_width(E.num_rows()), std::max(E.term_cols - 1, 0));
 }
 int text_cols() { return std::max(E.term_cols - gutter(), 1); }
@@ -358,7 +375,7 @@ void editor_scroll() {
     const int total = F.visible_count(E.num_rows());
     const int so = std::min(opts.scrolloff, (E.term_rows - 1) / 2);
     const int bot = std::min(opts.scrolloff, E.term_rows - 1 - so);
-    const int pad = opts.scrolleof ? bot : 0;
+    const int pad = opts.scrolleof && !E.buf().popup ? bot : 0;
     if(opts.wrap) {
         scroll_wrapped(so, bot, pad);
         return;
@@ -370,7 +387,9 @@ void editor_scroll() {
     if(cur > off + E.term_rows - 1 - bot) off = cur - (E.term_rows - 1 - bot);
     off = std::clamp(off, 0, std::max(0, total + pad - E.term_rows));
     E.row_offset = F.line_at_row(off);
-    if(g_crx < E.col_offset) { E.col_offset = g_crx; }
+    if(g_crx < E.col_offset) {
+        E.col_offset = g_crx;
+    }
     if(g_crx >= E.col_offset + text_cols()) {
         E.col_offset = g_crx - text_cols() + 1;
     }
@@ -530,9 +549,15 @@ void editor_draw_rows() {
                                    Style{.attrs = ATTR_BOLD})
                         : theme_ui("ui.linenr", Style{.attrs = ATTR_DIM});
                 put_text(0, y, gutter_label(file_row, E.cy, g), g, gst);
-                if(const auto mk = mark_rows.find(static_cast<size_t>(file_row));
-                   mk != mark_rows.end())  // mark letter over the gutter's last column
-                    put_text(g - 1, y, std::string(1, mk->second), 1,
+                if(const auto mk =
+                       mark_rows.find(static_cast<size_t>(file_row));
+                   mk !=
+                   mark_rows
+                       .end())  // mark letter over the gutter's last column
+                    put_text(g - 1,
+                             y,
+                             std::string(1, mk->second),
+                             1,
                              theme_ui("ui.mark", Style{.attrs = ATTR_BOLD}));
             }
             size_t lo = 0, hi = 0;
@@ -649,10 +674,10 @@ void editor_draw_rows() {
                             : theme_ui(
                                   "ui.fold",
                                   Style{.fg = 0x6c7086, .attrs = ATTR_ITALIC});
-                    fold_vt = {
-                        fold_text(
-                            sp->head, sp->end, opts.nerdicons ? "\uf141" : "⋯"),
-                        fst};
+                    fold_vt = {fold_text(sp->head,
+                                         sp->end,
+                                         opts.nerdicons ? "\uf141" : "⋯"),
+                               fst};
                     const std::string closer = fold_closer(sp->head, sp->end);
                     // first, next to the head; the closer follows one space on
                     eols.push_back({INT_MAX, &fold_vt, closer.empty() ? 0 : 1});
@@ -709,7 +734,7 @@ struct ScreenPos {
 
 // The extra cursors (and their visual selections) as styled cells.
 void draw_extra_cursors() {
-    if(!mc_active()) return;
+    if(!mc_active() || hover_live()) return;
     const win::Win* fw = win::focus();
     const int ox = fw ? fw->rect.x : tree_cols();
     const int oy = fw ? fw->rect.y : 0;
@@ -758,7 +783,8 @@ void draw_extra_cursors() {
 }
 
 ScreenPos cursor_screen() {
-    const win::Win* fw = win::focus();
+    // a focused hover pane owns the view registers, and sits at its own rect
+    const win::Win* fw = hover_live() ? hover_live() : win::focus();
     const int ox = fw ? fw->rect.x : tree_cols();
     const int oy = fw ? fw->rect.y : 0;
     const int base = ox + gutter();
@@ -806,18 +832,25 @@ constexpr uint32_t kUnset = 0xFFFFFFFF;
 
 // Draws (or just measures) one side of the bar. Left blocks are followed by
 // an arrow into the next block (or the bar), right blocks are preceded by one.
-int draw_side(int y, int x, const std::vector<StatusItem>& items,
-              uint32_t bar_bg, std::string_view glyph, bool left, bool draw) {
+int draw_side(int y,
+              int x,
+              const std::vector<StatusItem>& items,
+              uint32_t bar_bg,
+              std::string_view glyph,
+              bool left,
+              bool draw) {
     const int x0 = x;
     uint32_t prev = left ? kUnset : bar_bg;
     const auto boundary = [&](uint32_t from, uint32_t to) {
         if(glyph.empty() || from == kUnset || to == kUnset || from == to)
             return;
         if(draw)
-            scr.at(x, y) = Cell{utf8_decode(glyph, 0).cp,
-                                1,
-                                left ? Style{.fg = from, .bg = to}
-                                     : Style{.fg = to, .bg = from}};
+            scr.at(x, y) = Cell{
+                utf8_decode(glyph, 0).cp,
+                1,
+                left ? Style{.fg = from, .bg = to  }
+                     : Style{.fg = to,   .bg = from}
+            };
         ++x;
     };
     const auto emit = [&](std::string_view text, const Style& st) {
@@ -921,7 +954,8 @@ void editor_draw_status_bar(bool active) {
         return draw_side(y, 0, L, bar.bg, lg, true, false) +
                draw_side(y, 0, R, bar.bg, rg, false, false);
     };
-    while(total() + 1 > scr.width() && drop_one(L, R)) {}
+    while(total() + 1 > scr.width() && drop_one(L, R)) {
+    }
 
     const int lw = draw_side(y, 0, L, bar.bg, lg, true, true);
     const int rw = draw_side(y, 0, R, bar.bg, rg, false, false);
@@ -991,6 +1025,55 @@ void emit_change_events() {
     last_cy = E.cy;
 }
 
+namespace {
+
+// The K popup's panes: real windows over their own buffers, drawn on top of
+// the frame the overlay just painted (overlay_draw would wipe them if they
+// went first). The focused one owns the view registers and is drawn live.
+void draw_hover_windows(const Viewport& vp) {
+    const std::vector<win::Win*> panes = hover_layout(vp);
+    if(panes.empty()) return;
+    win::Win* live = hover_live() ? hover_live() : win::focus();
+    const EditorMode real_mode = E.mode;
+    win_leave_view(live);
+    for(win::Win* p : panes) {
+        const bool act = p == hover_live();
+        win_enter_view(p);
+        win_apply_rect(p);
+        E.mode = act ? real_mode : NORMAL;
+        g_win_active = act;
+        if(!act) win_clamp_view();
+        E.buf().sync_anchors();
+        editor_scroll();
+        scr.set_viewport(p->rect.x, p->rect.y, p->rect.w, p->rect.h - 1);
+        editor_draw_rows();
+        // The popup's own styling goes under whatever the row drawing set
+        // (cursorline, selection, search): ours first, theirs patched on top.
+        for(int y = 0; y < p->rect.h - 1; ++y) {
+            const auto* segs = hover_line_segs(p, E.row_offset + y);
+            if(!segs) continue;
+            for(const HoverSeg& sg : *segs)
+                for(int c = sg.c0; c < sg.c1; ++c) {
+                    const int x = c - E.col_offset;
+                    if(x < 0 || x >= p->rect.w) continue;
+                    Cell& cell = scr.at(x, y);
+                    Style st = sg.st;
+                    style_patch(st, cell.style);
+                    cell.style = st;
+                }
+        }
+        scr.clear_viewport();
+        win_leave_view(p);
+    }
+    E.mode = real_mode;
+    g_win_active = true;
+    win_enter_view(live);
+    win_apply_rect(live);
+    editor_scroll();
+}
+
+}  // namespace
+
 void editor_refresh_screen() {
     if(resize_pending()) {
         resize_ack();  // clear first: a resize during the query re-arms it
@@ -1019,13 +1102,17 @@ void editor_refresh_screen() {
     }
     lsp_sync_tick();
     emit_change_events();
+    hover_tick();
     scr.clear();
     {
         win::Win* fw = win::focus();
+        // With a hover pane focused the view registers are the pane's; the
+        // tiled windows then all draw as inactive from their parked views.
+        win::Win* live = hover_live() ? hover_live() : fw;
         const EditorMode real_mode = E.mode;
-        win_leave_view(fw);
+        win_leave_view(live);
         for(win::Win* w : win::all()) {
-            const bool act = w == fw;
+            const bool act = w == live;
             win_enter_view(w);
             win_apply_rect(w);
             E.mode = act ? real_mode : NORMAL;
@@ -1047,10 +1134,10 @@ void editor_refresh_screen() {
         }
         E.mode = real_mode;
         g_win_active = true;
-        win_enter_view(fw);
-        win_apply_rect(fw);
+        win_enter_view(live);
+        win_apply_rect(live);
         editor_scroll();  // g_crx and E.rx for the focused window again
-        win_set_hint(cursor_screen().x, cursor_screen().y);
+        if(live == fw) win_set_hint(cursor_screen().x, cursor_screen().y);
         draw_extra_cursors();
     }
     overlay_tick();
@@ -1066,10 +1153,10 @@ void editor_refresh_screen() {
                       .cur_x = cp.x,
                       .cur_y = cp.y};
     overlay_draw(scr, vp, pv.active);
+    draw_hover_windows(vp);
     int ox = 0, oy = 0;
     bool ov_block = false;
-    const bool ov_cur =
-        !pv.active && overlay_cursor(vp, ox, oy, &ov_block);
+    const bool ov_cur = !pv.active && overlay_cursor(vp, ox, oy, &ov_block);
     // A focused panel that hides its cursor (a terminal can) leaves the text
     // cursor where it was.
     int dx = 0, dy = 0;
@@ -1087,7 +1174,7 @@ void editor_refresh_screen() {
     scr.cursor(sx, sy);
     // text-entry overlays get the insert bar; a block overlay (the focused
     // hover popup) reads like normal mode
-    set_cursor_for_mode(ov_cur && ov_block ? NORMAL
+    set_cursor_for_mode(ov_cur && ov_block    ? NORMAL
                         : pv.active || ov_cur ? INSERT
                                               : E.mode);
     // Cursor colour. Never "unset" while cursor_inverse is on: OSC 112 hands

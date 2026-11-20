@@ -4,3 +4,10 @@ option(
   value: ['lua', 'c', 'cpp', 'java', 'rust'],
   description: 'tree-sitter grammars to build and link',
 )
+
+option(
+  'winter_confdir',
+  type: 'string',
+  value: '/etc/xdg/winter',
+  description: 'Where bundled Lua config and themes are installed and searched',
+)

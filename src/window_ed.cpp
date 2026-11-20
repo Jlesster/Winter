@@ -9,6 +9,7 @@
 
 #include "buflist.hpp"
 #include "command.hpp"
+#include "complete.hpp"
 #include "dock.hpp"
 #include "editor.hpp"
 #include "events.hpp"
@@ -152,6 +153,7 @@ void win_set_hint(int x, int y) {
 
 void win_focus_window(Win* target) {
     windows_ensure();
+    hover_dismiss();  // a hover pane owns the view registers
     Win* from = win::focus();
     if(!target || target == from) return;
     set_mode(EditorMode::NORMAL);
@@ -173,6 +175,7 @@ void win_focus_window(Win* target) {
 
 bool win_navigate(Dir d) {
     windows_ensure();
+    hover_dismiss();  // a hover pane owns the view registers
     if(tree_focused()) {
         if(d == Dir::Right) {
             tree_focus(false);
@@ -203,6 +206,7 @@ bool win_navigate(Dir d) {
 
 bool win_split(bool vertical, bool before) {
     windows_ensure();
+    hover_dismiss();  // a hover pane owns the view registers
     set_mode(EditorMode::NORMAL);
     normal_reset();
     win_leave_view(win::focus());  // the new window copies the view
@@ -213,6 +217,7 @@ bool win_split(bool vertical, bool before) {
 
 void win_only() {
     windows_ensure();
+    hover_dismiss();  // a hover pane owns the view registers
     std::vector<int> gone;
     for(const Win* w : win::all())
         if(w != win::focus()) gone.push_back(w->id);
@@ -222,6 +227,7 @@ void win_only() {
 
 bool win_close_current(bool force) {
     windows_ensure();
+    hover_dismiss();  // a hover pane owns the view registers
     if(win::count() <= 1) return false;
     Win* w = win::focus();
     Buffer& b = E.buf();
@@ -272,6 +278,7 @@ void win_buffer_replaced(Buffer* from, Buffer* to) {
 
 bool win_do(char key, int count) {
     windows_ensure();
+    hover_dismiss();  // a hover pane owns the view registers
     const int n = std::max(count, 1);
     const auto& ws = win::all();
     const auto at =

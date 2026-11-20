@@ -60,6 +60,8 @@ struct Rect {
 };
 
 Rect overlay_place(const OverlaySpec& s, const Viewport& v);
+// Where an open overlay is drawn on `v`; false when it isn't open.
+bool overlay_rect(OverlayId id, const Viewport& v, Rect& out);
 
 OverlayId overlay_open(OverlaySpec spec);
 // Changes an open overlay's spec in place (e.g. to make it modal). The cell

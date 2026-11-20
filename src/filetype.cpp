@@ -7,6 +7,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <system_error>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -47,6 +48,25 @@ constexpr Pair kNames[] = {
     {".zshenv", "zsh"},
     {".zprofile", "zsh"},
     {".zlogin", "zsh"},
+    {".zlogout", "zsh"},
+    {".zsh_aliases", "zsh"},
+    {".zsh_functions", "zsh"},
+    // no leading dot: stow/home-manager sources, /etc/zshrc, /etc/bashrc
+    {"zshrc", "zsh"},
+    {"zshenv", "zsh"},
+    {"zprofile", "zsh"},
+    {"zlogin", "zsh"},
+    {"zlogout", "zsh"},
+    {"bashrc", "bash"},
+    {"bash.bashrc", "bash"},
+    {"bash_profile", "bash"},
+    {"bash_aliases", "bash"},
+    {"profile", "bash"},
+    {".xinitrc", "bash"},
+    {".xprofile", "bash"},
+    {".xsession", "bash"},
+    {".envrc", "bash"},
+    {"config.fish", "fish"},
     {"tmux.conf", "tmux"},
     {".tmux.conf", "tmux"},
     {"dockerfile", "dockerfile"},
@@ -62,6 +82,10 @@ constexpr Pair kPrefixes[] = {
     {"dockerfile.", "dockerfile"},
     {"containerfile.", "dockerfile"},
     {"makefile.", "make"},
+    {"tmux.conf.", "tmux"},
+    {".tmux.conf.", "tmux"},
+    {".zshrc.", "zsh"},
+    {".bashrc.", "bash"},
 };
 
 constexpr Pair kExts[] = {
@@ -205,6 +229,297 @@ std::string shebang_interp(std::string_view l) {
     return p;
 }
 
+// ---- directory, wrapper and content rules -----------------------------------
+// The nearest directory in this list decides the language of a file the
+// extension can't place (~/.config/zsh/aliases, tmux/keys.conf, fish/functions/x).
+struct DirRule {
+    std::string_view dir, lang;
+};
+constexpr DirRule kDirs[] = {
+    {"zsh", "zsh"},   {".zsh", "zsh"},   {"zshrc.d", "zsh"},
+    {"bash", "bash"}, {".bash", "bash"}, {"bashrc.d", "bash"},
+    {"bash-completion", "bash"},         {"profile.d", "bash"},
+    {"fish", "fish"},
+    {"tmux", "tmux"}, {".tmux", "tmux"},
+};
+
+// Extensions that say "a config of the directory's kind", not a language.
+bool generic_ext(std::string_view e) {
+    for(std::string_view g : {"", ".conf", ".local", ".inc", ".bak", ".orig",
+                              ".old", ".dist", ".example", ".sample", ".tmpl"})
+        if(e == g) return true;
+    return false;
+}
+
+bool shellish(std::string_view l) {
+    return l == "bash" || l == "zsh" || l == "fish";
+}
+
+std::string_view fallback_for(std::string_view l) {
+    for(const auto& [a, b] : kFallback)
+        if(l == a) return b;
+    return {};
+}
+
+// Absolute so a bare "aliases" opened from ~/.config/zsh still sees the
+// directory; nothing here touches the disk except the cwd lookup.
+std::string_view by_dir(std::string_view path, std::string* hit = nullptr) {
+    std::error_code ec;
+    const std::filesystem::path p =
+        std::filesystem::absolute(std::filesystem::path(path), ec);
+    if(ec) return {};
+    const std::string name = p.filename().string();
+    // README, LICENSE, COPYING: all-caps names are prose, not scripts
+    if(name.empty() || std::ranges::none_of(name, [](unsigned char c) {
+           return std::islower(c);
+       }))
+        return {};
+    if(!generic_ext(lower(p.extension().string()))) return {};
+    for(auto d = p.parent_path(); d.has_relative_path(); d = d.parent_path()) {
+        const std::string c = lower(d.filename().string());
+        for(const DirRule& r : kDirs)
+            if(c == r.dir) {
+                if(hit) *hit = c;
+                return r.lang;
+            }
+    }
+    return {};
+}
+
+// ".conf" of "statusbar.conf"; empty for "zshrc" and for dotfiles (".zshrc").
+std::string ext_of(const std::string& lb) {
+    const size_t d = lb.rfind('.');
+    return d == std::string::npos || d == 0 ? std::string() : lb.substr(d);
+}
+
+// /nix/store/<32 char hash>-tmux.conf -> tmux.conf
+std::string_view unstore(std::string_view b) {
+    if(b.size() > 33 && b[32] == '-' &&
+       std::ranges::all_of(b.substr(0, 32), [](unsigned char c) {
+           return std::isalnum(c);
+       }))
+        return b.substr(33);
+    return b;
+}
+
+// foo.zsh.bak -> foo.zsh, tmux.conf.local -> tmux.conf, .zshrc~ -> .zshrc
+std::string_view unwrap(std::string_view b) {
+    for(std::string_view s : {".local", ".bak", ".orig", ".old", ".dist",
+                              ".example", ".sample", ".tmpl", "~"})
+        if(b.size() > s.size() && b.ends_with(s))
+            return b.substr(0, b.size() - s.size());
+    return b;
+}
+
+// The file name as written, without a store hash, without a backup/override
+// suffix; lower-cased and de-duplicated.
+std::vector<std::string> variants(std::string_view base) {
+    std::vector<std::string> v;
+    const auto add = [&](std::string_view s) {
+        std::string l = lower(s);
+        if(!l.empty() && std::ranges::find(v, l) == v.end())
+            v.push_back(std::move(l));
+    };
+    const std::string_view u = unstore(base);
+    add(base);
+    add(u);
+    add(unwrap(u));
+    return v;
+}
+
+// The name rules for one spelling of the file name, in two passes around the
+// directory rules.
+//   strict: exact names, prefixes, extensions we ship, and (for a specific
+//           extension) the file-types installed grammars declare
+//   loose:  what is left: for a generic or missing extension the grammars'
+//           own file-types ("conf", "config", "rc" are claimed by half the
+//           grammars out there), then the synced linguist extensions
+// A generic extension (.conf, .local, ...) says "a config file", not which
+// one, so it has to meet the directory and the content before the guesses.
+std::string by_base(const std::string& lb, bool loose, std::string* why) {
+    const bool generic = generic_ext(ext_of(lb));
+    const auto got = [&](std::string l, const char* w) {
+        if(why) *why = w;
+        return l;
+    };
+    if(loose) {
+        if(generic)
+            if(const auto l = parser_lang_for_file(lb); !l.empty())
+                return got(std::string(l), "grammar file-types");
+        for(size_t d = lb.find('.', 1); d != std::string::npos;
+            d = lb.find('.', d + 1))
+            if(const auto* l = find(g_t.gexts, lb.substr(d)))
+                return got(*l, "linguist extension");
+        return {};
+    }
+    if(const auto* l = find(g_t.names, lb)) return got(*l, "file name");
+    if(const auto* l = find(g_t.gnames, lb)) return got(*l, "linguist file name");
+    for(const auto& [pre, lang] : kPrefixes)
+        if(lb.starts_with(pre)) return got(std::string(lang), "file name prefix");
+    // longest extension first: foo.d.ts tries ".d.ts" then ".ts"
+    for(size_t d = lb.find('.', 1); d != std::string::npos;
+        d = lb.find('.', d + 1))
+        if(const auto* l = find(g_t.exts, lb.substr(d)))
+            return got(*l, "extension");
+    if(!generic)
+        if(const auto l = parser_lang_for_file(lb); !l.empty())
+            return got(std::string(l), "grammar file-types");
+    return {};
+}
+
+struct PathHit {
+    std::string lang;
+    std::string why;
+    bool dir = false;    // decided by the directory only
+    bool loose = false;  // a guess for a generic extension
+    // weak hits can be overruled by what the file says about itself
+    bool weak() const { return dir || loose; }
+};
+
+PathHit by_path(std::string_view path) {
+    const std::string_view base = path.substr(
+        path.rfind('/') == std::string_view::npos ? 0 : path.rfind('/') + 1);
+    if(base.empty()) return {};
+    const std::vector<std::string> vs = variants(base);
+    std::string why;
+    for(const std::string& v : vs)
+        if(std::string l = by_base(v, false, &why); !l.empty())
+            return {std::move(l), why, false, false};
+    std::string dn;
+    if(const auto l = by_dir(path, &dn); !l.empty())
+        return {std::string(l), "directory '" + dn + "'", true, false};
+    for(const std::string& v : vs)
+        if(std::string l = by_base(v, true, &why); !l.empty())
+            return {std::move(l), why, false, generic_ext(ext_of(v))};
+    return {};
+}
+
+// Dotfile managers link into the store (or a dotfiles repo): when the link's
+// own spelling says nothing, the target's name and directory may.
+PathHit by_path_follow(std::string_view path) {
+    std::string cur(path);
+    for(int hop = 0;; ++hop) {
+        PathHit h = by_path(cur);
+        if(!h.lang.empty() && hop > 0) h.why += " of the symlink target";
+        if(!h.lang.empty() || hop >= 4) return h;
+        std::error_code ec;
+        const std::filesystem::path p(cur);
+        if(!std::filesystem::is_symlink(p, ec)) return {};
+        std::filesystem::path t = std::filesystem::read_symlink(p, ec);
+        if(ec) return {};
+        if(t.is_relative()) t = p.parent_path() / t;
+        cur = t.lexically_normal().string();
+    }
+}
+
+// "#!/usr/bin/env zsh", "#!/nix/store/<hash>-bash-5.2/bin/bash", and
+// "#! nix-shell -i python3 -p ..." (the -i interpreter is the language).
+std::string by_shebang(std::string_view head) {
+    const auto lookup = [](const std::string& in) -> std::string {
+        if(const auto* l = find(g_t.interps, in)) return *l;
+        if(const auto* l = find(g_t.ginterps, in)) return *l;
+        return {};
+    };
+    const std::string in = shebang_interp(head.substr(0, head.find('\n')));
+    if(in.empty()) return {};
+    if(in != "nix-shell") return lookup(in);
+    for(size_t pos = 0; pos < head.size();) {
+        size_t e = head.find('\n', pos);
+        if(e == std::string_view::npos) e = head.size();
+        const std::string_view line = head.substr(pos, e - pos);
+        pos = e + 1;
+        const size_t i = line.find(" -i ");
+        if(!line.starts_with("#!") || i == std::string_view::npos) continue;
+        std::string_view rest = line.substr(i + 4);
+        while(rest.starts_with(' ')) rest.remove_prefix(1);
+        rest = rest.substr(0, rest.find(' '));
+        return lookup(shebang_interp("#!/usr/bin/env " + std::string(rest)));
+    }
+    return {};
+}
+
+// "# vim: set ft=zsh :" in the first lines. Only languages we know, so a
+// stray "ft=conf" can't switch highlighting off.
+std::string by_modeline(std::string_view head) {
+    int seen = 0;
+    for(size_t pos = 0; pos < head.size() && seen < 5; ++seen) {
+        size_t e = head.find('\n', pos);
+        if(e == std::string_view::npos) e = head.size();
+        const std::string_view line = head.substr(pos, e - pos);
+        pos = e + 1;
+        if(line.find("vim:") == std::string_view::npos &&
+           line.find("vi:") == std::string_view::npos &&
+           line.find("ex:") == std::string_view::npos)
+            continue;
+        for(std::string_view key : {"filetype=", "ft="}) {
+            const size_t k = line.find(key);
+            if(k == std::string_view::npos ||
+               (k > 0 && std::isalnum(static_cast<unsigned char>(line[k - 1]))))
+                continue;
+            const size_t s = k + key.size();
+            size_t t = s;
+            while(t < line.size() &&
+                  (std::isalnum(static_cast<unsigned char>(line[t])) ||
+                   line[t] == '_' || line[t] == '-' || line[t] == '+'))
+                ++t;
+            if(t == s) continue;
+            std::string l = alias_of(std::string(line.substr(s, t - s)));
+            if(parser_known(l) || parser_builtin(l)) return l;
+        }
+    }
+    return {};
+}
+
+// Constructs only one language has; weakest signal, used when nothing better
+// placed the file.
+std::string by_sniff(std::string_view head, std::string_view ext) {
+    const std::string h = "\n" + std::string(head);
+    const auto any = [&](std::initializer_list<std::string_view> ks) {
+        for(std::string_view k : ks)
+            if(h.find(k) != std::string::npos) return true;
+        return false;
+    };
+    if(any({"\n#compdef", "\n#autoload", "\nsetopt ", "\nunsetopt ",
+            "\nzstyle ", "\nbindkey ", "\nzmodload ", "\nemulate "}))
+        return "zsh";
+    if(ext == ".conf" &&
+       any({"\nset -g ", "\nset -ga ", "\nset-option ", "\nbind-key ",
+            "\nsource-file ", "\nset-window-option ", "\nsetw "}))
+        return "tmux";
+    if(any({"\nshopt "})) return "bash";
+    return {};
+}
+
+// The language the file is, alias-resolved but not fallback-resolved. `why`
+// names the rule that decided it (for :ft).
+std::string wanted(std::string_view path, std::string_view head,
+                   std::string* why = nullptr) {
+    if(!g_t_ok) load();
+    const auto done = [&](std::string l, std::string w) {
+        if(why) *why = std::move(w);
+        return alias_of(std::move(l));
+    };
+    if(std::string m = by_modeline(head); !m.empty())
+        return done(std::move(m), "modeline");
+    PathHit r = by_path_follow(path);
+    if(const std::string s = by_shebang(head); !s.empty()) {
+        // a shebang is stronger than a directory, a guess for a generic
+        // extension, or a sibling shell's extension
+        if(r.lang.empty() || r.weak() || (shellish(r.lang) && shellish(s)))
+            return done(s, "shebang");
+    } else if(r.lang.empty() || r.weak()) {
+        const std::string ext =
+            lower(std::filesystem::path(path).extension().string());
+        const std::string n = by_sniff(head, ext);
+        // the directory only gives way to a language of the same family
+        if(!n.empty() &&
+           (r.lang.empty() || r.loose || (shellish(r.lang) && shellish(n))))
+            return done(n, "file content");
+    }
+    if(r.lang.empty()) return {};
+    return done(std::move(r.lang), std::move(r.why));
+}
+
 }  // namespace
 
 namespace ft {
@@ -212,39 +527,38 @@ namespace ft {
 std::string normalize(std::string s) {
     s = alias_of(std::move(s));
     if(parser_usable(s)) return s;
-    for(const auto& [a, b] : kFallback)
-        if(s == a && parser_usable(b)) return std::string(b);
+    std::string_view alt = fallback_for(s);
+    for(int i = 0; i < 4 && !alt.empty(); ++i, alt = fallback_for(alt))
+        if(parser_usable(alt)) return std::string(alt);
     return s;
 }
 
-std::string_view detect(std::string_view path, std::string_view first_line) {
-    if(!g_t_ok) load();
-    const auto resolved = [](const std::string& lang) {
-        return intern(normalize(lang));
-    };
-    const std::string_view base = path.substr(
-        path.rfind('/') == std::string_view::npos ? 0 : path.rfind('/') + 1);
-    if(!base.empty()) {
-        const std::string lb = lower(base);
-        if(const auto* l = find(g_t.names, lb)) return resolved(*l);
-        if(const auto* l = find(g_t.gnames, lb)) return resolved(*l);
-        for(const auto& [pre, lang] : kPrefixes)
-            if(lb.starts_with(pre)) return resolved(std::string(lang));
-        // longest extension first: foo.d.ts tries ".d.ts" then ".ts"
-        for(size_t d = lb.find('.', 1); d != std::string::npos;
-            d = lb.find('.', d + 1))
-            if(const auto* l = find(g_t.exts, lb.substr(d))) return resolved(*l);
-        if(const auto l = parser_lang_for_file(base); !l.empty())
-            return resolved(std::string(l));
-        for(size_t d = lb.find('.', 1); d != std::string::npos;
-            d = lb.find('.', d + 1))
-            if(const auto* l = find(g_t.gexts, lb.substr(d))) return resolved(*l);
-    }
-    if(const std::string in = shebang_interp(first_line); !in.empty()) {
-        if(const auto* l = find(g_t.interps, in)) return resolved(*l);
-        if(const auto* l = find(g_t.ginterps, in)) return resolved(*l);
-    }
-    return {};
+std::string_view detect(std::string_view path, std::string_view head) {
+    const std::string w = wanted(path, head);
+    return w.empty() ? std::string_view{} : intern(normalize(w));
+}
+
+std::string explain(std::string_view path, std::string_view head) {
+    std::string why;
+    const std::string w = wanted(path, head, &why);
+    if(w.empty()) return "none (no rule matched)";
+    const Resolved r = resolve(path, head);
+    std::string o = w + " via " + why + "; parser: ";
+    if(r.use.empty()) o += parser_known(w) ? "not installed" : "none exists";
+    else if(r.use == r.want) o += std::string(r.use);
+    else o += std::string(r.use) + " (fallback, " + w + " not installed)";
+    return o;
+}
+
+Resolved resolve(std::string_view path, std::string_view head) {
+    const std::string w = wanted(path, head);
+    if(w.empty()) return {};
+    const std::string_view want = intern(w);
+    if(parser_usable(want)) return {want, want};
+    std::string_view alt = fallback_for(want);
+    for(int i = 0; i < 4 && !alt.empty(); ++i, alt = fallback_for(alt))
+        if(parser_usable(alt)) return {want, alt};
+    return {want, {}};
 }
 
 void invalidate() { g_t_ok = false; }

@@ -2,6 +2,8 @@
 // Everything the editor can *do* is a named action; keys are data that point
 // at action names. Lua and operators will use the same tables.
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <optional>
@@ -11,6 +13,7 @@
 
 #include "core.hpp"
 #include "motion.hpp"
+#include "piece.hpp"
 
 using KeySeq = std::u32string;
 
@@ -19,8 +22,8 @@ struct Range {
     bool linewise = false;
 };
 using Operator = std::function<void(const Range&)>;
-using ObjectFn = std::function<std::optional<Range>(const PieceTable&,
-                                                    size_t pos, int count)>;
+using ObjectFn = std::function<std::optional<Range>(
+    const PieceTable&, size_t pos, int count)>;
 
 struct Ctx {
     int count = 0;  // 0 = no count typed
@@ -63,7 +66,8 @@ public:
     // ---- buffer-local keymaps (`buf` must not be 0)
     void map_local(uint64_t buf, EditorMode m, KeySeq keys, std::string action);
     bool unmap_local(uint64_t buf, EditorMode m, std::u32string_view keys);
-    Hit lookup_local(uint64_t buf, EditorMode m, std::u32string_view keys) const;
+    Hit
+    lookup_local(uint64_t buf, EditorMode m, std::u32string_view keys) const;
     // Forget every local map of `buf` (it was closed); returns the actions they
     // pointed at, one per map, so anonymous ones can be released.
     std::vector<std::string> drop_local(uint64_t buf);
@@ -73,8 +77,8 @@ public:
         KeySeq keys;
         std::string action;
     };
-    std::vector<MapEntry> maps(EditorMode m) const;         // the global ones
-    std::vector<MapEntry> local_maps(uint64_t buf) const;   // one buffer's
+    std::vector<MapEntry> maps(EditorMode m) const;        // the global ones
+    std::vector<MapEntry> local_maps(uint64_t buf) const;  // one buffer's
 
     void add_operator(std::string name, Operator fn);
     const Operator* op(std::string_view name) const;
@@ -89,7 +93,8 @@ private:
     std::map<std::string, Entry, std::less<>> actions_;
     std::map<std::string, motion::Fn, std::less<>> motions_;
     std::map<EditorMode, std::map<KeySeq, std::string, std::less<>>> keymaps_;
-    std::map<uint64_t, std::map<EditorMode, std::map<KeySeq, std::string, std::less<>>>>
+    std::map<uint64_t,
+             std::map<EditorMode, std::map<KeySeq, std::string, std::less<>>>>
         local_;
     std::map<std::string, Operator, std::less<>> ops_;
     std::map<std::string, ObjectFn, std::less<>> objects_;

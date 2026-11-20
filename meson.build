@@ -1,7 +1,7 @@
 project(
   'winter',
   ['c', 'cpp'],
-  version: '0.1.1',
+  version: '0.1.2',
   default_options: [
     'cpp_std=c++23',
     'warning_level=3',
@@ -46,7 +46,7 @@ configure_file(
 
 add_project_arguments('-DWINTER_TS_LANGS(X)=' + ' '.join(lang_syms), language: 'cpp')
 
-confdir = get_option('prefix') / get_option('sysconfdir') / 'xdg' / 'winter'
+confdir = get_option('winter_confdir')
 add_project_arguments('-DWINTER_CONFDIR="@0@"'.format(confdir), language: 'cpp')
 
 deps = [
@@ -67,6 +67,10 @@ sources = files(
   'src/comment.cpp',
   'src/complete.cpp',
   'src/diag.cpp',
+  'src/doc.cpp',
+  'src/doc_ast.cpp',
+  'src/doc_core.cpp',
+  'src/doc_html.cpp',
   'src/dock.cpp',
   'src/edit.cpp',
   'src/edit_bus.cpp',

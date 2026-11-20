@@ -55,6 +55,9 @@ struct Options {
     bool hl_trailing = false;     // highlight trailing whitespace
     bool format_on_save = false;  // run the formatter before every write
     bool hot_reload = true;       // config auto reload on file watch
+    bool save_html = false;       // :DocInstall/:DocUpdate keep the original HTML
+    bool doc_breaks = true;       // :Doc pages: one sentence per line when shown
+    int doc_table_width = 0;      // :Doc tables wider than this become lists (0 = window)
     int indent_namespace = 2;     // 0 flat, 1 indent 2 follow block first line
     int indent_case = 2;          // 0 flat, 1 indent 2 follow block first line
     int colorcolumn = 0;          // 1-based display column to tint, 0 = off
@@ -68,6 +71,7 @@ struct Options {
     int history = 500;          // history entries per file
     int number_width = 4;       // gutter width
     int tree_width = 30;        // columns, before the separator
+    int ts_autoinstall = 1;  // build a missing tree-sitter parser when a file wants it
     int tmux_nav = 1;     // CTRL-W h/j/k/l continue into tmux panes at the edge
     int tmux_wrap = 0;    // ... and wrap around the tmux window
     int resize_step = 1;  // cells per resize bind trigger multiplied by count

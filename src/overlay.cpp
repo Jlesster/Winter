@@ -152,6 +152,13 @@ Rect overlay_place(const OverlaySpec& s, const Viewport& v) {
     return r;
 }
 
+bool overlay_rect(OverlayId id, const Viewport& v, Rect& out) {
+    const Overlay* o = find(id);
+    if(!o) return false;
+    out = overlay_place(o->spec, v);
+    return true;
+}
+
 OverlayId overlay_open(OverlaySpec spec) {
     spec.w = std::max(spec.w, 1);
     spec.h = std::max(spec.h, 1);

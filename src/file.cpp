@@ -9,11 +9,13 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <set>
 #include <string>
 
 #include "columns.hpp"
 #include "events.hpp"
 #include "external.hpp"
+#include "filetype.hpp"
 #include "format.hpp"
 #include "editor.hpp"
 #include "lsp_sync.hpp"
@@ -29,21 +31,60 @@
 // file io
 
 std::string buffer_head(const Buffer& b) {
-    return b.pt.text(0, std::min<size_t>(b.pt.line_end(0), 256));
+    return b.pt.text(0, std::min<size_t>(b.pt.size(), 1024));
+}
+
+// A language is wanted but has no grammar yet: build it in the background
+// (opt ts_autoinstall), once per session per language, also after a failure so
+// a missing compiler or tree-sitter CLI doesn't retry on every file open.
+static void ensure_parser(std::string_view lang) {
+    static std::set<std::string, std::less<>> tried;
+    const std::string l(lang);
+    if(opts.ts_autoinstall == 0 || !tried.insert(l).second) {
+        editor_set_status_message("No {} parser: :TSInstall {}", l, l);
+        return;
+    }
+    const JobId id = parser_install(
+        l,
+        [l](std::string_view line) {
+            editor_set_status_message("TSInstall {}: {}", l, line);
+        },
+        [l](bool ok, std::string msg) {
+            if(!ok) {
+                editor_set_status_message("TSInstall {} failed: {}", l, msg);
+                return;
+            }
+            buffer_reattach_syntax(l);
+            editor_set_status_message("TSInstall {}: installed", l);
+        });
+    if(!id) editor_set_status_message("No {} parser: :TSInstall {}", l, l);
 }
 
 void buffer_detect_syntax(Buffer& b) {
     if(b.nofile) return;
     const std::string head = buffer_head(b);
-    if(b.syntax.attach(b.filename, head)) {
+    const ft::Resolved r = ft::resolve(b.filename, head);
+    if(r.use.empty()) {
+        b.syntax.attach({});  // drop a stale tree (renamed file, new filetype)
+    } else if(b.syntax.attach_lang(r.use)) {
         b.syntax.parse(b.pt, b.eol);
         EventBufScope scope(&b);
         events_emit("file_type", {b.filename, std::string(b.syntax.lang())});
-        return;
     }
-    const auto l = Syntax::detect(b.filename, head);
-    if(!l.empty() && parser_known(l) && !parser_installed(l))
-        editor_set_status_message("No {} parser: :TSInstall {}", l, l);
+    // the file is zsh/fish/tmux but only a close grammar (or none) is there
+    if(!r.want.empty() && r.want != r.use && parser_known(r.want) &&
+       !parser_installed(r.want))
+        ensure_parser(r.want);
+}
+
+void buffer_reattach_syntax(std::string_view lang) {
+    for(auto& b : E.buffers) {
+        if(b->nofile) continue;
+        const ft::Resolved r = ft::resolve(b->filename, buffer_head(*b));
+        if(r.want != lang && r.use != lang) continue;
+        if(!r.use.empty() && b->syntax.attach_lang(r.use))
+            b->syntax.parse(b->pt, b->eol);
+    }
 }
 
 bool buffer_set_filetype(Buffer& b, std::string_view lang) {

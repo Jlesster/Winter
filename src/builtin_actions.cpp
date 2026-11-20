@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include "doc.hpp"
 
 #include "buflist.hpp"
 #include "builtin.hpp"
@@ -51,6 +52,7 @@ void enter_visual(bool line) {
 // move the cursor, then start inserting there
 void enter_insert_at(int cx) {
     E.cx = cx;
+    update_want();
     set_mode(INSERT);
 }
 
@@ -257,11 +259,18 @@ void register_builtin_actions() {
         },
         ":");
 
-    bind_key("lsp.hover", [](Ctx&) { hover_show(); }, "K");
+    bind_key(
+        "lsp.hover",
+        [](Ctx&) {
+            if(doc_follow_link())
+                return;  // inside the :Doc split K follows links
+            hover_show();
+        },
+        "K");
     bind_key(
         "lsp.definition", [](Ctx&) { lsp_goto(NavKind::Definition); }, "gd");
     bind_key(
-        "lsp.definition", [](Ctx&) { lsp_goto(NavKind::Declaration); }, "gD");
+        "lsp.declaration", [](Ctx&) { lsp_goto(NavKind::Declaration); }, "gD");
     bind_key(
         "lsp.type_definition",
         [](Ctx&) { lsp_goto(NavKind::TypeDefinition); },
@@ -309,30 +318,43 @@ void register_builtin_actions() {
         bool prog;
     };
     static constexpr WinKey kWin[] = {
-        {"win.left", 'h'},      {"win.down", 'j'},
-        {"win.up", 'k'},        {"win.right", 'l'},
-        {"win.split", 's'},     {"win.vsplit", 'v'},
-        {"win.close", 'c'},     {"win.only", 'o'},
-        {"win.next", 'w'},      {"win.prev", 'W'},
-        {"win.last", 'p'},      {"win.swap", 'x'},
-        {"win.rotate", 'r'},    {"win.rotate_back", 'R'},
-        {"win.move_left", 'H'}, {"win.move_bottom", 'J'},
-        {"win.move_top", 'K'},  {"win.move_right", 'L'},
-        {"win.equalize", '='},  {"win.taller", '+'},
-        {"win.shorter", '-'},   {"win.wider", '>'},
-        {"win.narrower", '<'},  {"win.max_height", '_'},
-        {"win.max_width", '|'}};
+        {"win.left",        'h'},
+        {"win.down",        'j'},
+        {"win.up",          'k'},
+        {"win.right",       'l'},
+        {"win.split",       's'},
+        {"win.vsplit",      'v'},
+        {"win.close",       'c'},
+        {"win.only",        'o'},
+        {"win.next",        'w'},
+        {"win.prev",        'W'},
+        {"win.last",        'p'},
+        {"win.swap",        'x'},
+        {"win.rotate",      'r'},
+        {"win.rotate_back", 'R'},
+        {"win.move_left",   'H'},
+        {"win.move_bottom", 'J'},
+        {"win.move_top",    'K'},
+        {"win.move_right",  'L'},
+        {"win.equalize",    '='},
+        {"win.taller",      '+'},
+        {"win.shorter",     '-'},
+        {"win.wider",       '>'},
+        {"win.narrower",    '<'},
+        {"win.max_height",  '_'},
+        {"win.max_width",   '|'}
+    };
     static constexpr NumKey kNum[] = {
-        {"edit.increment", "<C-a>", +1, false},
-        {"edit.decrement", "<C-x>", -1, false},
-        {"edit.increment_int", "<A-a>", +1, true},  // INCREMENT
-        {"edit.decrement_int", "<A-x>", -1, true},  // DECREMENT
+        {"edit.increment",     "<C-a>", +1, false},
+        {"edit.decrement",     "<C-x>", -1, false},
+        {"edit.increment_int", "<A-a>", +1, true }, // INCREMENT
+        {"edit.decrement_int", "<A-x>", -1, true }, // DECREMENT
     };
     static constexpr VNumKey kVNum[] = {
-        {"visual.increment", "<C-a>", +1, false},
-        {"visual.decrement", "<C-x>", -1, false},
-        {"visual.increment_int", "g<C-a>", +1, true},  // INCREMENT
-        {"visual.decrement_int", "g<C-x>", -1, true},  // DECREMENT
+        {"visual.increment",     "<C-a>",  +1, false},
+        {"visual.decrement",     "<C-x>",  -1, false},
+        {"visual.increment_int", "g<C-a>", +1, true }, // INCREMENT
+        {"visual.decrement_int", "g<C-x>", -1, true }, // DECREMENT
     };
     for(const WinKey& w : kWin) {
         const char k = w.key;
@@ -394,10 +416,12 @@ void register_builtin_actions() {
         [](Ctx& c) { win_resize(win::Dir::Right, c.count); },
         "<A-l>");
     // the tree is a region of the ring too: CTRL-W h/j/k/l leave it
-    static constexpr WinKey kDirs[] = {{"win.left", 'h'},
-                                       {"win.down", 'j'},
-                                       {"win.up", 'k'},
-                                       {"win.right", 'l'}};
+    static constexpr WinKey kDirs[] = {
+        {"win.left",  'h'},
+        {"win.down",  'j'},
+        {"win.up",    'k'},
+        {"win.right", 'l'}
+    };
     for(const WinKey& w : kDirs) {
         registry().map(
             FILES, parse_keys(std::string("<C-w>") + w.key), w.action);

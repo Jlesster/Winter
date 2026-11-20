@@ -35,11 +35,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1795050897,
-        "narHash": "sha256-Jh0NqXI/6dHApliR79jYCP648KALQ4BHVssXxkkLx5w=",
+        "lastModified": 1795056697,
+        "narHash": "sha256-i0BZX5M+dxtHmx8BHLatP4es439GR/uq3O/9i8fJHic=",
         "owner": "Jlesster",
         "repo": "trux",
-        "rev": "c325081ffb3cf33688eaaf2a542637d300bebe97",
+        "rev": "df2c895e7b048728c7fc2a24018ad2ab091ac350",
         "type": "github"
       },
       "original": {
