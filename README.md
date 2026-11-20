@@ -244,7 +244,7 @@ shows what is bound.
 ### Build
 
 ```bash
-git clone https://github.com/youruser/winter.git
+git clone https://github.com/Jlesster/winter.git
 cd winter
 meson setup builddir
 ninja -C builddir
