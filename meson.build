@@ -49,9 +49,10 @@ add_project_arguments('-DWINTER_TS_LANGS(X)=' + ' '.join(lang_syms), language: '
 confdir = get_option('winter_confdir')
 add_project_arguments('-DWINTER_CONFDIR="@0@"'.format(confdir), language: 'cpp')
 
+trux = dependency('trux')
 deps = [
-  dependency('trux'),
   ts_dep,
+  trux,
 ] + lang_deps + [lua_dep]
 
 sources = files(
@@ -182,3 +183,4 @@ executable(
 subdir('tests')
 
 install_subdir('lua', install_dir: confdir, strip_directory: true)
+

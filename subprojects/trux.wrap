@@ -1,0 +1,7 @@
+[wrap-git]
+url = https://github.com/Jlesster/trux.git
+revision = v0.2.0
+depth = 1
+
+[provide]
+dependency_names = trux

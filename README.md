@@ -200,7 +200,7 @@ text objects**.
 | `<C-o>` / `<C-i>` | Jumplist back / forward |
 | `<C-a>` / `<C-x>` | Increment / decrement the number under the cursor |
 | `zo` `zc` `za` `zR` `zM` | Fold open / close / toggle / open all / close all |
-| `<C-w>` + `h` `j` `k` `l` | Window navigation (continues into tmux) |
+| `<C-w>` + `h` `j` `k` `l` | Window navigation (continues into tmux with [Winter Tmux](https://github.com/Jlesster/winter-tmux)) |
 
 Everything is rebindable with `winter.keymap.set`, and `winter.keymap.list`
 shows what is bound.
@@ -235,7 +235,7 @@ shows what is bound.
 - [`meson`](https://mesonbuild.com) and `ninja`.
 - [`tree-sitter`](https://tree-sitter.github.io) development libraries.
 - Lua 5.4 development libraries.
-- `trux`, the terminal toolkit winter renders with.
+- [`trux`](https://github.com/Jlesster/trux), the terminal toolkit winter renders with.
 - **Runtime extras:** `ripgrep` for `:Grep`; `git`, `curl` and a C/C++ compiler
   for `:TSInstall` (grammars that only ship `grammar.js` also need the
   `tree-sitter` CLI and `node`); and a [Nerd Font](https://www.nerdfonts.com)

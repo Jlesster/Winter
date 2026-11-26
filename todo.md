@@ -1,8 +1,8 @@
 # features
 
 - add provider map to clipboard utils
-- improved markdown rendering
 - :colorscheme command
-- lua buffer operations
 
 # bugs
+
+- :Doc use is ambiguous and needs ft type deduction
