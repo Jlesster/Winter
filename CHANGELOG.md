@@ -4,6 +4,91 @@ All notable changes to winter are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor bumps may break things).
 
+## [0.1.3] - 2026-11-26
+
+Documentation grows Java: `lwjgl` and any other Javadoc-backed docset can be
+built from jars your build tools already downloaded, `:DocRemove` removes
+installed docsets, and `:DocInstall` completion no longer stalls the editor.
+Editing gains `J`, a digit-wise `A-a` / `A-x`, and a number-conversion popup on
+`K`.
+
+### Added
+
+#### Offline documentation
+- **`:DocRemove {slug...}`** deletes installed docsets. A base name such as
+  `lua` works when exactly one version is installed; with several it refuses
+  and lists them, so removal never guesses. Every argument is resolved before
+  anything is deleted, so a typo in the second does not half-apply the first.
+  The recent-lookups list and `index.md` are updated, and a doc split showing a
+  removed page falls back to `index.md`. It is refused while an install or
+  update job is running. Tab completes installed slugs, versions included.
+- **Javadoc docsets.** A new `JAVADOC` row kind in `src/docsets.inc` builds a
+  docset from `-javadoc.jar` files, merging one jar per `group:artifact` into
+  one docset. Jars your build tools already fetched are used first (the Maven
+  repository from `settings.xml` or `~/.m2/repository`, `/usr/share/maven-repo`,
+  the Gradle cache, `/usr/share/javadoc`); only when none is found does it
+  download from Maven Central. Each version is its own docset (`lwjgl~3.3.6`):
+  `:DocInstall lwjgl` takes the newest found, `lwjgl~3.3.6` picks one, and
+  `:DocUpdate` compares versions.
+- **`lwjgl` is now installable** (core, GLFW, OpenGL, OpenAL and STB modules)
+  and is searched first for `java` and `kotlin` files. LWJGL's core-profile
+  twin classes (`GL11C`, `GL45C`, ...) keep their pages but no longer shadow the
+  documented members of `GL11`, `GL45`, ...
+- `:DocInstall <Tab>` offers the local Javadoc versions it finds (marked
+  `local Javadoc`), and a base-name row shows how many versions exist.
+- `winter --doc-locate <slug>`: prints the version and the jars or directories
+  of local Javadoc for a slug. Exit status 1 means nothing was found locally.
+
+#### Editing
+- **`J` joins lines**, in normal mode (a count joins that many lines, minimum
+  two) and in visual mode (the selected lines). Leading whitespace of the next
+  line and trailing whitespace of the current one are dropped, and the glue is
+  code-aware: no space after `(`, `[`, `->` or `::`, nor before `)`, `]`, `,`,
+  `;`, `->`, `::` or a `.name` member access. The cursor lands on the join, and
+  the whole join is one undo step.
+- **`A-a` / `A-x` bump the single digit under the cursor**, wrapping `9` <-> `0`
+  without carrying: on the `6` of `861` they give `871` / `851`, on the `9` of
+  `891` they give `801`. A count adds that many steps. Nothing happens when the
+  cursor is not on a digit.
+
+#### Hover
+- **`K` on a hex, binary or octal literal** (`0xFF`, `0b101`, `0o755`, `0755`)
+  shows the value in every base instead of asking the language server: dec,
+  hex, bin and oct, plus a signed `iN` reading when the top bit is set and
+  `f32` / `f64` when the digits fill that width exactly. A run of four or more
+  `0`/`1` digits with leading zeros (`00000111`) reads as binary, with its C
+  octal value on the last row. Decimals, reals and versions still go to the
+  language server.
+
+### Changed
+- **Normal-mode `C-a` / `C-x` now bump the decimal digit run under (or after)
+  the cursor**, which is what `A-a` / `A-x` did before: `1.2.3` -> `1.3.3`,
+  `3.99` -> `4.00`. Visual-mode `C-a` / `C-x` and `g C-a` / `g C-x` are
+  unchanged.
+- **Action names.** `edit.increment` and `edit.decrement` carry that behaviour
+  now, and `edit.increment_int` / `edit.decrement_int` are gone, replaced by
+  `edit.increment_digit` / `edit.decrement_digit` on `A-a` / `A-x`. A config that
+  binds these by action name needs updating.
+
+### Fixed
+- **Lag in `:DocInstall <Tab>`.** Every keystroke re-parsed `catalog.json`,
+  re-read every installed `meta.json` once per candidate, and re-walked the
+  Maven and Gradle caches. The catalogue, the installed set, the local Javadoc
+  scan (refreshed at most every five minutes) and the candidate list are now
+  cached and invalidated by file modification time, so a keystroke only filters
+  a ready list.
+- Installing a docset no longer discards every loaded doc index. Each index is
+  re-read only when its own `index.tsv` changed.
+
+### Internal
+- `WINTER_VERSION` is `0.1.3`.
+- `hover_present` builds the `K` popup for both language-server and number
+  hovers.
+- New library functions: `num::describe`, `doc::remove_docset`,
+  `doc::find_javadoc`, `doc::javadoc_for` and `doc::import_javadoc`.
+- Formatting-only changes in `builtin_actions.cpp`, `edit.cpp`, `edit.hpp`,
+  `doc.cpp`, `doc_core.cpp` and `doc_core.hpp`.
+
 ## [0.1.2] - 20/11/2026
 
 Offline documentation arrives: `:Doc` looks up the name under the cursor in
@@ -220,6 +305,7 @@ backed by a much larger Lua API and a more complete LSP client.
 - The Nix package builds with `doCheck = false` because `pty_test` needs
   `forkpty`.
 
-[0.1.2]: https://github.com/Jlesster/Winter/compare/v0.1.1...HEAD
+[0.1.3]: https://github.com/Jlesster/Winter/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Jlesster/Winter/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Jlesster/Winter/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Jlesster/Winter/releases/tag/v0.1.0

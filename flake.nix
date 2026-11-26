@@ -57,7 +57,7 @@
     {
       packages.${system}.default = pkgs.stdenv.mkDerivation {
         pname = "winter";
-        version = "0.1.1"; # meson.build
+        version = "0.1.3";
         src = self;
 
         nativeBuildInputs = with pkgs; [
