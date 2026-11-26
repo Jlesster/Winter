@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <bit>
 #include <charconv>
+#include <format>
 #include <climits>
 #include <utility>
 #include <vector>
@@ -378,6 +380,72 @@ std::string format_formats(unsigned f) {
         r += n.n;
     }
     return r.empty() ? "none" : r;
+}
+
+namespace {
+
+int nat_width(size_t digits, int bits_per_digit) {
+    const size_t bits = digits * static_cast<size_t>(bits_per_digit);
+    return bits <= 8 ? 8 : bits <= 16 ? 16 : bits <= 32 ? 32 : 64;
+}
+
+}  // namespace
+
+std::vector<Row> describe(std::string_view line, size_t col, unsigned formats) {
+    // always lex the integer formats; only kIdent follows the user option
+    const Opts o{.formats = (formats & kIdent) | kBin | kHex | kOctal};
+    const auto t = find(line, col, o);
+    if(!t || t->start > col) return {};  // under the cursor only
+
+    const std::string_view d = line.substr(t->ds, t->de - t->ds);
+    int base = 0, bpd = 0;
+    bool bare_bin = false;  // 00000111: binary reading of a C octal token
+    switch(t->k) {
+        case K::Hex: base = 16, bpd = 4; break;
+        case K::Bin: base = 2, bpd = 1; break;
+        case K::Oct0o: base = 8, bpd = 3; break;
+        case K::OctC:
+            bare_bin = d.size() >= 4 &&
+                       std::all_of(d.begin(), d.end(),
+                                   [](char c) { return c == '0' || c == '1'; });
+            base = bare_bin ? 2 : 8;
+            bpd = bare_bin ? 1 : 3;
+            break;
+        default: return {};  // decimal, real, version
+    }
+    const auto v = parse_u(d, base);
+    if(!v) return {};  // doesn't fit 64 bits
+
+    std::vector<Row> out;
+    const auto row = [&](std::string k, std::string val) {
+        out.push_back({std::move(k), std::move(val)});
+    };
+    row("dec", u128_str(*v));
+    row("hex", "0x" + radix_str(*v, 16, true));
+    row("bin", "0b" + radix_str(*v, 2, false));
+    if(!bare_bin) row("oct", "0" + radix_str(*v, 8, false));
+
+    if(base == 2 || base == 16) {
+        const int w = nat_width(d.size(), bpd);
+        if(*v & (uint64_t{1} << (w - 1))) {
+            const int64_t sv =
+                w == 64 ? static_cast<int64_t>(*v)
+                        : static_cast<int64_t>(*v) - (int64_t{1} << w);
+            row(std::format("i{}", w), std::to_string(sv));
+        }
+        // a float only when the digits fill the width exactly
+        if(d.size() * static_cast<size_t>(bpd) == static_cast<size_t>(w)) {
+            if(w == 32)
+                row("f32", std::format("{}", std::bit_cast<float>(
+                                                 static_cast<uint32_t>(*v))));
+            if(w == 64)
+                row("f64", std::format("{}", std::bit_cast<double>(*v)));
+        }
+    }
+    if(bare_bin) {  // C reads this as octal; say so rather than guess
+        if(const auto oct = parse_u(d, 8)) row("as C octal", u128_str(*oct));
+    }
+    return out;
 }
 
 }  // namespace num

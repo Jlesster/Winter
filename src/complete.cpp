@@ -30,6 +30,7 @@
 #include "lsp_sync.hpp"
 #include "multicursor.hpp"
 #include "normal.hpp"
+#include "num.hpp"
 #include "overlay.hpp"
 #include "piece.hpp"
 #include "snippet.hpp"
@@ -1285,11 +1286,125 @@ std::vector<win::Win*> hover_layout(const Viewport& vp) {
     return out;
 }
 
+// Opens the K popup over `lines` (already laid out); `raw` is what :HoverLast
+// shows.
+static void hover_present(std::vector<MdRow> lines, const std::string& raw) {
+    if(g_hw.focused) return;  // don't replace a popup being used
+    g_hover_raw = raw;
+    int tw = 12;
+    for(const MdRow& l : lines) tw = std::max(tw, l.width);
+
+    const Style base =
+        theme_ui("ui.hover", Style{.fg = 0xcdd6f4, .bg = 0x181825});
+    Style code = base, head = base, bul = base, quo = base;
+    style_patch(bul, md_style(MdRole::Bullet));
+    style_patch(quo, md_style(MdRole::Quote));
+    style_patch(code,
+                theme_ui("ui.hover.code", md_style(MdRole::Code)));
+    style_patch(head,
+                theme_ui("ui.hover.heading",
+                         md_style(MdRole::Heading)));
+    Style link = base;
+    style_patch(link,
+                theme_ui("ui.hover.link", md_style(MdRole::Link)));
+    Style ring = theme_ui("ui.hover.focus", Style{.fg = 0x89b4fa});
+    ring.bg = base.bg;
+
+    if(g_hw.id) overlay_close(g_hw.id);  // its on_close resets g_hw
+    HoverWin& w = g_hw;
+    w = HoverWin{};
+    w.gen = ++g_hw_gen;
+    w.lines = std::move(lines);
+    w.base = base, w.ring = ring;
+    hover_split(w);
+    hover_build(w, code, head, bul, quo, link);
+
+    // a rule sits on the row after each pane but the last
+    std::vector<int> dividers;
+    for(size_t i = 0; i + 1 < w.panes.size(); ++i)
+        dividers.push_back(hover_pane_y(w, i) + w.panes[i].h);
+
+    OverlaySpec o;
+    o.at = OverlaySpec::At::Cursor;
+    o.x = 0;
+    o.y = 1;
+    o.w = tw + 4;
+    o.h = hover_pane_y(w, w.panes.size());  // panes, rules, frame
+    o.z = 50;
+    o.framed = true;
+    o.show_in_prompt = true;  // stays under a / search prompt
+    o.border_style = pop_border(base);
+    o.dividers = std::move(dividers);
+    o.on_key = hover_key;
+    o.on_close = [gen = w.gen] {
+        if(g_hw.gen == gen) hover_teardown();
+    };
+    // the frame and background; render.cpp draws the pane windows on
+    // top
+    o.on_paint = [](OverlayId id) { overlay_clear(id, g_hw.base); };
+    w.id = overlay_open(std::move(o));
+    hover_sync();
+}
+
+// "• label  value", the value coloured as a C++ literal.
+static MdRow num_row(const num::Row& r, size_t label_w) {
+    MdRow row;
+    row.segs.push_back({"\u2022 ", MdTone::Bullet, std::nullopt});
+    std::string lab = r.label;
+    lab.resize(label_w + 1, ' ');
+    row.segs.push_back({std::move(lab), MdTone::Quote, std::nullopt});
+
+    // highlight inside a declaration so a lone literal still parses
+    constexpr std::string_view kPre = "int v = ";
+    const size_t n = r.value.size();
+    const auto sp = syntax_highlight("cpp", std::string(kPre) + r.value + ";");
+    size_t pos = 0;
+    const auto text = [&](size_t a, size_t b, MdTone t,
+                          std::optional<Style> st) {
+        row.segs.push_back({r.value.substr(a, b - a), t, std::move(st)});
+    };
+    if(sp) {
+        for(const Span& s : *sp) {
+            if(s.end <= kPre.size() || s.start >= kPre.size() + n) continue;
+            const size_t a = std::max(s.start, kPre.size()) - kPre.size();
+            const size_t b = std::min(s.end, kPre.size() + n) - kPre.size();
+            if(a < pos || a >= b) continue;
+            if(a > pos) text(pos, a, MdTone::Text, std::nullopt);
+            text(a, b, MdTone::Text, s.st);
+            pos = b;
+        }
+    }
+    if(pos < n) text(pos, n, pos ? MdTone::Text : MdTone::Code, std::nullopt);
+
+    for(const MdSeg& s : row.segs) row.width += text_width(s.text);
+    return row;
+}
+
+static void hover_num(const std::vector<num::Row>& rows) {
+    size_t lw = 0;
+    for(const num::Row& r : rows) lw = std::max(lw, r.label.size());
+    std::vector<MdRow> lines;
+    std::string raw;
+    for(const num::Row& r : rows) {
+        lines.push_back(num_row(r, lw));
+        raw += "- " + r.label + " " + r.value + "\n";
+    }
+    hover_present(std::move(lines), raw);
+}
+
 void hover_show() {
     if(g_hw.id && !g_hw.focused) {  // K on an open popup: take focus
         // after this key is done: the focus swaps the editor's view, which
         // the key loop's bookkeeping must not see half-way
         loop_post([] { hover_focus(); });
+        return;
+    }
+    // a number under the cursor: only its conversions, no LSP round trip
+    const auto rows = num::describe(E.buf().pt.line_text(E.cy),
+                                    static_cast<size_t>(E.cx),
+                                    opts.numformats);
+    if(!rows.empty()) {
+        hover_num(rows);
         return;
     }
     Buffer& b = E.buf();
@@ -1320,8 +1435,6 @@ void hover_show() {
             if(c.is_array())
                 for(const Json& e : c.items()) text += doc_text(e) + "\n\n";
             else text = doc_text(c);
-            g_hover_raw = text;
-
             auto lines = md_float_layout(
                 text, std::max(16, std::min(72, E.term_cols - 8)),
                 kHoverMaxRows);
@@ -1329,59 +1442,7 @@ void hover_show() {
                 editor_set_status_message("hover: nothing here");
                 return;
             }
-            int tw = 12;
-            for(const MdRow& l : lines) tw = std::max(tw, l.width);
-
-            const Style base =
-                theme_ui("ui.hover", Style{.fg = 0xcdd6f4, .bg = 0x181825});
-            Style code = base, head = base, bul = base, quo = base;
-            style_patch(bul, md_style(MdRole::Bullet));
-            style_patch(quo, md_style(MdRole::Quote));
-            style_patch(code,
-                        theme_ui("ui.hover.code", md_style(MdRole::Code)));
-            style_patch(head,
-                        theme_ui("ui.hover.heading",
-                                 md_style(MdRole::Heading)));
-            Style link = base;
-            style_patch(link,
-                        theme_ui("ui.hover.link", md_style(MdRole::Link)));
-            Style ring = theme_ui("ui.hover.focus", Style{.fg = 0x89b4fa});
-            ring.bg = base.bg;
-
-            if(g_hw.id) overlay_close(g_hw.id);  // its on_close resets g_hw
-            HoverWin& w = g_hw;
-            w = HoverWin{};
-            w.gen = ++g_hw_gen;
-            w.lines = std::move(lines);
-            w.base = base, w.ring = ring;
-            hover_split(w);
-            hover_build(w, code, head, bul, quo, link);
-
-            // a rule sits on the row after each pane but the last
-            std::vector<int> dividers;
-            for(size_t i = 0; i + 1 < w.panes.size(); ++i)
-                dividers.push_back(hover_pane_y(w, i) + w.panes[i].h);
-
-            OverlaySpec o;
-            o.at = OverlaySpec::At::Cursor;
-            o.x = 0;
-            o.y = 1;
-            o.w = tw + 4;
-            o.h = hover_pane_y(w, w.panes.size());  // panes, rules, frame
-            o.z = 50;
-            o.framed = true;
-            o.show_in_prompt = true;  // stays under a / search prompt
-            o.border_style = pop_border(base);
-            o.dividers = std::move(dividers);
-            o.on_key = hover_key;
-            o.on_close = [gen = w.gen] {
-                if(g_hw.gen == gen) hover_teardown();
-            };
-            // the frame and background; render.cpp draws the pane windows on
-            // top
-            o.on_paint = [](OverlayId id) { overlay_clear(id, g_hw.base); };
-            w.id = overlay_open(std::move(o));
-            hover_sync();
+            hover_present(std::move(lines), text);
         });
 }
 

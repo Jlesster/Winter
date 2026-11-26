@@ -4,7 +4,6 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -18,6 +17,7 @@
 #include "grapheme.hpp"
 #include "indent.hpp"
 #include "keys.hpp"
+#include "motion.hpp"
 #include "num.hpp"
 #include "options.hpp"
 #include "piece.hpp"
@@ -166,8 +166,8 @@ static bool is_str_prefix(std::string_view lang, std::string_view w) {
 }
 
 // Per-language / per-context rules for whether a quote is allowed to pair.
-static bool can_pair_quote(char q, std::string_view before,
-                           std::string_view lang) {
+static bool
+can_pair_quote(char q, std::string_view before, std::string_view lang) {
     if(q == '`')
         return lang.empty() ||
                std::ranges::find(kBacktick, lang) != std::end(kBacktick);
@@ -546,8 +546,26 @@ bool bump_number_at_cursor(int64_t delta, bool int_only) {
     return true;
 }
 
-void bump_numbers_in_range(size_t start, size_t end, bool linewise,
-                           int64_t delta, bool progressive) {
+// A-a / A-x: bump just the digit under the cursor, wrapping 9 <-> 0
+bool bump_digit_at_cursor(int64_t delta) {
+    PieceTable& pt = E.buf().pt;
+    const std::string line = pt.line_text(E.cy);
+    const size_t col = static_cast<size_t>(E.cx);
+    if(col >= line.size() || line[col] < '0' || line[col] > '9') return false;
+    int64_t d = (line[col] - '0' + delta) % 10;
+    if(d < 0) d += 10;
+    const std::string text(1, static_cast<char>('0' + d));
+    if(text[0] != line[col]) {
+        const size_t at = pt.line_start(E.cy) + col;
+        PieceTable::Group g(pt);
+        pt.remove(at, 1);
+        pt.insert(at, text);
+    }
+    return true;
+}
+
+void bump_numbers_in_range(
+    size_t start, size_t end, bool linewise, int64_t delta, bool progressive) {
     PieceTable& pt = E.buf().pt;
     const size_t l0 = pt.line_of(start);
     const size_t l1 = pt.line_of(end > start ? end - 1 : start);
@@ -617,6 +635,53 @@ void toggle_case_in_range(size_t start, size_t end, bool linewise) {
         pt.remove(at, b - a);
         pt.insert(at, text);
     }
+}
+
+static bool ends_with_sv(std::string_view s, std::string_view t) {
+    return s.size() >= t.size() && s.substr(s.size() - t.size()) == t;
+}
+
+static std::string_view join_glue(std::string_view a, std::string_view b) {
+    if(a.empty() || b.empty()) return {};
+    if(a.back() == '(' || a.back() == '[' || ends_with_sv(a, "->") ||
+       ends_with_sv(a, "::"))
+        return {};
+    const char c = b[0];
+    if(c == ')' || c == ']' || c == ',' || c == ';') return {};
+    if(b.substr(0, 2) == "->" || b.substr(0, 2) == "::") return {};
+    if(c == '.' && b.size() > 1 &&
+       (std::isalpha(static_cast<unsigned char>(b[1])) || b[1] == '_'))
+        return {};
+    return " ";
+}
+
+void join_lines(size_t first, size_t joins) {
+    PieceTable& pt = E.buf().pt;
+    if(first + 1 >= pt.line_count()) return;
+    joins = std::min(joins, pt.line_count() - 1 - first);
+    if(joins == 0) return;
+
+    size_t cursor = 0;
+    {
+        PieceTable::Group g(pt);
+        for(size_t k = 0; k < joins; ++k) {
+            const std::string a = pt.line_text(first);
+            const std::string b = pt.line_text(first + 1);
+            size_t ae = a.find_last_not_of(" \t");
+            ae = ae == std::string::npos ? 0 : ae + 1;
+            size_t bs = b.find_first_not_of(" \t");
+            if(bs == std::string::npos) bs = b.size();
+            const std::string_view glue =
+                join_glue(std::string_view(a).substr(0, ae),
+                          std::string_view(b).substr(bs));
+            const size_t at = pt.line_start(first) + ae;
+            pt.remove(at, (a.size() - ae) + 1 + bs);
+            if(!glue.empty()) pt.insert(at, glue);
+            cursor = at;
+        }
+    }
+    set_cursor_offset(motion::clamp_normal(pt, cursor));
+    E.want_rx = cx_to_rx(pt.line_text(E.cy), E.cx);
 }
 
 bool replace_key(int c) {

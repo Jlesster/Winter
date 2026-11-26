@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace num {
 
@@ -48,5 +49,16 @@ struct Edit {
 // one on the line), bumped by delta. nullopt: no number / not representable.
 std::optional<Edit> bump(std::string_view line, size_t col, int64_t delta,
                          const Opts& o = {});
+
+// K hover: the integer under the cursor (hex, 0b, 0o, 0755) in every base,
+// plus signed / float readings where the width implies them. A 0/1-only run
+// of 4+ digits with leading zeros (00000111) reads as binary, with its
+// C-octal value on the last row. Empty: the cursor isn't on such a number
+// (decimals, reals and versions are skipped).
+struct Row {
+    std::string label, value;
+};
+std::vector<Row> describe(std::string_view line, size_t col,
+                          unsigned formats = kDefault);
 
 }  // namespace num

@@ -34,7 +34,8 @@ struct LangInfo {
     std::string_view fence;  // info string for <pre> blocks of this docset
     std::string_view sep;    // scope separator: "::" or "."
 };
-const LangInfo& lang_for(std::string_view slug);  // unknown -> fence "", sep "."
+const LangInfo&
+lang_for(std::string_view slug);  // unknown -> fence "", sep "."
 // Slug bases to try for a buffer filetype, best first. Empty when none.
 std::vector<std::string_view> bases_for_filetype(std::string_view ft);
 
@@ -56,8 +57,8 @@ std::vector<std::string> scope_prefixes(std::string_view name,
 // ---- html -> markdown -----------------------------------------------------
 
 struct ConvertCtx {
-    std::string page;        // db.json key of the page being converted
-    std::string fence;       // fallback info string for <pre>
+    std::string page;   // db.json key of the page being converted
+    std::string fence;  // fallback info string for <pre>
     const std::unordered_set<std::string>* pages = nullptr;  // all db keys
 };
 
@@ -66,7 +67,8 @@ struct ConvertCtx {
 std::string html_to_md(std::string_view html, const ConvertCtx& cx);
 // The saved-HTML form of a page (save_html): the fragment in a minimal
 // document, with cross-page links rewritten to the saved files.
-std::string html_to_page(std::string_view html, std::string_view title,
+std::string html_to_page(std::string_view html,
+                         std::string_view title,
                          const ConvertCtx& cx);
 
 // db.json key -> file path stem below the docset dir ("" = unusable key).
@@ -74,7 +76,8 @@ std::string html_to_page(std::string_view html, std::string_view title,
 // layout reserves (INDEX, html/).
 std::string file_key(std::string_view key);
 std::string pct_encode(std::string_view s);
-std::string md_escape(std::string_view s);         // text for a paragraph or link label
+std::string
+md_escape(std::string_view s);  // text for a paragraph or link label
 std::string html_escape_text(std::string_view s);  // & < > "
 
 std::string pct_decode(std::string_view s);
@@ -82,9 +85,9 @@ std::string pct_decode(std::string_view s);
 // Line of the heading / term for `anchor` in a converted page, or -1.
 int find_anchor(std::string_view md, std::string_view anchor);
 
-// One sentence per source line (and a break after trailing "(since C++17)"-style
-// groups), for reading. Code, links, tables, headings and fences are untouched;
-// list and quote continuation lines keep their indent.
+// One sentence per source line (and a break after trailing "(since
+// C++17)"-style groups), for reading. Code, links, tables, headings and fences
+// are untouched; list and quote continuation lines keep their indent.
 std::string semantic_breaks(std::string_view md);
 
 // Pipe tables wider than `width` columns become lists (**name** with the
@@ -95,7 +98,8 @@ std::string reflow_tables(std::string_view md, int width);
 // ---- lookup ---------------------------------------------------------------
 
 struct Entry {
-    std::string name, target, type;  // target: "<stem>.md" or "<stem>.md#anchor"
+    std::string name, target,
+        type;  // target: "<stem>.md" or "<stem>.md#anchor"
 };
 struct Index {
     std::string slug;
@@ -145,11 +149,20 @@ using Progress = std::function<void(const std::string&)>;
 
 // Steps 2 to 5 of the install pipeline: convert, write the pages, write
 // index.tsv, the level 1 index and (last) meta.json into `out_dir`.
-bool build_docset(const BuildOpts& o, const Progress& say, BuildStats& st,
+bool build_docset(const BuildOpts& o,
+                  const Progress& say,
+                  BuildStats& st,
                   std::string& err);
 // Swap `tmp` in as <root>/<slug>. The previous good copy survives any failure.
-bool commit_docset(const std::string& root, const std::string& slug,
-                   const std::string& tmp, std::string& err);
+bool commit_docset(const std::string& root,
+                   const std::string& slug,
+                   const std::string& tmp,
+                   std::string& err);
+// Deletes <root>/<slug>, drops its entries from the recent list and
+// regenerates docs/index.md. Refuses anything that isn't an installed docset.
+bool remove_docset(const std::string& root,
+                   const std::string& slug,
+                   std::string& err);
 // Regenerates docs/index.md (and index.html while any docset has HTML).
 bool write_level0(const std::string& root, std::string& err);
 
@@ -158,8 +171,9 @@ bool write_level0(const std::string& root, std::string& err);
 // Everything winter knows about, from docsets.inc: which docsets exist, where
 // each comes from, and how a docset reads (fence, separator, filetypes).
 enum class Origin {
-    DevDocs,   // downloaded from DevDocs (index.json + db.json)
-    MdTree,    // built from a markdown tree in a GitHub repo
+    DevDocs,  // downloaded from DevDocs (index.json + db.json)
+    MdTree,   // built from a markdown tree in a GitHub repo
+    Javadoc,  // built from -javadoc.jar files: local caches, else Maven Central
     Unlisted,  // language info only; not offered for install
 };
 struct Docset {
@@ -167,17 +181,48 @@ struct Docset {
     Origin origin;
     // MdTree only
     std::string_view repo, ref, subdir, strip_ns, alias_from, alias_to;
+    // Javadoc only: space-separated group:artifact list
+    std::string_view coords;
 };
-const Docset* docset_for(std::string_view base);  // any row, nullptr: unknown
-const Docset* source_for(std::string_view base);  // MdTree rows, else nullptr
+const Docset* docset_for(std::string_view base);   // any row, nullptr: unknown
+const Docset* source_for(std::string_view base);   // MdTree rows, else nullptr
+const Docset* javadoc_for(std::string_view base);  // Javadoc rows, else nullptr
+
+// Javadoc a build tool already fetched, for the coords of one Javadoc row.
+struct JavadocSrc {
+    std::string artifact;  // "lwjgl-opengl"
+    std::string path;      // a -javadoc.jar, or an unpacked HTML directory
+};
+struct JavadocFind {
+    std::string version;  // "3.3.6"; "system" for an unversioned distro tree
+    std::vector<JavadocSrc> srcs;
+};
+// Looks in the Maven repository (settings.xml localRepository, else
+// ~/.m2/repository, plus /usr/share/maven-repo), the Gradle cache
+// ($GRADLE_USER_HOME or ~/.gradle) and /usr/share/javadoc. One entry per
+// version that has at least one module, newest first, "system" last. A
+// version missing some of the row's modules still counts; it just has fewer
+// srcs.
+std::vector<JavadocFind> find_javadoc(const Docset& s);
 // The rows :DocInstall offers (not Unlisted), in registry order.
 std::vector<const Docset*> all_docsets();
 // Turns the extracted tree in `src_dir` into dl_dir/index.json + db.json, the
 // same two files DevDocs provides, so build_docset needs no second path.
-bool import_tree(const Docset& s, const std::string& src_dir,
-                 const std::string& dl_dir, std::string& err);
+bool import_tree(const Docset& s,
+                 const std::string& src_dir,
+                 const std::string& dl_dir,
+                 std::string& err);
 
-// ---- the DevDocs catalogue ----------------------------------------------------
+// Turns the javadoc jars unpacked to src_dir/<artifact>/ into
+// dl_dir/index.json + db.json (db values are HTML fragments, so build_docset
+// converts them like DevDocs pages).
+bool import_javadoc(const Docset& s,
+                    const std::string& src_dir,
+                    const std::string& dl_dir,
+                    std::string& err);
+
+// ---- the DevDocs catalogue
+// ----------------------------------------------------
 
 // Every docset DevDocs offers, as saved by the last install or update job
 // (<root>/catalog.json, a copy of DevDocs' docs.json). Empty until then.
@@ -189,9 +234,9 @@ std::vector<Avail> load_catalog(const std::string& root);
 // ---- install job ------------------------------------------------------------
 
 struct ScriptOpts {
-    std::string exe;       // this binary: it converts (--doc-build)
-    std::string slug;      // as typed; may be a base name like "lua"
-    std::string root;      // ~/.local/share/winter/docs
+    std::string exe;   // this binary: it converts (--doc-build)
+    std::string slug;  // as typed; may be a base name like "lua"
+    std::string root;  // ~/.local/share/winter/docs
     std::string cdn, manifest;
     bool html = false, update = false, force = false;
 };
@@ -210,7 +255,9 @@ std::string catalog_script(const ScriptOpts& o);
 // ---- cli ------------------------------------------------------------------
 
 // --doc-resolve, --doc-check (its optional last argument is the upstream
-// revision of an MdTree docset), --doc-build (reads WINTER_DOCS_REV). Returns the process exit code.
+// revision of an MdTree docset, or the version of a Javadoc one), --doc-locate
+// (local Javadoc for a slug, see find_javadoc), --doc-build (reads
+// WINTER_DOCS_REV). Returns the process exit code.
 int cli_main(int argc, const char* argv[]);
 
 }  // namespace doc

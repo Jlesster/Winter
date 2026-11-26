@@ -246,6 +246,27 @@ void register_builtin_actions() {
         },
         "~");
 
+    bind_key(
+        "edit.join",
+        [](Ctx& c) {  // count lines, minimum two
+            const int lines = std::max(c.count, 2);
+            join_lines(static_cast<size_t>(E.cy),
+                       static_cast<size_t>(lines - 1));
+        },
+        "J");
+    bind_visual(
+        "visual.join",
+        [](Ctx&) {
+            const Range r = visual_range();
+            const auto& pt = E.buf().pt;
+            const size_t l0 = pt.line_of(r.start);
+            const size_t l1 = pt.line_of(r.end > r.start ? r.end - 1 : r.start);
+            set_mode(NORMAL);
+            set_cursor_offset(pt.line_start(l0));
+            join_lines(l0, std::max<size_t>(l1 - l0, 1));
+        },
+        "J");
+
     bind_visual(
         "visual.command",
         [](Ctx&) {
@@ -345,10 +366,8 @@ void register_builtin_actions() {
         {"win.max_width",   '|'}
     };
     static constexpr NumKey kNum[] = {
-        {"edit.increment",     "<C-a>", +1, false},
-        {"edit.decrement",     "<C-x>", -1, false},
-        {"edit.increment_int", "<A-a>", +1, true }, // INCREMENT
-        {"edit.decrement_int", "<A-x>", -1, true }, // DECREMENT
+        {"edit.increment", "<C-a>", +1, true},
+        {"edit.decrement", "<C-x>", -1, true},
     };
     static constexpr VNumKey kVNum[] = {
         {"visual.increment",     "<C-a>",  +1, false},
@@ -378,6 +397,13 @@ void register_builtin_actions() {
             },
             n.keys);
     }
+    for(const int sign : {+1, -1})
+        bind_key(
+            sign > 0 ? "edit.increment_digit" : "edit.decrement_digit",
+            [sign](Ctx& c) {
+                bump_digit_at_cursor(sign * std::max(c.count, 1));
+            },
+            sign > 0 ? "<A-a>" : "<A-x>");
     for(const VNumKey& n : kVNum) {
         const int64_t sign = n.sign;
         const bool prog = n.prog;

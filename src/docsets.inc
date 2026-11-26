@@ -15,6 +15,15 @@
 //     name ("nlohmann::basic_json::push_back" also as "basic_json::push_back"),
 //     and the first `from` in a name is swapped for `to` ("json::push_back").
 //
+// JAVADOC(slug, name, fence, sep, fts, coords)
+//     Built from -javadoc.jar files: `coords` is a space-separated list of
+//     group:artifact, one jar each, merged into one docset. The jars the
+//     build tools already fetched are used first (Maven repository, Gradle
+//     cache, /usr/share/javadoc); only when none is found does it download
+//     from Maven Central. Each version becomes its own docset, "lwjgl~3.3.6":
+//     ":DocInstall lwjgl" takes the newest found, "lwjgl~3.3.6" that one.
+//     :DocUpdate compares the version.
+//
 // LANGONLY(slug, fence, sep, fts)
 //     Not offered for install. Only supplies the fence, separator and
 //     filetype mapping for a docset you installed under that name by hand.
@@ -36,7 +45,9 @@ MDTREE("sdl2",        "SDL2",       "c",          ".",  "c cpp c++",
        "libsdl-org/sdlwiki", "main", "SDL2", "", "", "")
 LANGONLY("sdl",                     "c",          ".",  "c cpp c++")
 LANGONLY("glfw",                    "c",          ".",  "c cpp c++")
-LANGONLY("lwjgl",                   "java",       ".",  "java")
+JAVADOC("lwjgl",      "LWJGL",      "java",       ".",  "java kotlin",
+        "org.lwjgl:lwjgl org.lwjgl:lwjgl-glfw org.lwjgl:lwjgl-opengl "
+        "org.lwjgl:lwjgl-openal org.lwjgl:lwjgl-stb")
 DEVDOCS("opengl",     "OpenGL",     "c",          ".",  "c cpp c++ java")
 DEVDOCS("vulkan",     "Vulkan",     "c",          ".",  "c cpp c++")
 DEVDOCS("eigen3",     "Eigen",      "cpp",        "::", "cpp c++")

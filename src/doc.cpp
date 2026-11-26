@@ -2,6 +2,7 @@
 #include "doc.hpp"
 #include <unistd.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
@@ -70,21 +71,39 @@ std::string last_line(std::string_view s) {
     return std::string(nl == std::string_view::npos ? s : s.substr(nl + 1));
 }
 
+// mtime in ns of a file or directory; 0 when it doesn't exist. Every cache
+// below is keyed on one of these, so nothing needs hand-invalidating (the
+// install job renames a finished docset into the root, which bumps its mtime).
+long long stamp(const std::string& p) {
+    std::error_code ec;
+    const auto t = fs::last_write_time(p, ec);
+    return ec ? 0 : static_cast<long long>(t.time_since_epoch().count());
+}
+
 // Indexes are loaded the first time a lookup needs them: index.json for cpp is
-// a few MB, so :DocInstall'ed docsets cost nothing until :Doc is used.
+// a few MB, so :DocInstall'ed docsets cost nothing until :Doc is used. Each is
+// re-read only when its own index.tsv changed.
 std::map<std::string, doc::Index> g_idx;
+std::map<std::string, long long> g_idx_stamp;
 // last scope segment -> entries ("size" -> std::vector::size, std::string::size
 // ...), per docset, built the first time a member lookup needs it. Views point
-// into g_idx, so the two are always cleared together.
-std::map<std::string, std::unordered_multimap<std::string_view, const doc::Entry*>>
+// into g_idx, so the two are always dropped together.
+std::map<std::string,
+         std::unordered_multimap<std::string_view, const doc::Entry*>>
     g_suffix;
 
 const doc::Index* index_for(const std::string& slug) {
-    if(const auto it = g_idx.find(slug); it != g_idx.end()) return &it->second;
+    const std::string path = docs_root() + "/" + slug + "/index.tsv";
+    const long long st = stamp(path);
+    if(const auto it = g_idx.find(slug); it != g_idx.end()) {
+        if(g_idx_stamp[slug] == st) return &it->second;
+        g_suffix.erase(slug);  // views point into the old index
+        g_idx.erase(it);
+    }
     doc::Index ix;
     ix.slug = slug;
-    if(!doc::load_index(docs_root() + "/" + slug + "/index.tsv", ix))
-        return nullptr;
+    if(!doc::load_index(path, ix)) return nullptr;
+    g_idx_stamp[slug] = st;
     return &(g_idx[slug] = std::move(ix));
 }
 
@@ -103,11 +122,27 @@ std::string slug_of(const std::string& rel) {
 
 // ---- docsets ----------------------------------------------------------------
 
-std::vector<std::string> installed_slugs() {
-    std::vector<std::string> out;
-    for(const doc::DocsetInfo& d : doc::installed(docs_root()))
-        out.push_back(d.slug);
-    return out;
+struct InstalledSnap {
+    long long stamp = -1;
+    std::vector<std::string> slugs;  // sorted
+    std::set<std::string> bases;     // slug_base of each, for is_installed
+} g_inst;
+
+const InstalledSnap& installed_snap() {
+    const long long st = stamp(docs_root());
+    if(st != g_inst.stamp) {
+        g_inst = {};
+        g_inst.stamp = st;
+        for(const doc::DocsetInfo& d : doc::installed(docs_root())) {
+            g_inst.slugs.push_back(d.slug);
+            g_inst.bases.emplace(doc::slug_base(d.slug));
+        }
+    }
+    return g_inst;
+}
+
+const std::vector<std::string>& installed_slugs() {
+    return installed_snap().slugs;
 }
 
 // "lua" -> "lua~5.4" when only that one is installed
@@ -355,7 +390,8 @@ std::string seed_for(std::string_view tok) {
 
 void no_docsets(const std::string& hint) {
     editor_set_status_message("doc: no docsets installed: :DocInstall {}",
-                              hint.empty() ? "cpp" : hint.substr(hint.rfind(' ') + 1));
+                              hint.empty() ? "cpp"
+                                           : hint.substr(hint.rfind(' ') + 1));
 }
 
 // One name against the docsets in `order`. A single hit opens the page, several
@@ -401,7 +437,8 @@ bool resolve(const std::string& name,
                 return true;
             }
             std::vector<PickItem> items;
-            for(const doc::Entry* e : hits) items.push_back(pick_item(slug, *e));
+            for(const doc::Entry* e : hits)
+                items.push_back(pick_item(slug, *e));
             open_picker(std::move(items), prefixes[depth], html);
             return true;
         }
@@ -438,8 +475,8 @@ bool narrow_member(const std::string& member,
             for(const doc::Entry& e : ix->entries) {
                 const size_t p = e.name.rfind(sep);
                 if(p == std::string::npos) continue;  // members only
-                it->second.emplace(std::string_view(e.name).substr(p + sep.size()),
-                                   &e);
+                it->second.emplace(
+                    std::string_view(e.name).substr(p + sep.size()), &e);
             }
         }
         std::vector<const doc::Entry*> hits;
@@ -487,8 +524,13 @@ void lookup_query(const doc::Query& q, bool html) {
         if(resolve(c.name, c.raw, false, order, hint, c.name, html)) return;
     if(q.member.empty() && !q.cands.empty() && !q.cands.front().raw &&
        q.cands.front().name.find('.') != std::string::npos &&
-       resolve(q.cands.front().name, false, true, order, hint,
-               q.cands.front().name, html))
+       resolve(q.cands.front().name,
+               false,
+               true,
+               order,
+               hint,
+               q.cands.front().name,
+               html))
         return;
     if(!q.member.empty() && narrow_member(q.member, order, html)) return;
     full_picker(order, q.seed, hint, html);
@@ -500,7 +542,8 @@ std::optional<doc::Query> ast_query() {
     if(is_doc_buffer(b)) return std::nullopt;
     if(E.cy < 0 || static_cast<size_t>(E.cy) >= b.pt.line_count())
         return std::nullopt;
-    b.syntax.update(b.pt, b.eol);  // the renderer's own call: a no-op when current
+    b.syntax.update(b.pt,
+                    b.eol);  // the renderer's own call: a no-op when current
     const TSTree* tree = b.syntax.tree();
     if(!tree) return std::nullopt;
     const PieceTable* pt = &b.pt;
@@ -608,8 +651,6 @@ void run_next() {
     if(g_run->todo.empty()) {
         const Run r = *g_run;
         g_run.reset();
-        g_idx.clear();  // indexes may have been replaced
-        g_suffix.clear();
         if(r.total > 1)
             editor_set_status_message(
                 "{}: {} done, {} failed", r.label, r.ok, r.bad);
@@ -688,7 +729,7 @@ void start_run(std::vector<std::string> slugs,
 
 // Installed, going by base name: "lua" counts when only lua~5.4 is present.
 bool is_installed(std::string_view base) {
-    return !installed_match(std::string(base)).empty();
+    return installed_snap().bases.contains(std::string(base));
 }
 
 void cmd_docinstall(const CmdLine& c) {
@@ -699,8 +740,7 @@ void cmd_docinstall(const CmdLine& c) {
             if(is_installed(d->slug)) have += '*';
         }
         for(const std::string& s : installed_slugs())
-            if(!doc::docset_for(doc::slug_base(s)))
-                have += " " + s + "*";
+            if(!doc::docset_for(doc::slug_base(s))) have += " " + s + "*";
         std::set<std::string> bases;
         for(const doc::Avail& a : doc::load_catalog(docs_root()))
             bases.insert(doc::slug_base(a.slug));
@@ -711,7 +751,8 @@ void cmd_docinstall(const CmdLine& c) {
             "Docsets (* installed; 'all' = these): {}  +{}",
             have,
             bases.empty() ? std::string("(run :DocUpdate for the DevDocs list)")
-                          : std::to_string(more) + " more from DevDocs, Tab completes them");
+                          : std::to_string(more) +
+                                " more from DevDocs, Tab completes them");
         return;
     }
     std::vector<std::string> slugs;
@@ -754,52 +795,175 @@ void cmd_docupdate(const CmdLine& c) {
     start_run(std::move(slugs), true, c.bang, "DocUpdate");
 }
 
-// One entry per docset. Versioned slugs ("lua~5.3") are only offered once the
-// word being typed contains a '~', so `lua~<Tab>` lists that docset's versions.
-std::vector<CmdCand> complete_install(std::string_view lead) {
-    std::vector<CmdCand> out;
-    std::set<std::string> seen;
-    const auto add = [&](const std::string& slug, const std::string& label) {
-        if(slug.starts_with(lead) && seen.insert(slug).second)
-            out.push_back({slug, label});
-    };
-    const std::vector<std::string> inst = installed_slugs();
-    const std::set<std::string> have(inst.begin(), inst.end());
-    const std::vector<doc::Avail> cat = doc::load_catalog(docs_root());
-
-    if(lead.find('~') != std::string_view::npos) {
-        for(const doc::Avail& a : cat)
-            if(a.slug.find('~') != std::string::npos)
-                add(a.slug,
-                    have.contains(a.slug)
-                        ? "installed"
-                        : a.name + (a.version.empty() ? "" : " " + a.version));
-        for(const std::string& s : inst) add(s, "installed");
-        return out;
+// "lua" -> "lua~5.3" only when exactly one version of it is installed.
+// Several versions is an error: removal never guesses.
+std::optional<std::string> removal_target(const std::string& want) {
+    const std::vector<std::string> all = installed_slugs();
+    if(std::ranges::find(all, want) != all.end()) return want;
+    std::vector<std::string> hits;
+    for(const std::string& s : all)
+        if(doc::slug_base(s) == want) hits.push_back(s);
+    if(hits.size() == 1) return hits.front();
+    if(hits.empty()) {
+        editor_set_status_message("DocRemove: {} is not installed", want);
+    } else {
+        std::string l;
+        for(const std::string& h : hits) l += (l.empty() ? "" : " ") + h;
+        editor_set_status_message("DocRemove: {} is ambiguous: {}", want, l);
     }
+    return std::nullopt;
+}
+
+void cmd_docremove(const CmdLine& c) {
+    if(c.argv.empty()) {
+        editor_set_status_message("usage: :DocRemove {{slug...}}");
+        return;
+    }
+    if(g_run) {
+        editor_set_status_message("DocRemove: wait for the running {} job",
+                                  g_run->label);
+        return;
+    }
+    // resolve everything first so a typo in arg 2 doesn't half-apply arg 1
+    std::vector<std::string> slugs;
+    for(const std::string& a : c.argv) {
+        const auto t = removal_target(a);
+        if(!t) return;
+        if(std::ranges::find(slugs, *t) == slugs.end()) slugs.push_back(*t);
+    }
+    int ok = 0;
+    bool showing = false;
+    for(const std::string& s : slugs) {
+        std::string err;
+        if(!doc::remove_docset(docs_root(), s, err)) {
+            editor_set_status_message("DocRemove: {}", err);
+            continue;
+        }
+        ++ok;
+        if(g_last_slug == s) g_last_slug.clear();
+        if(!g_file.empty() && slug_of(g_file) == s) showing = true;
+    }
+    if(showing) show("index.md", "", "");  // the page on screen is gone
+    if(ok)
+        editor_set_status_message("DocRemove: removed {}",
+                                  ok == 1 ? slugs.front()
+                                          : std::to_string(ok) + " docsets");
+}
+
+// "lwjgl~3.3.6" for every version of a Javadoc row the Maven / Gradle caches
+// hold. Walks those caches: install_cands() calls it at most once per kTtl.
+std::vector<std::string> local_javadoc_slugs() {
+    std::vector<std::string> out;
+    for(const doc::Docset* d : doc::all_docsets())
+        if(doc::javadoc_for(d->slug))
+            for(const doc::JavadocFind& f : doc::find_javadoc(*d))
+                out.push_back(std::string(d->slug) + "~" + f.version);
+    return out;
+}
+
+struct CatSnap {
+    long long stamp = -1;
+    std::vector<doc::Avail> v;
+} g_cat;
+
+const std::vector<doc::Avail>& catalog() {
+    const long long st = stamp(docs_root() + "/catalog.json");
+    if(st != g_cat.stamp) {
+        g_cat.stamp = st;
+        g_cat.v = doc::load_catalog(docs_root());
+    }
+    return g_cat.v;
+}
+
+// The unfiltered :DocInstall candidates. Rebuilt when the installed set or the
+// catalogue changed (or the Javadoc scan is older than kTtl); per keystroke the
+// completer only filters these by prefix.
+struct InstallCands {
+    long long inst = -1, cat = -1;
+    std::chrono::steady_clock::time_point jv{};  // when jvs was collected
+    std::vector<std::string> jvs;                // local Javadoc slugs
+    std::vector<CmdCand> bases;                  // one entry per docset
+    std::vector<CmdCand> versioned;              // offered once word has '~'
+} g_ic;
+
+void build_install_cands(const std::vector<std::string>& jv) {
+    const InstalledSnap& is = installed_snap();
+    const std::vector<doc::Avail>& cat = catalog();
+    const std::set<std::string> have(is.slugs.begin(), is.slugs.end());
+    g_ic.bases.clear();
+    g_ic.versioned.clear();
+
+    std::set<std::string> seen_v;
+    const auto addv = [&](const std::string& slug, const std::string& label) {
+        if(seen_v.insert(slug).second) g_ic.versioned.push_back({slug, label});
+    };
+    for(const doc::Avail& a : cat)
+        if(a.slug.find('~') != std::string::npos)
+            addv(a.slug,
+                 have.contains(a.slug)
+                     ? "installed"
+                     : a.name + (a.version.empty() ? "" : " " + a.version));
+    for(const std::string& s : jv)
+        addv(s, have.contains(s) ? "installed" : "local Javadoc");
+    for(const std::string& s : is.slugs) addv(s, "installed");
 
     std::map<std::string, int> versions;  // base -> how many versions exist
     for(const doc::Avail& a : cat)
         if(a.slug.find('~') != std::string::npos)
-            ++versions[doc::slug_base(a.slug)];
-    // "installed" or the name, plus a pointer to the versions when there are any
+            ++versions[std::string(doc::slug_base(a.slug))];
+    for(const std::string& s : jv) ++versions[std::string(doc::slug_base(s))];
+    // "installed" or the name, plus a pointer to the versions when there are
+    // any
     const auto label = [&](const std::string& base, const std::string& name) {
-        std::string l = is_installed(base) ? "installed" : name;
+        std::string l = is.bases.contains(base) ? "installed" : name;
         if(const auto v = versions.find(base); v != versions.end())
             l += " (" + std::to_string(v->second) + " versions: " + base + "~)";
         return l;
     };
-
+    std::set<std::string> seen;
+    const auto add = [&](const std::string& slug, const std::string& lbl) {
+        if(seen.insert(slug).second) g_ic.bases.push_back({slug, lbl});
+    };
     add("all", "every docset in the registry");
     // winter's own rows first, then the rest of DevDocs
     for(const doc::Docset* d : doc::all_docsets())
-        add(std::string(d->slug), label(std::string(d->slug), std::string(d->name)));
+        add(std::string(d->slug),
+            label(std::string(d->slug), std::string(d->name)));
     for(const doc::Avail& a : cat) {
-        const std::string base = doc::slug_base(a.slug);
+        const std::string base(doc::slug_base(a.slug));
         add(base, label(base, a.name));
     }
-    for(const std::string& s : inst)
+    for(const std::string& s : is.slugs)
         if(s.find('~') == std::string::npos) add(s, "installed");
+}
+
+const InstallCands& install_cands() {
+    constexpr auto kTtl = std::chrono::minutes(5);
+    const auto now = std::chrono::steady_clock::now();
+    if(g_ic.jv == std::chrono::steady_clock::time_point{} ||
+       now - g_ic.jv > kTtl) {
+        g_ic.jvs = local_javadoc_slugs();
+        g_ic.jv = now;
+        g_ic.inst = -1;  // force a rebuild
+    }
+    const long long inst = installed_snap().stamp;
+    catalog();  // refreshes g_cat when catalog.json changed
+    if(inst != g_ic.inst || g_cat.stamp != g_ic.cat) {
+        build_install_cands(g_ic.jvs);
+        g_ic.inst = inst;
+        g_ic.cat = g_cat.stamp;
+    }
+    return g_ic;
+}
+
+// One entry per docset. Versioned slugs ("lua~5.3") are only offered once the
+// word being typed contains a '~', so `lua~<Tab>` lists that docset's versions.
+std::vector<CmdCand> complete_install(std::string_view lead) {
+    const InstallCands& ic = install_cands();
+    std::vector<CmdCand> out;
+    const bool versioned = lead.find('~') != std::string_view::npos;
+    for(const CmdCand& c : versioned ? ic.versioned : ic.bases)
+        if(c.text.starts_with(lead)) out.push_back(c);
     return out;
 }
 
@@ -916,7 +1080,8 @@ void doc_register_commands() {
                  .complete = complete_doc,
                  .run = cmd_doc});
     command_add({.name = "DocInstall",
-                 .desc = "Download and convert docsets for offline use (all = the registry)",
+                 .desc = "Download and convert docsets for offline use (all = "
+                         "the registry)",
                  .usage = ":DocInstall[!] [slug... | all]",
                  .bang = true,
                  .nargs = Nargs::Any,
@@ -924,10 +1089,19 @@ void doc_register_commands() {
                  .run = cmd_docinstall});
     command_add(
         {.name = "DocUpdate",
-         .desc = "Refresh the DevDocs list and installed docsets and their indexes",
+         .desc =
+             "Refresh the DevDocs list and installed docsets and their indexes",
          .usage = ":DocUpdate[!] [slug]",
          .bang = true,
          .nargs = Nargs::Any,
          .complete = complete_update,
          .run = cmd_docupdate});
+    command_add(
+        {.name = "DocRemove",
+         .desc = "Delete installed docsets (a bare name works when only "
+                 "one version is installed)",
+         .usage = ":DocRemove {slug...}",
+         .nargs = Nargs::Any,
+         .complete = complete_update,  // installed slugs, versions included
+         .run = cmd_docremove});
 }

@@ -25,13 +25,21 @@ void editor_kill_to_eol();                                    // ctrl+k
 void editor_paste(std::string text);                          // bracketed paste
 void replace_char_at_cursor(int count, std::string_view ch);  // normal mode r
 bool bump_number_at_cursor(int64_t delta, bool int_only);     // increment num
-void bump_numbers_in_range(size_t start, size_t end, bool linewise,
+bool bump_digit_at_cursor(
+    int64_t delta);  // increment num directly under cursor
+void bump_numbers_in_range(size_t start,
+                           size_t end,
+                           bool linewise,
                            int64_t delta,
                            bool progressive);  // visual increment num
 
 void toggle_case_at_cursor(int count);  // normal mode case swap
-void toggle_case_in_range(size_t start, size_t end,
+void toggle_case_in_range(size_t start,
+                          size_t end,
                           bool linewise);  // visual mode case swap
+
+// joins following lines into E.cy (current line/cursor line)
+void join_lines(size_t first, size_t joins);
 
 void replace_reset();     // forget R's undo state
 bool replace_key(int c);  // true if key handled within R/r

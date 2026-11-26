@@ -108,17 +108,45 @@ std::string slug_base(std::string_view slug) {
 
 namespace {
 
-#define DEVDOCS(slug, name, fence, sep, fts) \
-    {slug, name, fence, sep, fts, Origin::DevDocs, {}, {}, {}, {}, {}, {}},
-#define MDTREE(slug, name, fence, sep, fts, repo, ref, subdir, strip, from, to) \
-    {slug, name, fence, sep, fts, Origin::MdTree, repo, ref, subdir, strip, from, to},
-#define LANGONLY(slug, fence, sep, fts) \
-    {slug, "", fence, sep, fts, Origin::Unlisted, {}, {}, {}, {}, {}, {}},
+#define DEVDOCS(slug, name, fence, sep, fts)                                   \
+    {slug, name, fence, sep, fts, Origin::DevDocs, {}, {}, {}, {}, {}, {}, {}},
+#define MDTREE(                                                                \
+    slug, name, fence, sep, fts, repo, ref, subdir, strip, from, to)           \
+    {slug,                                                                     \
+     name,                                                                     \
+     fence,                                                                    \
+     sep,                                                                      \
+     fts,                                                                      \
+     Origin::MdTree,                                                           \
+     repo,                                                                     \
+     ref,                                                                      \
+     subdir,                                                                   \
+     strip,                                                                    \
+     from,                                                                     \
+     to,                                                                       \
+     {}},
+#define JAVADOC(slug, name, fence, sep, fts, coords)                           \
+    {slug,                                                                     \
+     name,                                                                     \
+     fence,                                                                    \
+     sep,                                                                      \
+     fts,                                                                      \
+     Origin::Javadoc,                                                          \
+     {},                                                                       \
+     {},                                                                       \
+     {},                                                                       \
+     {},                                                                       \
+     {},                                                                       \
+     {},                                                                       \
+     coords},
+#define LANGONLY(slug, fence, sep, fts)                                        \
+    {slug, "", fence, sep, fts, Origin::Unlisted, {}, {}, {}, {}, {}, {}, {}},
 constexpr Docset kDocsets[] = {
 #include "docsets.inc"
 };
 #undef DEVDOCS
 #undef MDTREE
+#undef JAVADOC
 #undef LANGONLY
 
 constexpr LangInfo kUnknown{"", "", "."};
@@ -160,6 +188,11 @@ const Docset* docset_for(std::string_view base) {
 const Docset* source_for(std::string_view base) {
     const Docset* d = docset_for(base);
     return d && d->origin == Origin::MdTree ? d : nullptr;
+}
+
+const Docset* javadoc_for(std::string_view base) {
+    const Docset* d = docset_for(base);
+    return d && d->origin == Origin::Javadoc ? d : nullptr;
 }
 
 std::vector<const Docset*> all_docsets() {
@@ -794,8 +827,9 @@ bool build_docset(const BuildOpts& o,
             ++st.skipped_pages;
             continue;
         }
-        if(o.save_html && !o.markdown && !write_file(out / "html" / (p.stem + ".html"),
-                                      html_to_page(html, p.key, cx))) {
+        if(o.save_html && !o.markdown &&
+           !write_file(out / "html" / (p.stem + ".html"),
+                       html_to_page(html, p.key, cx))) {
             err = "can't write html/" + p.stem + ".html";
             return false;
         }
@@ -1023,6 +1057,33 @@ bool commit_docset(const std::string& root,
     return true;
 }
 
+bool remove_docset(const std::string& root,
+                   const std::string& slug,
+                   std::string& err) {
+    // valid_slug + meta.json: never rm -rf anything that isn't a finished
+    // install
+    if(!valid_slug(slug) || !read_meta((fs::path(root) / slug).string())) {
+        err = slug + " is not installed";
+        return false;
+    }
+    std::error_code ec;
+    fs::remove_all(fs::path(root) / slug, ec);
+    if(ec) {
+        err = "can't delete " + slug + ": " + ec.message();
+        return false;
+    }
+    std::vector<Recent> all = load_recent(root);
+    const size_t before = all.size();
+    std::erase_if(all, [&](const Recent& r) { return r.slug == slug; });
+    if(all.size() != before) {
+        std::string out;
+        for(const Recent& x : all)
+            out += x.slug + "\t" + x.name + "\t" + x.target + "\n";
+        write_atomic(fs::path(root) / "recent.state", out);
+    }
+    return write_level0(root, err);
+}
+
 bool write_level0(const std::string& root, std::string& err) {
     const std::vector<DocsetInfo> all = installed(root);
     std::string md = "# Documentation\n\n";
@@ -1081,6 +1142,7 @@ std::string sh_quote(std::string_view s) {
 
 std::string install_script(const ScriptOpts& o) {
     const Docset* src = source_for(slug_base(o.slug));
+    const Docset* jd = javadoc_for(slug_base(o.slug));
     std::string s;
     s += "EXE=" + sh_quote(o.exe) + "\nREQ=" + sh_quote(o.slug) +
          "\nROOT=" + sh_quote(o.root) + "\nCDN=" + sh_quote(o.cdn) +
@@ -1113,6 +1175,35 @@ REV=$(GIT_TERMINAL_PROMPT=0 git ls-remote "https://github.com/$REPO.git" "refs/h
 [ -n "$REV" ] || fail "resolving $REPO@$REF"
 )SH";
     }
+    if(jd) {
+        // Javadoc the build tools already fetched (Maven, Gradle, distro) comes
+        // first; the version found is both the freshness stamp and the slug
+        // suffix ("lwjgl" -> "lwjgl~3.3.6"). Without a local copy: Maven
+        // Central, at the version the slug names, else the newest release.
+        s += "COORDS=" + sh_quote(std::string(jd->coords)) + "\nLOCAL=0\n";
+        s += R"SH(MAVEN="${WINTER_DOCS_MAVEN:-https://repo1.maven.org/maven2}"
+command -v unzip >/dev/null 2>&1 || fail "unzip not found"
+echo "looking for local Javadoc"
+if "$EXE" --doc-locate "$REQ" > "$TMP/dl/local.tsv"; then
+  LOCAL=1
+  REV=$(sed -n 1p "$TMP/dl/local.tsv")
+  sed 1d "$TMP/dl/local.tsv" > "$TMP/dl/jars.tsv"
+  [ -n "$REV" ] || fail "reading the local Javadoc version"
+else
+  case "$REQ" in
+  *~*) REV=${REQ#*~} ;;
+  *)
+    set -- $COORDS
+    G=${1%%:*}; A=${1##*:}
+    echo "checking $A"
+    REV=$(curl -fsSL --max-time 60 "$MAVEN/$(echo "$G" | tr . /)/$A/maven-metadata.xml" | sed -n 's:.*<release>\(.*\)</release>.*:\1:p' | head -n 1)
+    [ -n "$REV" ] || fail "resolving $A on Maven Central"
+    ;;
+  esac
+fi
+SLUG="${REQ%%~*}~$REV"
+)SH";
+    }
     s += R"SH(if [ "$UPDATE" = 1 ] && [ "$FORCE" = 0 ]; then
   if "$EXE" --doc-check "$SLUG" "$ROOT" "$TMP/dl/docs.json" "$HTML" "$REV"; then
     echo "$SLUG is up to date"
@@ -1125,6 +1216,28 @@ fi
 echo "downloading $SLUG"
 curl -fsSL --retry 2 --max-time 900 "https://codeload.github.com/$REPO/tar.gz/$REV" | tar -xz -C "$TMP/src" --strip-components=1 || fail "downloading $SLUG"
 )SH";
+    } else if(jd) {
+        s += R"SH(mkdir "$TMP/src" || fail "can't create $TMP/src"
+if [ "$LOCAL" = 1 ]; then
+  while IFS="$(printf '\t')" read -r a p; do
+    [ -n "$a" ] || continue
+    echo "using $a $REV"
+    mkdir "$TMP/src/$a" || fail "can't create $TMP/src/$a"
+    if [ -d "$p" ]; then
+      cp -R "$p/." "$TMP/src/$a/" || fail "copying $a"
+    else
+      unzip -q "$p" -d "$TMP/src/$a" || fail "unpacking $a"
+    fi
+  done < "$TMP/dl/jars.tsv"
+else
+  for c in $COORDS; do
+    g=${c%%:*}; a=${c##*:}
+    echo "downloading $a $REV"
+    curl -fsSL --retry 2 --max-time 300 "$MAVEN/$(echo "$g" | tr . /)/$a/$REV/$a-$REV-javadoc.jar" -o "$TMP/dl/$a.jar" || fail "downloading $a-$REV-javadoc.jar"
+    mkdir "$TMP/src/$a" && unzip -q "$TMP/dl/$a.jar" -d "$TMP/src/$a" || fail "unpacking $a"
+  done
+fi
+)SH";
     } else {
         s += R"SH(echo "downloading $SLUG index.json"
 curl -fsSL --retry 2 --max-time 120 "$CDN/$SLUG/index.json" -o "$TMP/dl/index.json" || fail "downloading $SLUG index.json (not a DevDocs slug?)"
@@ -1132,13 +1245,15 @@ echo "downloading $SLUG db.json"
 curl -fsSL --retry 2 --max-time 900 "$CDN/$SLUG/db.json" -o "$TMP/dl/db.json" || fail "downloading $SLUG db.json"
 )SH";
     }
-    s += R"SH(WINTER_DOCS_REV="$REV" "$EXE" --doc-build "$SLUG" "$TMP" "$ROOT" "$HTML" || exit 1
+    s +=
+        R"SH(WINTER_DOCS_REV="$REV" "$EXE" --doc-build "$SLUG" "$TMP" "$ROOT" "$HTML" || exit 1
 )SH";
     return s;
 }
 
 std::string catalog_script(const ScriptOpts& o) {
-    std::string s = "ROOT=" + sh_quote(o.root) + "\nMANIFEST=" + sh_quote(o.manifest) + "\n";
+    std::string s = "ROOT=" + sh_quote(o.root) +
+                    "\nMANIFEST=" + sh_quote(o.manifest) + "\n";
     s += R"SH(fail() { echo "FAILED: $1"; exit 1; }
 command -v curl >/dev/null 2>&1 || fail "curl not found"
 mkdir -p "$ROOT" || fail "can't create $ROOT"
@@ -1159,26 +1274,27 @@ std::string json_str(std::string_view s) {
     std::string o = "\"";
     for(const unsigned char c : s) {
         switch(c) {
-        case '"':  o += "\\\""; break;
-        case '\\': o += "\\\\"; break;
-        case '\n': o += "\\n";  break;
-        case '\r': o += "\\r";  break;
-        case '\t': o += "\\t";  break;
-        default:
-            if(c < 0x20) {
-                char b[8];
-                std::snprintf(b, sizeof b, "\\u%04x", c);
-                o += b;
-            } else {
-                o += static_cast<char>(c);
-            }
+            case '"': o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n"; break;
+            case '\r': o += "\\r"; break;
+            case '\t': o += "\\t"; break;
+            default:
+                if(c < 0x20) {
+                    char b[8];
+                    std::snprintf(b, sizeof b, "\\u%04x", c);
+                    o += b;
+                } else {
+                    o += static_cast<char>(c);
+                }
         }
     }
     return o + "\"";
 }
 
 // First "# ..." line with any <tags> stripped:
-// "# <small>nlohmann::basic_json::</small>push_back" -> "nlohmann::basic_json::push_back"
+// "# <small>nlohmann::basic_json::</small>push_back" ->
+// "nlohmann::basic_json::push_back"
 std::string md_title(std::string_view md) {
     size_t i = md.starts_with("# ") ? 0 : md.find("\n# ");
     if(i == std::string_view::npos) return {};
@@ -1225,7 +1341,8 @@ std::string fix_links(std::string_view md,
            tgt.find(' ') == std::string::npos) {
             const std::string k0 =
                 tgt.ends_with(".md") ? tgt.substr(0, tgt.size() - 3) : tgt;
-            const std::string k = (dir / k0).lexically_normal().generic_string();
+            const std::string k =
+                (dir / k0).lexically_normal().generic_string();
             if(keys.contains(k))
                 tgt = fs::path(k)
                           .lexically_relative(dir.empty() ? fs::path(".") : dir)
@@ -1319,6 +1436,301 @@ bool import_tree(const Docset& s,
     return true;
 }
 
+namespace {
+
+// "[...]" out of a Javadoc search index (`typeSearchIndex = [...];update...`)
+std::optional<Json> load_search_index(const fs::path& p) {
+    std::string t;
+    if(!read_file(p.string(), t)) return std::nullopt;
+    const size_t a = t.find('['), b = t.rfind(']');
+    if(a == std::string::npos || b == std::string::npos || b < a)
+        return std::nullopt;
+    auto j = Json::parse(std::string_view(t).substr(a, b - a + 1));
+    if(!j || !j->is_array()) return std::nullopt;
+    return j;
+}
+
+// Drop `<open ...> ... </open>` blocks whose opening tag starts with `open`,
+// matching nested tags of the same name.
+std::string
+drop_blocks(std::string_view h, std::string_view open, std::string_view tag) {
+    const std::string o1 = "<" + std::string(tag),
+                      c1 = "</" + std::string(tag) + ">";
+    std::string out;
+    size_t i = 0;
+    while(i < h.size()) {
+        const size_t p = h.find(open, i);
+        if(p == std::string_view::npos) {
+            out.append(h.substr(i));
+            break;
+        }
+        out.append(h.substr(i, p - i));
+        int depth = 0;
+        size_t q = p;
+        while(q < h.size()) {
+            const size_t no = h.find(o1, q), nc = h.find(c1, q);
+            if(nc == std::string_view::npos) {
+                q = h.size();
+                break;
+            }
+            if(no != std::string_view::npos && no < nc) {
+                ++depth;
+                q = no + o1.size();
+            } else {
+                --depth;
+                q = nc + c1.size();
+                if(depth == 0) break;
+            }
+        }
+        i = q;
+    }
+    return out;
+}
+
+// <div class="member-signature">..</div> (no nested div) -> <pre>..</pre>
+std::string signatures_to_pre(std::string_view h) {
+    std::string out;
+    size_t i = 0;
+    while(i < h.size()) {
+        size_t p = std::string_view::npos;
+        size_t plen = 0;
+        for(const std::string_view k : {"<div class=\"member-signature\">",
+                                        "<div class=\"type-signature\">"}) {
+            const size_t f = h.find(k, i);
+            if(f < p) {
+                p = f;
+                plen = k.size();
+            }
+        }
+        if(p == std::string_view::npos) {
+            out.append(h.substr(i));
+            break;
+        }
+        const size_t e = h.find("</div>", p + plen);
+        if(e == std::string_view::npos) {
+            out.append(h.substr(i));
+            break;
+        }
+        out.append(h.substr(i, p - i));
+        std::string body(h.substr(p + plen, e - p - plen));
+        for(size_t n; (n = body.find("&nbsp;")) != std::string::npos;)
+            body.replace(n, 6, " ");
+        out += "<pre>" + body + "</pre>";
+        i = e + 6;
+    }
+    return out;
+}
+
+// <section class="detail" id="X"> <h3>..  ->  <h3 id="X">..: the converter
+// reads an anchor off the heading, and Javadoc puts it on the section.
+std::string hoist_ids(std::string_view h) {
+    constexpr std::string_view k = "<section class=\"detail\" id=\"";
+    std::string out;
+    size_t i = 0;
+    while(i < h.size()) {
+        const size_t p = h.find(k, i);
+        if(p == std::string_view::npos) {
+            out.append(h.substr(i));
+            break;
+        }
+        const size_t ie = h.find('"', p + k.size());
+        size_t q = ie == std::string_view::npos ? ie : h.find('>', ie);
+        if(q == std::string_view::npos) {
+            out.append(h.substr(i));
+            break;
+        }
+        const std::string_view id = h.substr(p + k.size(), ie - p - k.size());
+        size_t n = q + 1;
+        while(n < h.size() && std::isspace(static_cast<unsigned char>(h[n])))
+            ++n;
+        out.append(h.substr(i, q + 1 - i));
+        if(h.substr(n, 2) == "<h" && n + 3 < h.size() && h[n + 3] == '>') {
+            out.append(h.substr(q + 1, n - q - 1));
+            out.append(h.substr(n, 3));
+            out += " id=\"" + std::string(id) + "\"";
+            i = n + 3;
+        } else {
+            i = q + 1;
+        }
+    }
+    return out;
+}
+
+// The member lists are <ul><li><section>..: markdown would indent every member
+// under a bullet. Make them plain divs.
+std::string unwrap_lists(std::string_view h) {
+    std::string s(h);
+    for(const std::string_view a : {"<li>\n<section", "<li><section"})
+        for(size_t n; (n = s.find(a)) != std::string::npos;)
+            s.replace(n, 4, "<div>");
+    for(const std::string_view a : {"</section>\n</li>", "</section></li>"})
+        for(size_t n; (n = s.find(a)) != std::string::npos;)
+            s.replace(s.find("</li>", n), 5, "</div>");
+    std::string out;
+    std::vector<bool> stack;  // per open <ul>: was it turned into a div
+    size_t i = 0;
+    while(i < s.size()) {
+        const size_t o = s.find("<ul", i), c = s.find("</ul>", i);
+        if(o == std::string::npos && c == std::string::npos) {
+            out.append(s, i, std::string::npos);
+            break;
+        }
+        if(o != std::string::npos && (c == std::string::npos || o < c)) {
+            const size_t e = s.find('>', o);
+            if(e == std::string::npos) {
+                out.append(s, i, std::string::npos);
+                break;
+            }
+            const std::string_view tag =
+                std::string_view(s).substr(o, e - o + 1);
+            const bool plain = tag == "<ul class=\"details-list\">" ||
+                               tag == "<ul class=\"member-list\">" ||
+                               tag == "<ul class=\"summary-list\">";
+            stack.push_back(plain);
+            out.append(s, i, o - i);
+            out += plain ? "<div>" : std::string(tag);
+            i = e + 1;
+        } else {
+            const bool plain = !stack.empty() && stack.back();
+            if(!stack.empty()) stack.pop_back();
+            out.append(s, i, c - i);
+            out += plain ? "</div>" : "</ul>";
+            i = c + 5;
+        }
+    }
+    return out;
+}
+
+// LWJGL's GL11C, GL45C...: the core-profile twins of GL11, GL45... Their
+// members carry only the C prototype, so they would shadow the documented
+// ones. Their pages stay (GL11 links to them for its constants).
+bool is_core_twin(std::string_view cls) {
+    if(!cls.starts_with("GL") || !cls.ends_with('C') || cls.size() < 4)
+        return false;
+    for(const char c : cls.substr(2, cls.size() - 3))
+        if(!std::isdigit(static_cast<unsigned char>(c))) return false;
+    return true;
+}
+
+// The <main> of a Javadoc page, reduced to what reads well as markdown.
+std::string javadoc_body(std::string_view page) {
+    const size_t a = page.find("<main");
+    const size_t b = page.rfind("</main>");
+    if(a == std::string_view::npos || b == std::string_view::npos || b < a)
+        return {};
+    const size_t gt = page.find('>', a);
+    std::string h(page.substr(gt + 1, b - gt - 1));
+    h = drop_blocks(h, "<section class=\"summary\">", "section");
+    h = drop_blocks(h, "<button", "button");
+    h = signatures_to_pre(h);
+    h = unwrap_lists(h);
+    return hoist_ids(h);
+}
+
+}  // namespace
+
+bool import_javadoc(const Docset& s,
+                    const std::string& src_dir,
+                    const std::string& dl_dir,
+                    std::string& err) {
+    (void)s;
+    std::error_code ec;
+    std::vector<fs::path> mods;
+    for(const auto& d : fs::directory_iterator(src_dir, ec))
+        if(d.is_directory()) mods.push_back(d.path());
+    std::sort(mods.begin(), mods.end());
+
+    std::string idx = "{\"entries\":[", db = "{";
+    bool first_e = true, first_p = true;
+    std::unordered_set<std::string> have;  // page keys already in db
+    const auto add_entry = [&](const std::string& name,
+                               const std::string& path,
+                               const std::string& type) {
+        idx += std::string(first_e ? "" : ",") + "{\"name\":" + json_str(name) +
+               ",\"path\":" + json_str(path) + ",\"type\":" + json_str(type) +
+               "}";
+        first_e = false;
+    };
+    // a page's HTML goes in once; false when the page is missing or empty
+    const auto add_page = [&](const fs::path& mod, const std::string& key) {
+        if(have.contains(key)) return true;
+        std::string html;
+        if(!read_file((mod / (key + ".html")).string(), html)) return false;
+        const std::string body = javadoc_body(html);
+        if(body.empty()) return false;
+        db += std::string(first_p ? "" : ",") + json_str(key) + ":" +
+              json_str(body);
+        first_p = false;
+        have.insert(key);
+        return true;
+    };
+    const auto pkg_path = [](std::string p) {
+        std::replace(p.begin(), p.end(), '.', '/');
+        return p;
+    };
+
+    for(const fs::path& mod : mods) {
+        // packages
+        if(const auto pk = load_search_index(mod / "package-search-index.js"))
+            for(const Json& e : pk->items()) {
+                const std::string p(e["l"].as_str());
+                if(p.empty() || !e["u"].as_str().empty()) continue;
+                const std::string key = pkg_path(p) + "/package-summary";
+                if(add_page(mod, key)) add_entry(p, key, "Package");
+            }
+        // types
+        std::unordered_set<std::string>
+            type_pages;  // "pkg.Class" -> has a page
+        if(const auto ty = load_search_index(mod / "type-search-index.js"))
+            for(const Json& e : ty->items()) {
+                const std::string p(e["p"].as_str()), l(e["l"].as_str());
+                if(p.empty() || l.empty()) continue;
+                const std::string key = pkg_path(p) + "/" + l;
+                if(!add_page(mod, key)) continue;
+                type_pages.insert(p + "." + l);
+                add_entry(p + "." + l, key, p);
+                add_entry(l, key, p);
+            }
+        // members; a bare name is only indexed when one class owns it
+        struct Mem {
+            std::string base, cls, key, anchor, pkg;
+        };
+        std::vector<Mem> mems;
+        std::map<std::string, std::set<std::string>> owners;
+        if(const auto me = load_search_index(mod / "member-search-index.js"))
+            for(const Json& e : me->items()) {
+                const std::string p(e["p"].as_str()), c(e["c"].as_str()),
+                    l(e["l"].as_str());
+                if(p.empty() || c.empty() || l.empty() || is_core_twin(c) ||
+                   !type_pages.contains(p + "." + c))
+                    continue;
+                std::string anchor(e["u"].as_str());
+                if(anchor.empty()) anchor = l;
+                const std::string base = l.substr(0, l.find('('));
+                mems.push_back({base, c, pkg_path(p) + "/" + c, anchor, p});
+                owners[base].insert(p + "." + c);
+            }
+        for(const Mem& m : mems) {
+            const std::string path = m.key + "#" + m.anchor;
+            add_entry(m.cls + "." + m.base, path, m.pkg);
+            add_entry(m.pkg + "." + m.cls + "." + m.base, path, m.pkg);
+            if(owners[m.base].size() == 1) add_entry(m.base, path, m.pkg);
+        }
+    }
+    if(first_p) {
+        err = "no Javadoc pages found (unexpected jar layout?)";
+        return false;
+    }
+    idx += "]}";
+    db += "}";
+    if(!write_file(fs::path(dl_dir) / "index.json", idx) ||
+       !write_file(fs::path(dl_dir) / "db.json", db)) {
+        err = "can't write the converted source";
+        return false;
+    }
+    return true;
+}
+
 // ---- cli --------------------------------------------------------------------
 
 namespace {
@@ -1381,9 +1793,128 @@ std::vector<Avail> load_catalog(const std::string& root) {
             if(a.slug.empty() || !valid_slug(a.slug)) continue;
             a.name = std::string(e["name"].as_str());
             a.version = std::string(e["release"].as_str());
-            if(a.version.empty()) a.version = std::string(e["version"].as_str());
+            if(a.version.empty())
+                a.version = std::string(e["version"].as_str());
             out.push_back(std::move(a));
         }
+    return out;
+}
+
+// ---- local Javadoc
+// ------------------------------------------------------------
+
+namespace {
+
+std::string home_dir() {
+    const char* h = std::getenv("HOME");
+    return h ? h : "";
+}
+
+// ~/.m2/settings.xml's <localRepository> (maven.repo.local), else
+// ~/.m2/repository. XML comments are skipped: the stock settings.xml carries
+// a commented-out example of that very element.
+std::string maven_local_repo() {
+    if(const char* e = std::getenv("WINTER_DOCS_MAVEN_REPO"); e && *e) return e;
+    const std::string home = home_dir();
+    std::string xml;
+    if(read_file(home + "/.m2/settings.xml", xml)) {
+        for(size_t a; (a = xml.find("<!--")) != std::string::npos;) {
+            const size_t b = xml.find("-->", a);
+            xml.erase(a, b == std::string::npos ? b : b + 3 - a);
+        }
+        const size_t a = xml.find("<localRepository>");
+        const size_t b = xml.find("</localRepository>");
+        if(a != std::string::npos && b != std::string::npos && b > a) {
+            std::string p = xml.substr(a + 17, b - a - 17);
+            const size_t f = p.find_first_not_of(" \t\r\n");
+            const size_t l = p.find_last_not_of(" \t\r\n");
+            p = f == std::string::npos ? "" : p.substr(f, l - f + 1);
+            if(p.starts_with("${user.home}")) p = home + p.substr(12);
+            if(p.starts_with('/')) return p;
+        }
+    }
+    return home + "/.m2/repository";
+}
+
+std::vector<fs::path> subdirs(const fs::path& d) {
+    std::vector<fs::path> v;
+    std::error_code ec;
+    for(const auto& e : fs::directory_iterator(d, ec))
+        if(e.is_directory(ec)) v.push_back(e.path());
+    return v;
+}
+
+}  // namespace
+
+std::vector<JavadocFind> find_javadoc(const Docset& s) {
+    std::map<std::string, std::vector<JavadocSrc>> by_ver;
+    // first hit per (version, artifact) wins: Maven, then Gradle, then the
+    // system
+    const auto add =
+        [&](const std::string& ver, const std::string& art, const fs::path& p) {
+            const std::string path = p.string();
+            if(path.find('\t') != std::string::npos ||
+               path.find('\n') != std::string::npos ||
+               !valid_slug(std::string(s.slug) + "~" + ver))
+                return;
+            auto& v = by_ver[ver];
+            for(const JavadocSrc& o : v)
+                if(o.artifact == art) return;
+            v.push_back({art, path});
+        };
+    const std::string gh = [] {
+        const char* e = std::getenv("GRADLE_USER_HOME");
+        return e && *e ? std::string(e) : home_dir() + "/.gradle";
+    }();
+    const std::string m2 = maven_local_repo();
+
+    std::error_code ec;
+    size_t i = 0;
+    while(i < s.coords.size()) {
+        size_t e = s.coords.find(' ', i);
+        if(e == std::string_view::npos) e = s.coords.size();
+        const std::string c(s.coords.substr(i, e - i));
+        i = e + 1;
+        const size_t colon = c.find(':');
+        if(colon == std::string::npos) continue;
+        std::string gpath = c.substr(0, colon);
+        std::replace(gpath.begin(), gpath.end(), '.', '/');
+        const std::string art = c.substr(colon + 1);
+        const std::string jar = art + "-";
+
+        // Maven layout: <repo>/<group
+        // path>/<artifact>/<version>/<artifact>-<version>-javadoc.jar
+        for(const std::string& repo :
+            {m2, std::string("/usr/share/maven-repo")})
+            for(const fs::path& vd : subdirs(fs::path(repo) / gpath / art)) {
+                const std::string ver = vd.filename().string();
+                const fs::path f = vd / (jar + ver + "-javadoc.jar");
+                if(fs::is_regular_file(f, ec)) add(ver, art, f);
+            }
+        // Gradle cache:
+        // <group>/<artifact>/<version>/<hash>/<artifact>-<version>-javadoc.jar
+        for(const fs::path& vd :
+            subdirs(fs::path(gh) / "caches/modules-2/files-2.1" /
+                    c.substr(0, colon) / art))
+            for(const fs::path& hd : subdirs(vd)) {
+                const std::string ver = vd.filename().string();
+                const fs::path f = hd / (jar + ver + "-javadoc.jar");
+                if(fs::is_regular_file(f, ec)) add(ver, art, f);
+            }
+        // distro packages unpack the HTML: no version to read, so "system"
+        const fs::path sys = fs::path("/usr/share/javadoc") / art;
+        if(fs::is_regular_file(sys / "type-search-index.js", ec))
+            add("system", art, sys);
+    }
+
+    std::vector<JavadocFind> out;
+    for(auto& [ver, srcs] : by_ver) out.push_back({ver, std::move(srcs)});
+    std::sort(
+        out.begin(), out.end(), [](const JavadocFind& a, const JavadocFind& b) {
+            if((a.version == "system") != (b.version == "system"))
+                return b.version == "system";           // unversioned last
+            return version_less(b.version, a.version);  // newest first
+        });
     return out;
 }
 
@@ -1423,13 +1954,37 @@ std::string short_rev(std::string_view rev) {
     return std::string(rev.substr(0, 12));
 }
 
+// --doc-locate <slug>: the Javadoc a project's build tools already fetched.
+// Prints the version, then one "<artifact>\t<jar or directory>" line per
+// module. "lwjgl" takes the newest local version, "lwjgl~3.3.6" that one. Exit
+// 1 when nothing is found locally (the install script then falls back to Maven
+// Central).
+int cli_locate(int argc, const char* argv[]) {
+    if(argc < 3) return 2;
+    const std::string req = argv[2];
+    const Docset* jd = javadoc_for(slug_base(req));
+    if(!jd) return 1;
+    const size_t t = req.find('~');
+    const std::string want = t == std::string::npos ? "" : req.substr(t + 1);
+    for(const JavadocFind& f : find_javadoc(*jd)) {
+        if(!want.empty() && f.version != want) continue;
+        std::puts(f.version.c_str());
+        for(const JavadocSrc& src : f.srcs)
+            std::printf("%s\t%s\n", src.artifact.c_str(), src.path.c_str());
+        return 0;
+    }
+    return 1;
+}
+
 int cli_check(int argc, const char* argv[]) {  // 0 = up to date
     if(argc < 6) return 2;
     const std::string slug = argv[2], root = argv[3];
     const bool html = std::string_view(argv[5]) == "1";
     const auto meta = read_meta(root + "/" + slug);
-    if(source_for(slug_base(slug))) {  // no manifest entry: compare commits
-        const std::string rev = argc > 6 ? short_rev(argv[6]) : std::string();
+    if(source_for(slug_base(slug)) || javadoc_for(slug_base(slug))) {
+        // no manifest entry: compare the commit / Maven release
+        std::string rev = argc > 6 ? argv[6] : "";
+        if(source_for(slug_base(slug))) rev = short_rev(rev);
         return meta && !rev.empty() && meta->version == rev ? 0 : 1;
     }
     const auto m = load_manifest(argv[4]);
@@ -1450,6 +2005,14 @@ int cli_build(int argc, const char* argv[]) {
     if(src) {
         std::string ierr;
         if(!import_tree(*src, tmp + "/src", tmp + "/dl", ierr)) {
+            say_line("FAILED: " + ierr);
+            return 1;
+        }
+    }
+    const Docset* jd = javadoc_for(slug_base(slug));
+    if(jd) {
+        std::string ierr;
+        if(!import_javadoc(*jd, tmp + "/src", tmp + "/dl", ierr)) {
             say_line("FAILED: " + ierr);
             return 1;
         }
@@ -1477,6 +2040,14 @@ int cli_build(int argc, const char* argv[]) {
         o.source = "https://github.com/" + std::string(src->repo) + "/tree/" +
                    std::string(src->ref) + "/" + std::string(src->subdir);
     }
+    if(jd) {  // the pages are HTML fragments, so markdown stays false
+        std::string first(jd->coords.substr(0, jd->coords.find(' ')));
+        if(const size_t c = first.find(':'); c != std::string::npos)
+            first[c] = '/';
+        o.name = std::string(jd->name);
+        o.version = env_or("WINTER_DOCS_REV", "");
+        o.source = "https://central.sonatype.com/artifact/" + first;
+    }
     // a hand-written topics.tsv outlives updates
     std::error_code ec;
     const fs::path old_topics = fs::path(root) / slug / "topics.tsv";
@@ -1488,6 +2059,10 @@ int cli_build(int argc, const char* argv[]) {
     if(!build_docset(o, say_line, st, err)) {
         say_line("FAILED: " + err);
         return 1;
+    }
+    {  // the unpacked source is only the importer's input
+        std::error_code rec;
+        fs::remove_all(fs::path(tmp) / "src", rec);
     }
     say_line("installing");
     if(!commit_docset(root, slug, tmp, err) || !write_level0(root, err)) {
@@ -1506,6 +2081,7 @@ int cli_main(int argc, const char* argv[]) {
     if(cmd == "--doc-resolve") return cli_resolve(argc, argv);
     if(cmd == "--doc-check") return cli_check(argc, argv);
     if(cmd == "--doc-build") return cli_build(argc, argv);
+    if(cmd == "--doc-locate") return cli_locate(argc, argv);
     return 2;
 }
 

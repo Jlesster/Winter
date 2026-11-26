@@ -1,6 +1,6 @@
 #pragma once
 
-#define WINTER_VERSION "0.1.2"
+#define WINTER_VERSION "0.1.3"
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 enum EditorMode {
