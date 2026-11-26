@@ -1,3 +1,20 @@
+/*
+ * Winter - A lightweight text editor
+ * Copyright (C) 2026 Jessica Price
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 // The Lua half of the plugin API (winter.tbl/str/inspect/validate/notify/
 // schedule/defer/system/autocmd, buffer handles, winter.g/b). Plain Lua text
 // embedded here so the binary needs no runtime files; the source of truth is

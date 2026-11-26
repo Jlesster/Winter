@@ -2,7 +2,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-C++23-8839ef?style=for-the-badge&logo=cplusplus&logoColor=white" alt="C++23" />
-  <img src="https://img.shields.io/badge/license-MIT-939ab7?style=for-the-badge&logo=opensourceinitiative&logoColor=white" alt="MIT License" />
+  <img src="https://img.shields.io/badge/License-GPL--3.0-939ab7?style=for-the-badge&logo=opensourceinitiative&logoColor=white" alt="GPL-3.0-or-later License" />
   <img src="https://img.shields.io/badge/build-meson-f5c2e7?style=for-the-badge&logo=meson&logoColor=white" alt="Meson" />
   <img src="https://img.shields.io/badge/platform-linux-fab387?style=for-the-badge&logo=linux&logoColor=white" alt="Linux" />
   <img src="https://img.shields.io/badge/status-active-a6e3a1?style=for-the-badge" alt="Active" />

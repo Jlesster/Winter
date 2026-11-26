@@ -62,7 +62,7 @@
     {
       packages.${system}.default = pkgs.stdenv.mkDerivation {
         pname = "winter";
-        version = "0.1.3";
+        version = "0.1.4";
         src = self;
 
         nativeBuildInputs = with pkgs; [

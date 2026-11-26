@@ -1,7 +1,7 @@
 project(
   'winter',
   ['c', 'cpp'],
-  version: '0.1.3',
+  version: '0.1.4',
   default_options: [
     'cpp_std=c++23',
     'warning_level=3',

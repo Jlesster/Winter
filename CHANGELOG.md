@@ -4,6 +4,15 @@ All notable changes to winter are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor bumps may break things).
 
+## [0.1.4] - 2026-11-26
+
+Test cases added to tests/meson.build and validity checked. all 24 tests pass.
+accompanying version bump
+
+### Added
+
+- License change and header insertion across src files
+
 ## [0.1.3] - 2026-11-26
 
 Documentation grows Java: `lwjgl` and any other Javadoc-backed docset can be
