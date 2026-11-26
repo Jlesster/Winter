@@ -41,7 +41,7 @@ unsigned char ctrl_byte(int base) {
         case '8':
         case '?': return 0x7f;
         case BACKSPACE:
-            return 0x08;  // Ctrl-Alt-Backspace; plain Ctrl is CTRL_BACKSPACE
+            return '\x17';  // Ctrl-Alt-Backspace; plain Ctrl is CTRL_BACKSPACE
         default: return static_cast<unsigned char>(base);
     }
 }
@@ -63,7 +63,7 @@ std::string term_encode_key(int key, TermKeyMode mode) {
         case DELETE: return tilde_key(3, mods);
         case PAGE_UP: return tilde_key(5, mods);
         case PAGE_DOWN: return tilde_key(6, mods);
-        case CTRL_BACKSPACE: return "\x17";
+        case CTRL_BACKSPACE: return "\x08";
         case PASTE:
         case NONE: return {};
         default: break;

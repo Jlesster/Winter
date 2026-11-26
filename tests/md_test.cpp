@@ -17,16 +17,16 @@ std::optional<std::vector<Span>> syntax_highlight(std::string_view,
 int opt_ts() { return 4; }
 
 static int fails = 0;
-#define CHECK(c)                                             \
-    do {                                                     \
-        if(!(c)) {                                           \
-            std::printf("FAIL line %d: %s\n", __LINE__, #c); \
-            ++fails;                                         \
-        }                                                    \
+#define CHECK(c)                                                               \
+    do {                                                                       \
+        if(!(c)) {                                                             \
+            std::printf("FAIL line %d: %s\n", __LINE__, #c);                   \
+            ++fails;                                                           \
+        }                                                                      \
     } while(0)
 
-static bool has_span(const MdDoc& d, MdRole r, bool marker, size_t lo,
-                     size_t hi) {
+static bool
+has_span(const MdDoc& d, MdRole r, bool marker, size_t lo, size_t hi) {
     for(const MdSpan& s : d.spans)
         if(s.role == r && s.marker == marker && s.lo == lo && s.hi == hi)
             return true;

@@ -127,3 +127,4 @@ if __name__ == "__main__":
                 show(m, a, b)
     print(f"{count} cases, {bad} mismatches")
     tmux("kill-server")
+    sys.exit(1 if bad else 0)

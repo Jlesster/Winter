@@ -5,12 +5,12 @@
 #include "../src/keys.hpp"
 
 static int failed = 0;
-#define CHECK(cond)                                                      \
-    do {                                                                 \
-        if(!(cond)) {                                                    \
-            std::printf("FAIL line %d: %s\n", __LINE__, #cond);          \
-            ++failed;                                                    \
-        }                                                                \
+#define CHECK(cond)                                                            \
+    do {                                                                       \
+        if(!(cond)) {                                                          \
+            std::printf("FAIL line %d: %s\n", __LINE__, #cond);                \
+            ++failed;                                                          \
+        }                                                                      \
     } while(0)
 
 int main() {
@@ -63,8 +63,7 @@ int main() {
     };
 
     // prefix, then completion
-    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) ==
-          Chord::Result::Buffered);
+    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) == Chord::Result::Buffered);
     CHECK(chord.pending());
     CHECK(chord.feed(INSERT, 'a', emit) == Chord::Result::Handled);
     CHECK(!chord.pending());
@@ -80,16 +79,14 @@ int main() {
     // prefix, then mismatch: the pending S-Space is replayed as a space
     hits = 0;
     emitted.clear();
-    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) ==
-          Chord::Result::Buffered);
+    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) == Chord::Result::Buffered);
     CHECK(chord.feed(INSERT, 'q', emit) == Chord::Result::Pass);
     CHECK(emitted == " ");
     CHECK(hits == 0);
 
     // timeout of a prefix-only chord replays the key as literal text
     emitted.clear();
-    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) ==
-          Chord::Result::Buffered);
+    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) == Chord::Result::Buffered);
     chord.timeout(emit);
     CHECK(emitted == " ");
     CHECK(!chord.pending());
@@ -103,8 +100,7 @@ int main() {
 
     // wants_char: the key after the mapping becomes the action argument
     arg_seen.clear();
-    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) ==
-          Chord::Result::Buffered);
+    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) == Chord::Result::Buffered);
     CHECK(chord.feed(INSERT, 'f', emit) == Chord::Result::Handled);
     CHECK(!chord.pending());
     CHECK(chord.feed(INSERT, 'x', emit) == Chord::Result::Handled);
@@ -112,8 +108,7 @@ int main() {
 
     // Esc cancels a pending chord instead of replaying it
     emitted.clear();
-    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) ==
-          Chord::Result::Buffered);
+    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) == Chord::Result::Buffered);
     CHECK(chord.feed(INSERT, '\x1b', emit) == Chord::Result::Pass);
     CHECK(!chord.pending());
     CHECK(emitted.empty());
@@ -128,8 +123,7 @@ int main() {
     CHECK(emitted.empty());
 
     hits = 0;
-    CHECK(chord.feed(INSERT, '\r' | MOD_CTRL, emit) ==
-          Chord::Result::Buffered);
+    CHECK(chord.feed(INSERT, '\r' | MOD_CTRL, emit) == Chord::Result::Buffered);
     CHECK(chord.feed(INSERT, 'b', emit) == Chord::Result::Handled);
     CHECK(hits == 1);
 
@@ -152,8 +146,7 @@ int main() {
     // a pending modified key replays as its plain key
     hits = 0;
     emitted.clear();
-    CHECK(chord.feed(INSERT, 'j' | MOD_ALT, emit) ==
-          Chord::Result::Buffered);
+    CHECK(chord.feed(INSERT, 'j' | MOD_ALT, emit) == Chord::Result::Buffered);
     CHECK(chord.feed(INSERT, 'q', emit) == Chord::Result::Pass);
     CHECK(emitted == "j");
     CHECK(hits == 0);
@@ -162,8 +155,7 @@ int main() {
     CHECK(chord.feed(INSERT, 'z', emit) == Chord::Result::Pass);
 
     // a mode change drops a stale chord
-    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) ==
-          Chord::Result::Buffered);
+    CHECK(chord.feed(INSERT, ' ' | MOD_SHIFT, emit) == Chord::Result::Buffered);
     CHECK(chord.feed(REPLACE, 'a', emit) == Chord::Result::Pass);
     CHECK(!chord.pending());
 

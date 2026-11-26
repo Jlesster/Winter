@@ -3,8 +3,13 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    trux.url = "github:Jlesster/trux";
-    trux.inputs.nixpkgs.follows = "nixpkgs";
+
+    # pinning stable trux revision
+    trux = {
+      url = "github:Jlesster/trux/v0.2.0";
+      inputs.nixpkgs.follows = "nixpkgs";
+      flake = false;
+    };
 
     # same tags as subprojects/*.wrap
     ts-core = {

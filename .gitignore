@@ -1,6 +1,7 @@
 .cache/
 builddir/
 subprojects/tree-*/
+subprojects/trux/
 subprojects/.wraplock
 notes.md
 test.c

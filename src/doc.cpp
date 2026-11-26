@@ -161,8 +161,11 @@ std::string current_ft() {
     return std::string(b.syntax.lang());
 }
 
-// Installed docsets in search order: the buffer's filetype first.
-std::vector<std::string> search_order(std::string* hint = nullptr) {
+// Installed docsets in search order: the buffer's filetype first. `pref`, when
+// given, receives how many of them (the front of the list) belong to that
+// filetype: 0 means none do, and the whole list is fair game.
+std::vector<std::string> search_order(std::string* hint = nullptr,
+                                      size_t* pref = nullptr) {
     std::vector<std::string> all = installed_slugs(), order;
     const auto take = [&](const std::string& s) {
         if(std::ranges::find(order, s) == order.end()) order.push_back(s);
@@ -180,6 +183,7 @@ std::vector<std::string> search_order(std::string* hint = nullptr) {
         std::ranges::sort(m, std::greater<>());  // newest version first
         for(const std::string& s : m) take(s), found = true;
     }
+    if(pref) *pref = found ? order.size() : 0;
     if(hint && !bases.empty() && !found)
         *hint = "no " + std::string(bases.front()) + " docset: :DocInstall " +
                 std::string(bases.front());
@@ -461,14 +465,19 @@ void full_picker(const std::vector<std::string>& order,
 }
 
 // Member access with an unknown receiver: every entry whose last scope segment
-// is `member`, from the first docset that has any. One opens directly, several
-// open a picker holding only those, not the whole index.
+// is `member`. With `merge` (the docsets are all the buffer's language and its
+// libraries) the hits of every docset are pooled, libraries first, so
+// `df.rename` offers pandas next to os.rename; without it the first docset
+// that has any wins. One hit opens directly, several open a picker holding only
+// those, not the whole index.
 bool narrow_member(const std::string& member,
                    const std::vector<std::string>& order,
-                   bool html) {
-    for(const std::string& slug : order) {
+                   bool html,
+                   bool merge) {
+    std::vector<std::pair<const std::string*, const doc::Entry*>> hits;
+    const auto visit = [&](const std::string& slug) {
         const doc::Index* ix = index_for(slug);
-        if(!ix) continue;
+        if(!ix) return;
         auto [it, fresh] = g_suffix.try_emplace(slug);
         if(fresh) {
             const std::string_view sep = doc::lang_for(slug).sep;
@@ -479,22 +488,30 @@ bool narrow_member(const std::string& member,
                     std::string_view(e.name).substr(p + sep.size()), &e);
             }
         }
-        std::vector<const doc::Entry*> hits;
         std::set<std::string> seen;
         const auto [lo, hi] = it->second.equal_range(member);
         for(auto i = lo; i != hi; ++i)
-            if(seen.insert(i->second->target).second) hits.push_back(i->second);
-        if(hits.empty()) continue;
-        if(hits.size() == 1) {
-            open_entry(slug, *hits[0], html);
-            return true;
+            if(seen.insert(i->second->target).second)
+                hits.emplace_back(&slug, i->second);
+    };
+    if(merge) {
+        // the language's own docset is listed first, its libraries after it
+        for(auto s = order.rbegin(); s != order.rend(); ++s) visit(*s);
+    } else {
+        for(const std::string& s : order) {
+            visit(s);
+            if(!hits.empty()) break;
         }
-        std::vector<PickItem> items;
-        for(const doc::Entry* e : hits) items.push_back(pick_item(slug, *e));
-        open_picker(std::move(items), member, html);
+    }
+    if(hits.empty()) return false;
+    if(hits.size() == 1) {
+        open_entry(*hits[0].first, *hits[0].second, html);
         return true;
     }
-    return false;
+    std::vector<PickItem> items;
+    for(const auto& [slug, e] : hits) items.push_back(pick_item(*slug, *e));
+    open_picker(std::move(items), member, html);
+    return true;
 }
 
 // Plain text lookup: ":Doc fs::path::filename", or the text token under the
@@ -515,7 +532,8 @@ void lookup(const std::string& token, bool html) {
 // segment, then the picker.
 void lookup_query(const doc::Query& q, bool html) {
     std::string hint;
-    const std::vector<std::string> order = search_order(&hint);
+    size_t pref = 0;
+    const std::vector<std::string> order = search_order(&hint, &pref);
     if(order.empty()) {
         no_docsets(hint);
         return;
@@ -532,7 +550,15 @@ void lookup_query(const doc::Query& q, bool html) {
                q.cands.front().name,
                html))
         return;
-    if(!q.member.empty() && narrow_member(q.member, order, html)) return;
+    if(!q.member.empty()) {
+        // the receiver's type is unknown, so stay with the buffer's language
+        // and its libraries when any are installed: a python `df.rename` must
+        // not land on std::rename
+        const std::vector<std::string> scope(
+            order.begin(),
+            order.begin() + static_cast<std::ptrdiff_t>(pref ? pref : order.size()));
+        if(narrow_member(q.member, scope, html, pref > 0)) return;
+    }
     full_picker(order, q.seed, hint, html);
 }
 

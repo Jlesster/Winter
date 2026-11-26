@@ -6,12 +6,12 @@
 
 using namespace fold;
 static int fails = 0;
-#define CHECK(c)                                                     \
-    do {                                                             \
-        if(!(c)) {                                                   \
-            std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #c); \
-            ++fails;                                                 \
-        }                                                            \
+#define CHECK(c)                                                               \
+    do {                                                                       \
+        if(!(c)) {                                                             \
+            std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #c);           \
+            ++fails;                                                           \
+        }                                                                      \
     } while(0)
 
 // brute-force oracle for visible_row / line_at_row
@@ -41,15 +41,45 @@ int main() {
     // 8   }
     // 9 }
     {
-        auto n = normalize({{1, 3}, {3, 8}, {0, 9}, {5, 7}, {2, 2}, {4, 4}}, 1);
+        auto n = normalize(
+            {
+                {1, 3},
+                {3, 8},
+                {0, 9},
+                {5, 7},
+                {2, 2},
+                {4, 4}
+        },
+            1);
         // B {1,3} ends on C's head -> trimmed to 1-2; D {5,7}
-        CHECK((n == std::vector<Raw>{{0, 9}, {1, 2}, {3, 8}, {5, 7}}));
+        CHECK((n == std::vector<Raw>{
+                        {0, 9},
+                        {1, 2},
+                        {3, 8},
+                        {5, 7}
+        }));
         // same-start: outermost wins; partial overlap clipped
-        n = normalize({{2, 5}, {2, 9}, {4, 12}}, 1);
-        CHECK((n == std::vector<Raw>{{2, 9}, {4, 9}}));
+        n = normalize(
+            {
+                {2, 5 },
+                {2, 9 },
+                {4, 12}
+        },
+            1);
+        CHECK((n == std::vector<Raw>{
+                        {2, 9},
+                        {4, 9}
+        }));
         // minlines
-        n = normalize({{0, 1}, {3, 6}}, 2);
-        CHECK((n == std::vector<Raw>{{3, 6}}));
+        n = normalize(
+            {
+                {0, 1},
+                {3, 6}
+        },
+            2);
+        CHECK((n == std::vector<Raw>{
+                        {3, 6}
+        }));
     }
     {
         std::vector<int> ind = {0, 4, 8, 4, 8, 8, 12, 8, 4, 0};
@@ -57,15 +87,29 @@ int main() {
         auto n = normalize(f, 1);
         // fn 0-8, if 1-2 (closer line 3 at same indent starts else-if), else-if
         // 3-7, for 5-6
-        CHECK((n == std::vector<Raw>{{0, 8}, {1, 2}, {3, 7}, {5, 6}}));
+        CHECK((n == std::vector<Raw>{
+                        {0, 8},
+                        {1, 2},
+                        {3, 7},
+                        {5, 6}
+        }));
         // blank lines are skipped
         std::vector<int> i2 = {0, 4, -1, 4, 0};
         auto f2 = indent_folds(5, [&](int l) { return i2[l]; });
-        CHECK((f2 == std::vector<Raw>{{0, 3}}));
+        CHECK((f2 == std::vector<Raw>{
+                         {0, 3}
+        }));
     }
 
     State s;
-    s.set_ranges({{0, 9}, {1, 2}, {3, 8}, {5, 7}}, 1);
+    s.set_ranges(
+        {
+            {0, 9},
+            {1, 2},
+            {3, 8},
+            {5, 7}
+    },
+        1);
     CHECK(s.ranges().size() == 4);
     CHECK(s.ranges()[3].level == 2 && s.ranges()[3].parent == 2);
     CHECK(s.innermost(6) == 3 && s.innermost(4) == 2 && s.innermost(9) == 0);
@@ -97,9 +141,21 @@ int main() {
 
     // dormant anchor: range disappears (parse error), then returns
     CHECK(s.close(6));
-    s.set_ranges({{0, 9}, {1, 2}}, 1);
+    s.set_ranges(
+        {
+            {0, 9},
+            {1, 2}
+    },
+        1);
     CHECK(!s.any_closed() && s.is_anchor(5));
-    s.set_ranges({{0, 9}, {1, 2}, {3, 8}, {5, 7}}, 1);
+    s.set_ranges(
+        {
+            {0, 9},
+            {1, 2},
+            {3, 8},
+            {5, 7}
+    },
+        1);
     CHECK(s.hidden(6));
     s.open_all();
 
@@ -152,7 +208,12 @@ int main() {
     CHECK(before == s.anchors());
 
     // clamp
-    s.set_ranges({{0, 9}, {3, 8}}, 1);
+    s.set_ranges(
+        {
+            {0, 9},
+            {3, 8}
+    },
+        1);
     s.open_all();
     s.close_all();
     s.clamp_lines(6);

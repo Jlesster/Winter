@@ -18,8 +18,8 @@ static std::string run(std::string line, int64_t delta, num::Opts o = {}) {
     return line;
 }
 
-static void eq(const std::string& got, const std::string& want,
-               const char* what, int ln) {
+static void
+eq(const std::string& got, const std::string& want, const char* what, int ln) {
     ++g_run;
     if(got == want) return;
     ++g_fail;
@@ -30,17 +30,17 @@ static void eq(const std::string& got, const std::string& want,
                 want.c_str());
 }
 #define T(in, d, want) eq(run(in, d), want, in " " #d, __LINE__)
-#define TI(in, d, want)                                            \
-    do {                                                           \
-        num::Opts o_;                                              \
-        o_.int_only = true;                                        \
-        eq(run(in, d, o_), want, "int_only " in " " #d, __LINE__); \
+#define TI(in, d, want)                                                        \
+    do {                                                                       \
+        num::Opts o_;                                                          \
+        o_.int_only = true;                                                    \
+        eq(run(in, d, o_), want, "int_only " in " " #d, __LINE__);             \
     } while(0)
-#define TF(in, d, fmts, want)                                           \
-    do {                                                                \
-        num::Opts o_;                                                   \
-        o_.formats = *num::parse_formats(fmts);                         \
-        eq(run(in, d, o_), want, "fmts " fmts " " in " " #d, __LINE__); \
+#define TF(in, d, fmts, want)                                                  \
+    do {                                                                       \
+        num::Opts o_;                                                          \
+        o_.formats = *num::parse_formats(fmts);                                \
+        eq(run(in, d, o_), want, "fmts " fmts " " in " " #d, __LINE__);        \
     } while(0)
 
 int main() {

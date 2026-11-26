@@ -299,9 +299,6 @@ backed by a much larger Lua API and a more complete LSP client.
 - The Makefile. Build with Meson (`meson setup builddir && ninja -C builddir`).
 
 ### Known issues
-- Tests under `tests/lua`, `tests/marks`, `tests/reg`, `tests/ts` and
-  `tests/keymap`, plus `md_test` and `grapheme_test`, are not yet registered
-  with Meson, so `meson test` does not run them.
 - The Nix package builds with `doCheck = false` because `pty_test` needs
   `forkpty`.
 

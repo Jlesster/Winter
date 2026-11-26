@@ -26,8 +26,10 @@ int main() {
     CHECK(set_option("ts", "") == OptResult::BadValue);
     CHECK(set_option("ts", "-1") == OptResult::BadValue);
     CHECK(set_option("nonsense", "1") == OptResult::Unknown);
-    CHECK(set_option("cursor_insert", "6") == OptResult::Ok);
-    CHECK(set_option("cursor_insert", "7") == OptResult::BadValue);
+    CHECK(set_option("cursor", "i:bar") == OptResult::Ok &&
+          opts.cursor_insert.shape == CursorShape::Bar);
+    CHECK(set_option("cursor", "i:7") == OptResult::BadValue &&
+          opts.cursor_insert.shape == CursorShape::Bar);
 
     // bools
     for(const char* v : {"false", "0", "off", "no"}) {

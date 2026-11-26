@@ -14,3 +14,4 @@ ok(s:find('"', 1, true) == 1 and s:find("a", 1, true), "list: unnamed first, the
 ok(not pcall(r.get, "ab") and not pcall(r.set, "", "x") and not pcall(r.set, "a"), "argument checks")
 r.set("_", "gone"); ok(r.get("_") == nil, "black hole stays empty")
 print(("%d checks, %d failed"):format(n, fail))
+os.exit(fail == 0 and 0 or 1)

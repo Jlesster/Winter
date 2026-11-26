@@ -1,18 +1,18 @@
-#include "../src/grapheme.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
 #include <string>
 #include <vector>
+#include "../src/grapheme.hpp"
 
 static int fails = 0;
-#define CHECK(c)                                             \
-    do {                                                     \
-        if(!(c)) {                                           \
-            std::printf("FAIL line %d: %s\n", __LINE__, #c); \
-            ++fails;                                         \
-        }                                                    \
+#define CHECK(c)                                                               \
+    do {                                                                       \
+        if(!(c)) {                                                             \
+            std::printf("FAIL line %d: %s\n", __LINE__, #c);                   \
+            ++fails;                                                           \
+        }                                                                      \
     } while(0)
 
 static std::vector<std::string> clusters(std::string_view s) {

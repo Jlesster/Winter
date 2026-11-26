@@ -26,11 +26,12 @@ g++ -std=c++23 -I$src -I"$inc" $t/json_harness.cpp $src/script_json.cpp \
 
 # 4. winter.reg bindings against the real registers code (fake clipboard)
 g++ -std=c++23 -I$src -I"$inc" $t/reg_harness.cpp $src/script_reg.cpp $src/reg.cpp \
-    $lib -o "$WT/reg"
+    tests/test_stubs.cpp $lib -o "$WT/reg"
 "$WT/reg" $t/reg_test.lua
 
 # 5. register semantics: numbered shift, small delete, append, black hole, clipboard
-g++ -std=c++23 -I$src tests/reg/reg_test.cpp $src/reg.cpp -o "$WT/regsem"
+g++ -std=c++23 -I$src tests/reg/reg_test.cpp $src/reg.cpp tests/test_stubs.cpp \
+    -o "$WT/regsem"
 "$WT/regsem"
 
 # 6. marks core against the real PieceTable: anchors follow edits, file marks, ''

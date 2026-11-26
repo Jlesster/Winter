@@ -1,6 +1,8 @@
 #pragma once
 
-enum : int { MOD_SHIFT = 1 << 16, MOD_ALT = 1 << 17, MOD_CTRL = 1 << 18 };
+constexpr int MOD_SHIFT = 1 << 16;
+constexpr int MOD_ALT = 1 << 17;
+constexpr int MOD_CTRL = 1 << 18;
 constexpr int KEY_MODS = MOD_SHIFT | MOD_ALT | MOD_CTRL;
 constexpr int key_base(int k) { return k & ~KEY_MODS; }
 constexpr int key_mods(int k) { return k & KEY_MODS; }
